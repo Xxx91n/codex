@@ -1931,6 +1931,9 @@ impl ModelClientSession {
                 )
                 .await
             }
+            WireApi::Chat => Err(CodexErr::UnsupportedOperation(
+                "wire_api = \"chat\" transport is not implemented yet".to_string(),
+            )),
         }
     }
 
