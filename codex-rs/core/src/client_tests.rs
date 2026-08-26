@@ -1046,3 +1046,68 @@ async fn non_chatgpt_codex_endpoints_omit_attestation_generation() {
     );
     assert_eq!(attestation_calls.load(Ordering::Relaxed), 0);
 }
+
+#[test]
+fn map_chat_role_handles_known_and_unknown_roles() {
+    assert_eq!(super::map_chat_role("developer"), "system");
+    assert_eq!(super::map_chat_role("assistant"), "assistant");
+    assert_eq!(super::map_chat_role("unknown-role"), "user");
+}
+
+#[test]
+fn build_chat_messages_serializes_tool_roundtrip_items() {
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::FunctionCallOutputPayload;
+    use codex_protocol::models::ResponseItem;
+    use serde_json::json;
+
+    let input = vec![
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "hello".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: r#"{"cmd":"pwd"}"#.to_string(),
+            encrypted_function_args: None,
+            call_id: "call_1".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("call_1".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("ok".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+
+    let messages = super::build_chat_messages("be helpful", input);
+    assert_eq!(
+        messages,
+        vec![
+            json!({"role":"system","content":"be helpful"}),
+            json!({"role":"user","content":"hello"}),
+            json!({
+                "role":"assistant",
+                "content":"",
+                "tool_calls":[
+                    {
+                        "id":"call_1",
+                        "type":"function",
+                        "function":{"name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"}
+                    }
+                ]
+            }),
+            json!({"role":"tool","tool_call_id":"call_1","content":"ok"}),
+        ]
+    );
+}

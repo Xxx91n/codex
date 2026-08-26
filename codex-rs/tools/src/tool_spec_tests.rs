@@ -8,6 +8,7 @@ use crate::FreeformToolFormat;
 use crate::JsonSchema;
 use crate::ResponsesApiNamespaceTool;
 use crate::ResponsesApiTool;
+use crate::create_tools_json_for_chat_completions;
 use crate::create_tools_json_for_responses_api;
 use crate::create_tools_json_for_responses_lite;
 use crate::create_tools_raw_json_for_responses_api;
@@ -409,5 +410,84 @@ fn tool_search_tool_spec_serializes_expected_wire_shape() {
                 "additionalProperties": false,
             },
         })
+    );
+}
+
+#[test]
+fn chat_completions_tools_use_nested_function_shape() {
+    let properties =
+        BTreeMap::from([("foo".to_string(), JsonSchema::string(/*description*/ None))]);
+    let tools = vec![ToolSpec::Function(ResponsesApiTool {
+        name: "demo".to_string(),
+        description: "A demo tool".to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            /*required*/ None,
+            /*additional_properties*/ None,
+        ),
+        output_schema: None,
+    })];
+
+    let chat_json = create_tools_json_for_chat_completions(&tools).unwrap();
+    assert_eq!(
+        chat_json,
+        vec![json!({
+            "type": "function",
+            "function": {
+                "name": "demo",
+                "description": "A demo tool",
+                "strict": false,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "foo": { "type": "string" }
+                    },
+                },
+            },
+        })]
+    );
+}
+
+#[test]
+fn chat_completions_skips_non_function_tools() {
+    let tools = vec![ToolSpec::WebSearch {
+        external_web_access: Some(true),
+        indexed_web_access: None,
+        filters: None,
+        user_location: None,
+        search_context_size: None,
+        search_content_types: None,
+    }];
+
+    let chat_json = create_tools_json_for_chat_completions(&tools).unwrap();
+    assert!(chat_json.is_empty());
+}
+
+#[test]
+fn chat_completions_maps_freeform_tool_to_function_input_param() {
+    let tools = vec![ToolSpec::Freeform(FreeformTool {
+        name: "apply_patch".to_string(),
+        description: "Apply a patch".to_string(),
+        defer_loading: None,
+        format: FreeformToolFormat {
+            r#type: "grammar".to_string(),
+            syntax: "*** Begin Patch ... *** End Patch".to_string(),
+            definition: "Lark grammar".to_string(),
+        },
+    })];
+
+    let chat_json = create_tools_json_for_chat_completions(&tools).unwrap();
+    assert_eq!(chat_json.len(), 1);
+    assert_eq!(chat_json[0]["type"], json!("function"));
+    assert_eq!(chat_json[0]["function"]["name"], json!("apply_patch"));
+    assert_eq!(
+        chat_json[0]["function"]["parameters"]["required"],
+        json!(["input"])
+    );
+    assert_eq!(
+        chat_json[0]["function"]["parameters"]["properties"]["input"]["type"],
+        json!("string")
     );
 }

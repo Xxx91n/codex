@@ -141,6 +141,95 @@ pub fn create_tools_json_for_responses_lite(
     Ok(tools_json)
 }
 
+/// Returns JSON values that are compatible with Function Calling in Chat
+/// Completions APIs. Fork addition: upstream codex removed the chat wire; this
+/// mirrors the PR #12234 blueprint so chat-only providers keep tool calling.
+pub fn create_tools_json_for_chat_completions(
+    tools: &[ToolSpec],
+) -> Result<Vec<Value>, serde_json::Error> {
+    let mut tools_json = Vec::new();
+
+    for tool in tools {
+        match tool {
+            ToolSpec::Function(function) => {
+                tools_json.push(chat_completions_function_tool_json(function));
+            }
+            ToolSpec::Freeform(freeform) => {
+                let input_description = format!(
+                    "{}\n\nSyntax: {}\n\n{}",
+                    freeform.description, freeform.format.syntax, freeform.format.definition
+                );
+                tools_json.push(serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": freeform.name,
+                        "description": freeform.description,
+                        "strict": false,
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "input": {
+                                    "type": "string",
+                                    "description": input_description
+                                }
+                            },
+                            "required": ["input"],
+                            "additionalProperties": false
+                        }
+                    }
+                }));
+            }
+            ToolSpec::Namespace(namespace) => {
+                // Chat Completions has no namespace concept: expand the namespace
+                // into individually flattened function tools.
+                for tool in &namespace.tools {
+                    match tool {
+                        crate::ResponsesApiNamespaceTool::Function(function) => {
+                            tools_json.push(chat_completions_function_tool_json(function));
+                        }
+                        crate::ResponsesApiNamespaceTool::Custom(freeform) => {
+                            tools_json.push(serde_json::json!({
+                                "type": "function",
+                                "function": {
+                                    "name": freeform.name,
+                                    "description": freeform.description,
+                                    "strict": false,
+                                    "parameters": {
+                                        "type": "object",
+                                        "properties": {
+                                            "input": {"type": "string"}
+                                        },
+                                        "required": ["input"],
+                                        "additionalProperties": false
+                                    }
+                                }
+                            }));
+                        }
+                    }
+                }
+            }
+            ToolSpec::ToolSearch { .. } | ToolSpec::WebSearch { .. } => {
+                // Chat Completions only accepts function tools; skip responses-only
+                // tools that have no function equivalent.
+            }
+        }
+    }
+
+    Ok(tools_json)
+}
+
+fn chat_completions_function_tool_json(function: &ResponsesApiTool) -> serde_json::Value {
+    serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": function.name,
+            "description": function.description,
+            "parameters": function.parameters,
+            "strict": function.strict,
+        }
+    })
+}
+
 /// Returns raw JSON that can be embedded directly in a Responses API request.
 pub fn create_tools_raw_json_for_responses_api(
     tools: &[ToolSpec],
