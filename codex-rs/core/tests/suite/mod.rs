@@ -1,3 +1,4 @@
+mod chat_wiremock;
 // Aggregates all former standalone integration tests as modules.
 use codex_apply_patch::CODEX_CORE_APPLY_PATCH_ARG1;
 #[cfg(unix)]

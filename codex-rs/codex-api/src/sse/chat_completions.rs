@@ -137,6 +137,7 @@ async fn process_chat_sse(
     let mut response_id: Option<String> = None;
     let mut usage: Option<TokenUsage> = None;
     let mut assistant_text = String::new();
+    let mut assistant_item_open = false;
     let mut tool_calls: Vec<AggregatedToolCall> = Vec::new();
     let mut last_server_model: Option<String> = None;
 
@@ -216,8 +217,23 @@ async fn process_chat_sse(
         for choice in event.choices {
             let _ = choice.index;
             if let Some(content) = choice.delta.content {
+                if !assistant_item_open {
+                    let msg = ResponseItem::Message {
+                        id: None,
+                        role: "assistant".to_string(),
+                        content: vec![],
+                        phase: None,
+                        internal_chat_message_metadata_passthrough: None,
+                    };
+                    let _ = tx_event
+                        .send(Ok(ResponseEvent::OutputItemAdded(msg)))
+                        .await;
+                    assistant_item_open = true;
+                }
                 assistant_text.push_str(&content);
-                let _ = tx_event.send(Ok(ResponseEvent::OutputTextDelta(content))).await;
+                let _ = tx_event
+                    .send(Ok(ResponseEvent::OutputTextDelta(content)))
+                    .await;
             }
             if let Some(delta_tool_calls) = choice.delta.tool_calls {
                 merge_tool_call_deltas(&mut tool_calls, delta_tool_calls);
