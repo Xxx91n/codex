@@ -1055,6 +1055,49 @@ fn map_chat_role_handles_known_and_unknown_roles() {
 }
 
 #[test]
+fn build_chat_request_omits_responses_only_fields() {
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseItem;
+
+    // T05 degradation: the chat wire body must never carry Responses-only
+    // controls (store / previous_response_id / reasoning / include).
+    let client = test_model_client(SessionSource::Cli);
+    let prompt = Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "hello".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }],
+        ..Default::default()
+    };
+    let model_info = test_model_info();
+
+    let request = client
+        .new_session()
+        .build_chat_request(&prompt, &model_info)
+        .expect("chat request should build");
+    let obj = request.as_object().expect("request should be an object");
+    for field in [
+        "store",
+        "previous_response_id",
+        "reasoning",
+        "include",
+        "cache_control",
+    ] {
+        assert!(
+            !obj.contains_key(field),
+            "chat request must not contain responses-only field `{field}`"
+        );
+    }
+    assert_eq!(obj["model"], "gpt-test");
+    assert_eq!(obj["stream"], true);
+}
+
+#[test]
 fn build_chat_messages_serializes_tool_roundtrip_items() {
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::FunctionCallOutputPayload;
