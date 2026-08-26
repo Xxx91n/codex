@@ -1098,6 +1098,119 @@ fn build_chat_request_omits_responses_only_fields() {
 }
 
 #[test]
+fn build_messages_messages_serializes_tool_roundtrip_items() {
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::FunctionCallOutputPayload;
+    use codex_protocol::models::ResponseItem;
+    use serde_json::json;
+
+    let input = vec![
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "hello".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: r#"{"cmd":"pwd"}"#.to_string(),
+            encrypted_function_args: None,
+            call_id: "toolu_1".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "notify".to_string(),
+            namespace: None,
+            arguments: String::new(),
+            encrypted_function_args: None,
+            call_id: "toolu_2".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("toolu_1".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("ok".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("toolu_2".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("sent".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+
+    let messages = super::build_messages_messages("be helpful", input);
+    assert_eq!(
+        messages,
+        vec![
+            json!({
+                "role": "user",
+                "content": [{"type": "text", "text": "hello"}],
+            }),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "exec_command",
+                        "input": {"cmd": "pwd"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_2",
+                        "name": "notify",
+                        // no-argument tools must serialize input as {}
+                        "input": {},
+                    },
+                ],
+            }),
+            json!({
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
+                    {"type": "tool_result", "tool_use_id": "toolu_2", "content": "sent"},
+                ],
+            }),
+        ]
+    );
+}
+
+#[test]
+fn build_messages_request_uses_top_level_system_and_max_tokens() {
+    let client = test_model_client(SessionSource::Cli);
+    let prompt = Prompt::default();
+    let model_info = test_model_info();
+
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &model_info)
+        .expect("messages request should build");
+    let obj = request.as_object().expect("request should be an object");
+    assert_eq!(obj["model"], "gpt-test");
+    assert_eq!(obj["stream"], true);
+    assert!(obj["max_tokens"].is_u64());
+    assert!(obj.contains_key("system"));
+    for field in ["store", "previous_response_id", "reasoning", "include"] {
+        assert!(
+            !obj.contains_key(field),
+            "messages request must not contain responses-only field `{field}`"
+        );
+    }
+}
+
+#[test]
 fn build_chat_messages_serializes_tool_roundtrip_items() {
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::FunctionCallOutputPayload;

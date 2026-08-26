@@ -307,6 +307,9 @@ fn proto_wire_api(wire_api: WireApi) -> proto::WireApi {
     match wire_api {
         WireApi::Responses => proto::WireApi::Responses,
         WireApi::Chat => proto::WireApi::Chat,
+        // The upstream proto has no Anthropic variant (regenerating protos is
+        // out of scope for this fork); this test-only helper maps it to Chat.
+        WireApi::Anthropic => proto::WireApi::Chat,
     }
 }
 

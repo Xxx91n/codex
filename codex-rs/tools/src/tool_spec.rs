@@ -277,6 +277,84 @@ impl From<ConfigWebSearchUserLocation> for ResponsesApiWebSearchUserLocation {
     }
 }
 
+/// Returns JSON values that are compatible with tool use in the Anthropic
+/// Messages API. Fork addition (goose-blueprint transport): function tools map
+/// to `{"name", "description", "input_schema"}` blocks; freeform tools wrap
+/// their payload into a single `input` string parameter.
+pub fn create_tools_json_for_anthropic(
+    tools: &[ToolSpec],
+) -> Result<Vec<Value>, serde_json::Error> {
+    let mut tools_json = Vec::new();
+
+    for tool in tools {
+        match tool {
+            ToolSpec::Function(function) => {
+                tools_json.push(anthropic_tool_json(function));
+            }
+            ToolSpec::Freeform(freeform) => {
+                let input_description = format!(
+                    "{}\n\nSyntax: {}\n\n{}",
+                    freeform.description, freeform.format.syntax, freeform.format.definition
+                );
+                tools_json.push(serde_json::json!({
+                    "name": freeform.name,
+                    "description": freeform.description,
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "input": {
+                                "type": "string",
+                                "description": input_description
+                            }
+                        },
+                        "required": ["input"],
+                        "additionalProperties": false
+                    }
+                }));
+            }
+            ToolSpec::Namespace(namespace) => {
+                // The Messages API has no namespace concept: expand the
+                // namespace into individually flattened tools.
+                for tool in &namespace.tools {
+                    match tool {
+                        crate::ResponsesApiNamespaceTool::Function(function) => {
+                            tools_json.push(anthropic_tool_json(function));
+                        }
+                        crate::ResponsesApiNamespaceTool::Custom(freeform) => {
+                            tools_json.push(serde_json::json!({
+                                "name": freeform.name,
+                                "description": freeform.description,
+                                "input_schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "input": {"type": "string"}
+                                    },
+                                    "required": ["input"],
+                                    "additionalProperties": false
+                                }
+                            }));
+                        }
+                    }
+                }
+            }
+            ToolSpec::ToolSearch { .. } | ToolSpec::WebSearch { .. } => {
+                // The Messages API accepts function-shaped tools only; skip
+                // responses-only tools that have no function equivalent.
+            }
+        }
+    }
+
+    Ok(tools_json)
+}
+
+fn anthropic_tool_json(function: &ResponsesApiTool) -> serde_json::Value {
+    serde_json::json!({
+        "name": function.name,
+        "description": function.description,
+        "input_schema": function.parameters,
+    })
+}
+
 #[cfg(test)]
 #[path = "tool_spec_tests.rs"]
 mod tests;

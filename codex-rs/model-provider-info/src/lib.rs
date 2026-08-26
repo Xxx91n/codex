@@ -69,6 +69,11 @@ pub enum WireApi {
     /// Removed upstream; restored in this fork for OpenAI-compatible
     /// chat-only upstreams. Transport not implemented yet.
     Chat,
+    /// The Anthropic Messages API at `/v1/messages`.
+    ///
+    /// Fork addition (goose-blueprint transport) so anthropic-native upstreams
+    /// work in-process without an external translation layer.
+    Anthropic,
 }
 
 impl fmt::Display for WireApi {
@@ -76,6 +81,7 @@ impl fmt::Display for WireApi {
         let value = match self {
             Self::Responses => "responses",
             Self::Chat => "chat",
+            Self::Anthropic => "anthropic",
         };
         f.write_str(value)
     }
@@ -90,7 +96,11 @@ impl<'de> Deserialize<'de> for WireApi {
         match value.as_str() {
             "responses" => Ok(Self::Responses),
             "chat" => Ok(Self::Chat),
-            _ => Err(serde::de::Error::unknown_variant(&value, &["responses", "chat"])),
+            "anthropic" => Ok(Self::Anthropic),
+            _ => Err(serde::de::Error::unknown_variant(
+                &value,
+                &["responses", "chat", "anthropic"],
+            )),
         }
     }
 }
