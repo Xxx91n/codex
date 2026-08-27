@@ -308,8 +308,10 @@ fn proto_wire_api(wire_api: WireApi) -> proto::WireApi {
         WireApi::Responses => proto::WireApi::Responses,
         WireApi::Chat => proto::WireApi::Chat,
         // The upstream proto has no Anthropic variant (regenerating protos is
-        // out of scope for this fork); this test-only helper maps it to Chat.
-        WireApi::Anthropic => proto::WireApi::Chat,
+        // out of scope for this fork). Map to Unspecified so a misuse fails
+        // loudly at parse time instead of silently downgrading Anthropic to
+        // Chat on a remote-config round-trip.
+        WireApi::Anthropic => proto::WireApi::Unspecified,
     }
 }
 

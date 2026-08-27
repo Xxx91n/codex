@@ -45,8 +45,6 @@ struct ChatChoice {
     delta: ChatDelta,
     #[serde(default)]
     finish_reason: Option<String>,
-    #[serde(default)]
-    index: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -140,6 +138,7 @@ async fn process_chat_sse(
     let mut assistant_item_open = false;
     let mut tool_calls: Vec<AggregatedToolCall> = Vec::new();
     let mut last_server_model: Option<String> = None;
+    let mut length_truncated = false;
 
     loop {
         let start = Instant::now();
@@ -171,14 +170,18 @@ async fn process_chat_sse(
         };
 
         if sse.data.trim() == "[DONE]" {
-            emit_chat_completion_items(
+            if let Err(err) = emit_chat_completion_items(
                 &tx_event,
                 &assistant_text,
                 &tool_calls,
                 response_id.unwrap_or_default(),
                 usage,
+                length_truncated,
             )
-            .await;
+            .await
+            {
+                let _ = tx_event.send(Err(err)).await;
+            }
             return;
         }
 
@@ -215,7 +218,6 @@ async fn process_chat_sse(
         }
 
         for choice in event.choices {
-            let _ = choice.index;
             if let Some(content) = choice.delta.content {
                 if !assistant_item_open {
                     let msg = ResponseItem::Message {
@@ -225,9 +227,7 @@ async fn process_chat_sse(
                         phase: None,
                         internal_chat_message_metadata_passthrough: None,
                     };
-                    let _ = tx_event
-                        .send(Ok(ResponseEvent::OutputItemAdded(msg)))
-                        .await;
+                    let _ = tx_event.send(Ok(ResponseEvent::OutputItemAdded(msg))).await;
                     assistant_item_open = true;
                 }
                 assistant_text.push_str(&content);
@@ -238,7 +238,12 @@ async fn process_chat_sse(
             if let Some(delta_tool_calls) = choice.delta.tool_calls {
                 merge_tool_call_deltas(&mut tool_calls, delta_tool_calls);
             }
-            let _ = choice.finish_reason;
+            // A `length` finish means the upstream truncated output; surface it
+            // as context-window exhaustion so core's retry/auto-compact path
+            // engages instead of treating the truncated turn as complete.
+            if choice.finish_reason.as_deref() == Some("length") {
+                length_truncated = true;
+            }
         }
     }
 }
@@ -277,7 +282,16 @@ async fn emit_chat_completion_items(
     tool_calls: &[AggregatedToolCall],
     response_id: String,
     usage: Option<TokenUsage>,
-) {
+    length_truncated: bool,
+) -> Result<(), ApiError> {
+    // A truncated turn has no faithful replay: surface context-window
+    // exhaustion (the Responses-path semantics) rather than emitting partial
+    // items as if the turn completed.
+    if length_truncated {
+        debug!("chat completions stream finished with finish_reason=length");
+        return Err(ApiError::ContextWindowExceeded);
+    }
+
     for (index, call) in tool_calls.iter().enumerate() {
         if call.name.trim().is_empty() {
             continue;
@@ -300,7 +314,7 @@ async fn emit_chat_completion_items(
             .await
             .is_err()
         {
-            return;
+            return Ok(());
         }
     }
 
@@ -319,7 +333,7 @@ async fn emit_chat_completion_items(
             .await
             .is_err()
         {
-            return;
+            return Ok(());
         }
     }
 
@@ -330,96 +344,9 @@ async fn emit_chat_completion_items(
             end_turn: Some(true),
         }))
         .await;
+    Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn merge_tool_call_deltas_concatenates_partial_chunks() {
-        let mut aggregated = Vec::new();
-        merge_tool_call_deltas(
-            &mut aggregated,
-            vec![ChatToolCallDelta {
-                index: Some(0),
-                id: Some("call_1".to_string()),
-                function: Some(ChatFunctionDelta {
-                    name: Some("exec_".to_string()),
-                    arguments: Some("{\"cmd\":\"".to_string()),
-                }),
-            }],
-        );
-        merge_tool_call_deltas(
-            &mut aggregated,
-            vec![ChatToolCallDelta {
-                index: Some(0),
-                id: None,
-                function: Some(ChatFunctionDelta {
-                    name: Some("command".to_string()),
-                    arguments: Some("pwd\"}".to_string()),
-                }),
-            }],
-        );
-
-        assert_eq!(aggregated.len(), 1);
-        assert_eq!(aggregated[0].id.as_deref(), Some("call_1"));
-        assert_eq!(aggregated[0].name, "exec_command");
-        assert_eq!(aggregated[0].arguments, "{\"cmd\":\"pwd\"}");
-    }
-
-    #[tokio::test]
-    async fn emit_chat_completion_items_emits_tool_message_and_completed() {
-        let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent, ApiError>>(8);
-        let tool_calls = vec![AggregatedToolCall {
-            id: Some("call_1".to_string()),
-            name: "exec_command".to_string(),
-            arguments: "{\"cmd\":\"pwd\"}".to_string(),
-        }];
-
-        emit_chat_completion_items(&tx, "done", &tool_calls, "resp_1".to_string(), None).await;
-
-        let first = rx.recv().await.expect("event").expect("ok event");
-        let second = rx.recv().await.expect("event").expect("ok event");
-        let third = rx.recv().await.expect("event").expect("ok event");
-
-        match first {
-            ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
-                name,
-                call_id,
-                arguments,
-                ..
-            }) => {
-                assert_eq!(name, "exec_command");
-                assert_eq!(call_id, "call_1");
-                assert_eq!(arguments, "{\"cmd\":\"pwd\"}");
-            }
-            other => panic!("unexpected first event: {other:?}"),
-        }
-
-        match second {
-            ResponseEvent::OutputItemDone(ResponseItem::Message { role, content, .. }) => {
-                assert_eq!(role, "assistant");
-                assert_eq!(
-                    content,
-                    vec![ContentItem::OutputText {
-                        text: "done".to_string(),
-                    }]
-                );
-            }
-            other => panic!("unexpected second event: {other:?}"),
-        }
-
-        match third {
-            ResponseEvent::Completed {
-                response_id,
-                end_turn,
-                ..
-            } => {
-                assert_eq!(response_id, "resp_1");
-                assert_eq!(end_turn, Some(true));
-            }
-            other => panic!("unexpected third event: {other:?}"),
-        }
-    }
-}
+#[path = "chat_completions_tests.rs"]
+mod tests;

@@ -341,9 +341,9 @@ impl ModelProvider for ConfiguredModelProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         // Remote compaction is only available on the Responses wire protocol.
-        // A provider whose wire_api is Chat would otherwise claim V2 support and
-        // fail at runtime on /responses/compact; it must fall back to local
-        // summarize instead (CONTEXT.md degradation table).
+        // A provider on a non-Responses wire (chat/anthropic) would otherwise
+        // claim V2 support and fail at runtime on /responses/compact; it must
+        // fall back to local summarize instead (CONTEXT.md degradation table).
         let remote_compaction = if self.info.wire_api == WireApi::Responses
             && (self.info.is_openai()
                 || is_azure_responses_provider(&self.info.name, self.info.base_url.as_deref()))
@@ -1202,15 +1202,18 @@ mod tests {
 
     #[test]
     fn capabilities_remote_compaction_follows_wire_api() {
-        // Chat wire has no /responses/compact endpoint: even an OpenAI-named
-        // provider must degrade to the local summarize fallback.
-        let mut chat_info = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
-        chat_info.wire_api = WireApi::Chat;
-        let chat_provider = ConfiguredModelProvider::new(chat_info, /*auth_manager*/ None);
-        assert_eq!(
-            chat_provider.capabilities().remote_compaction,
-            RemoteCompactionSupport::Unsupported
-        );
+        // Non-responses wires have no /responses/compact endpoint: even an
+        // OpenAI-named provider must degrade to the local summarize fallback.
+        for wire_api in [WireApi::Chat, WireApi::Anthropic] {
+            let mut info = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+            info.wire_api = wire_api;
+            let provider = ConfiguredModelProvider::new(info, /*auth_manager*/ None);
+            assert_eq!(
+                provider.capabilities().remote_compaction,
+                RemoteCompactionSupport::Unsupported,
+                "wire_api={wire_api} must not claim remote compaction"
+            );
+        }
 
         let responses_info = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
         let responses_provider =

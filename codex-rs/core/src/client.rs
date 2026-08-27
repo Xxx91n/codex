@@ -91,8 +91,8 @@ use codex_protocol::protocol::W3cTraceContext;
 use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::InferenceTraceAttempt;
 use codex_rollout_trace::InferenceTraceContext;
-use codex_tools::create_tools_json_for_chat_completions;
 use codex_tools::create_tools_json_for_anthropic;
+use codex_tools::create_tools_json_for_chat_completions;
 use codex_tools::create_tools_json_for_responses_api;
 use codex_tools::create_tools_json_for_responses_lite;
 use codex_tools::create_tools_raw_json_for_responses_api;
@@ -102,8 +102,8 @@ use futures::StreamExt;
 use http::HeaderMap as ApiHeaderMap;
 use http::HeaderValue;
 use http::StatusCode;
-use std::time::Duration;
 use serde_json::json;
+use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -111,6 +111,7 @@ use tokio::sync::oneshot::error::TryRecvError;
 use tokio_tungstenite::tungstenite::Error;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
 use tracing::instrument;
 use tracing::trace;
 use tracing::warn;
@@ -173,6 +174,10 @@ const CHAT_COMPLETIONS_ENDPOINT: &str = "/chat/completions";
 const ANTHROPIC_MESSAGES_ENDPOINT: &str = "/messages";
 /// Built-in budget used when the provider cannot tell us a max; the Messages
 /// API requires max_tokens on every request.
+// ponytail: fixed 8192-token output budget truncates long Claude turns
+// (stop_reason=max_tokens now surfaces loudly via sse/messages.rs). upgrade:
+// source per-model max_output_tokens from model/provider config when anthropic
+// deployments need longer turns.
 const DEFAULT_ANTHROPIC_MAX_TOKENS: u32 = 8_192;
 const RESPONSES_COMPACT_ENDPOINT: &str = "/responses/compact";
 // `/responses/compact` is unary, so the timeout covers the full response rather than one idle
@@ -1611,7 +1616,7 @@ impl ModelClientSession {
         model_info: &ModelInfo,
         session_telemetry: &SessionTelemetry,
         responses_metadata: &CodexResponsesMetadata,
-        _inference_trace: &InferenceTraceContext,
+        inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
         let auth_manager = self.client.state.provider.auth_manager();
         let mut auth_recovery = auth_manager
@@ -1644,7 +1649,7 @@ impl ModelClientSession {
                     /*use_responses_lite*/ false,
                 )
                 .await;
-            let options = ApiChatCompletionsOptions {
+            let mut options = ApiChatCompletionsOptions {
                 session_id: responses_options.session_id,
                 thread_id: responses_options.thread_id,
                 session_source: responses_options.session_source,
@@ -1659,13 +1664,16 @@ impl ModelClientSession {
                 client_setup.api_auth,
             )
             .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
+            let inference_trace_attempt = inference_trace.start_attempt();
+            inference_trace_attempt.add_request_headers(&mut options.extra_headers);
+            inference_trace_attempt.record_started(&request);
 
             match client.stream_request(request, options).await {
                 Ok(stream) => {
                     let (stream, _) = map_response_stream(
                         stream,
                         session_telemetry.clone(),
-                        InferenceTraceAttempt::disabled(),
+                        inference_trace_attempt,
                         Arc::clone(&self.client.state.provider),
                     );
                     return Ok(stream);
@@ -1677,6 +1685,13 @@ impl ModelClientSession {
                         .provider
                         .is_recoverable_auth_error(&unauthorized_transport) =>
                 {
+                    let response_debug_context =
+                        extract_response_debug_context(&unauthorized_transport);
+                    inference_trace_attempt.record_failed(
+                        &unauthorized_transport,
+                        response_debug_context.request_id.as_deref(),
+                        /*output_items*/ &[],
+                    );
                     pending_retry = PendingUnauthorizedRetry::from_recovery(
                         handle_unauthorized(
                             unauthorized_transport,
@@ -1689,7 +1704,17 @@ impl ModelClientSession {
                     );
                     continue;
                 }
-                Err(err) => return Err(self.client.state.provider.map_api_error(err)),
+                Err(err) => {
+                    let response_debug_context =
+                        extract_response_debug_context_from_api_error(&err);
+                    let err = self.client.state.provider.map_api_error(err);
+                    inference_trace_attempt.record_failed(
+                        &err,
+                        response_debug_context.request_id.as_deref(),
+                        /*output_items*/ &[],
+                    );
+                    return Err(err);
+                }
             }
         }
     }
@@ -1700,7 +1725,11 @@ impl ModelClientSession {
     /// Chat Completions has no Responses-only controls (store, prompt-cache,
     /// reasoning, include); those degrade away per CONTEXT.md's degradation
     /// table.
-    fn build_chat_request(&self, prompt: &Prompt, model_info: &ModelInfo) -> Result<serde_json::Value> {
+    fn build_chat_request(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+    ) -> Result<serde_json::Value> {
         let instructions = &prompt.base_instructions.text;
         let input = prompt.get_formatted_input_for_request(/*use_responses_lite*/ false);
         let messages = build_chat_messages(instructions, input);
@@ -1715,7 +1744,9 @@ impl ModelClientSession {
             }
         });
 
-        if !tools.is_empty() && let Some(obj) = request.as_object_mut() {
+        if !tools.is_empty()
+            && let Some(obj) = request.as_object_mut()
+        {
             obj.insert("tools".to_string(), serde_json::Value::Array(tools));
             obj.insert(
                 "tool_choice".to_string(),
@@ -1740,7 +1771,7 @@ impl ModelClientSession {
         model_info: &ModelInfo,
         session_telemetry: &SessionTelemetry,
         responses_metadata: &CodexResponsesMetadata,
-        _inference_trace: &InferenceTraceContext,
+        inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
         let auth_manager = self.client.state.provider.auth_manager();
         let mut auth_recovery = auth_manager
@@ -1773,7 +1804,7 @@ impl ModelClientSession {
                     /*use_responses_lite*/ false,
                 )
                 .await;
-            let options = ApiMessagesOptions {
+            let mut options = ApiMessagesOptions {
                 session_id: responses_options.session_id,
                 thread_id: responses_options.thread_id,
                 session_source: responses_options.session_source,
@@ -1782,19 +1813,19 @@ impl ModelClientSession {
             };
 
             let request = self.build_messages_request(prompt, model_info)?;
-            let client = ApiMessagesClient::new(
-                transport,
-                client_setup.api_provider,
-                client_setup.api_auth,
-            )
-            .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
+            let client =
+                ApiMessagesClient::new(transport, client_setup.api_provider, client_setup.api_auth)
+                    .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
+            let inference_trace_attempt = inference_trace.start_attempt();
+            inference_trace_attempt.add_request_headers(&mut options.extra_headers);
+            inference_trace_attempt.record_started(&request);
 
             match client.stream_request(request, options).await {
                 Ok(stream) => {
                     let (stream, _) = map_response_stream(
                         stream,
                         session_telemetry.clone(),
-                        InferenceTraceAttempt::disabled(),
+                        inference_trace_attempt,
                         Arc::clone(&self.client.state.provider),
                     );
                     return Ok(stream);
@@ -1806,6 +1837,13 @@ impl ModelClientSession {
                         .provider
                         .is_recoverable_auth_error(&unauthorized_transport) =>
                 {
+                    let response_debug_context =
+                        extract_response_debug_context(&unauthorized_transport);
+                    inference_trace_attempt.record_failed(
+                        &unauthorized_transport,
+                        response_debug_context.request_id.as_deref(),
+                        /*output_items*/ &[],
+                    );
                     pending_retry = PendingUnauthorizedRetry::from_recovery(
                         handle_unauthorized(
                             unauthorized_transport,
@@ -1818,7 +1856,17 @@ impl ModelClientSession {
                     );
                     continue;
                 }
-                Err(err) => return Err(self.client.state.provider.map_api_error(err)),
+                Err(err) => {
+                    let response_debug_context =
+                        extract_response_debug_context_from_api_error(&err);
+                    let err = self.client.state.provider.map_api_error(err);
+                    inference_trace_attempt.record_failed(
+                        &err,
+                        response_debug_context.request_id.as_deref(),
+                        /*output_items*/ &[],
+                    );
+                    return Err(err);
+                }
             }
         }
     }
@@ -1837,7 +1885,7 @@ impl ModelClientSession {
     ) -> Result<serde_json::Value> {
         let instructions = &prompt.base_instructions.text;
         let input = prompt.get_formatted_input_for_request(/*use_responses_lite*/ false);
-        let messages = build_messages_messages(instructions, input);
+        let messages = build_messages_messages(input);
         let tools = create_tools_json_for_anthropic(&prompt.tools)?;
 
         let mut request = json!({
@@ -2850,8 +2898,14 @@ impl WebsocketTelemetry for ApiTelemetry {
 
 /// Converts Responses-shaped conversation items into Chat Completions
 /// messages (fork addition, adapted from PR #12234).
+///
+/// Consecutive tool calls are coalesced into a single assistant `tool_calls`
+/// array: strict OpenAI-compatible servers reject a replay that splits
+/// parallel calls across multiple assistant messages (HTTP 400, "must be
+/// followed by tool messages"), per the official function-calling guide.
 fn build_chat_messages(instructions: &str, input: Vec<ResponseItem>) -> Vec<serde_json::Value> {
     let mut messages = Vec::new();
+    let mut pending_tool_calls: Vec<serde_json::Value> = Vec::new();
 
     if !instructions.trim().is_empty() {
         messages.push(json!({
@@ -2860,9 +2914,22 @@ fn build_chat_messages(instructions: &str, input: Vec<ResponseItem>) -> Vec<serd
         }));
     }
 
+    macro_rules! flush_tool_calls {
+        () => {
+            if !pending_tool_calls.is_empty() {
+                messages.push(json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": std::mem::take(&mut pending_tool_calls),
+                }));
+            }
+        };
+    }
+
     for item in input {
         match item {
             ResponseItem::Message { role, content, .. } => {
+                flush_tool_calls!();
                 if let Some(text) = content_items_to_text(&content) {
                     messages.push(json!({
                         "role": map_chat_role(&role),
@@ -2875,42 +2942,29 @@ fn build_chat_messages(instructions: &str, input: Vec<ResponseItem>) -> Vec<serd
                 arguments,
                 call_id,
                 ..
-            } => {
-                messages.push(json!({
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [{
-                        "id": call_id,
-                        "type": "function",
-                        "function": {
-                            "name": name,
-                            "arguments": arguments,
-                        }
-                    }]
-                }));
             }
-            ResponseItem::CustomToolCall {
-                call_id,
+            | ResponseItem::CustomToolCall {
                 name,
-                input,
+                input: arguments,
+                call_id,
                 ..
             } => {
-                messages.push(json!({
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [{
-                        "id": call_id,
-                        "type": "function",
-                        "function": {
-                            "name": name,
-                            "arguments": input,
-                        }
-                    }]
+                pending_tool_calls.push(json!({
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": arguments,
+                    }
                 }));
             }
             ResponseItem::LocalShellCall {
-                call_id, id, action, ..
+                call_id,
+                id,
+                action,
+                ..
             } => {
+                flush_tool_calls!();
                 let call_id = call_id.or_else(|| id.map(|id| id.to_string()));
                 if let Some(call_id) = call_id {
                     messages.push(json!({
@@ -2927,7 +2981,10 @@ fn build_chat_messages(instructions: &str, input: Vec<ResponseItem>) -> Vec<serd
                     }));
                 }
             }
-            ResponseItem::FunctionCallOutput { call_id, output, .. } => {
+            ResponseItem::FunctionCallOutput {
+                call_id, output, ..
+            } => {
+                flush_tool_calls!();
                 let call_id = call_id.unwrap_or_default();
                 let text = output
                     .text_content()
@@ -2943,6 +3000,7 @@ fn build_chat_messages(instructions: &str, input: Vec<ResponseItem>) -> Vec<serd
             ResponseItem::CustomToolCallOutput {
                 call_id, output, ..
             } => {
+                flush_tool_calls!();
                 messages.push(json!({
                     "role": "tool",
                     "tool_call_id": call_id,
@@ -2952,6 +3010,7 @@ fn build_chat_messages(instructions: &str, input: Vec<ResponseItem>) -> Vec<serd
             _ => {}
         }
     }
+    flush_tool_calls!();
 
     messages
 }
@@ -2962,25 +3021,23 @@ fn build_chat_messages(instructions: &str, input: Vec<ResponseItem>) -> Vec<serd
 /// (Anthropic expects strict user/assistant alternation); tool results travel
 /// as `tool_result` content blocks inside a user message. Per goose's
 /// llm-bridge-rust#9287 lesson, a no-argument tool_use serializes `input` as
-/// `{}` rather than `null`.
-fn build_messages_messages(instructions: &str, input: Vec<ResponseItem>) -> Vec<serde_json::Value> {
+/// `{}` rather than `null`. Instructions travel as the top-level `system`
+/// field (see `build_messages_request`), so they are not part of the messages
+/// array.
+fn build_messages_messages(input: Vec<ResponseItem>) -> Vec<serde_json::Value> {
     let mut messages: Vec<serde_json::Value> = Vec::new();
     let mut pending_assistant_blocks: Vec<serde_json::Value> = Vec::new();
 
-    // instructions are passed as the top-level `system` field by
-    // build_messages_request; they are accepted here only for parity with
-    // build_chat_messages and intentionally unused.
-    let _ = instructions;
-
-    let flush_assistant = |messages: &mut Vec<serde_json::Value>,
-                           pending_assistant_blocks: &mut Vec<serde_json::Value>| {
-        if !pending_assistant_blocks.is_empty() {
-            messages.push(json!({
-                "role": "assistant",
-                "content": std::mem::take(pending_assistant_blocks),
-            }));
-        }
-    };
+    let flush_assistant =
+        |messages: &mut Vec<serde_json::Value>,
+         pending_assistant_blocks: &mut Vec<serde_json::Value>| {
+            if !pending_assistant_blocks.is_empty() {
+                messages.push(json!({
+                    "role": "assistant",
+                    "content": std::mem::take(pending_assistant_blocks),
+                }));
+            }
+        };
 
     for item in input {
         match item {
@@ -3009,7 +3066,8 @@ fn build_messages_messages(instructions: &str, input: Vec<ResponseItem>) -> Vec<
                 call_id,
                 ..
             } => {
-                pending_assistant_blocks.push(anthropic_tool_use_block(&name, &call_id, &arguments));
+                pending_assistant_blocks
+                    .push(anthropic_tool_use_block(&name, &call_id, &arguments));
             }
             ResponseItem::CustomToolCall {
                 call_id,
@@ -3019,7 +3077,9 @@ fn build_messages_messages(instructions: &str, input: Vec<ResponseItem>) -> Vec<
             } => {
                 pending_assistant_blocks.push(anthropic_tool_use_block(&name, &call_id, &input));
             }
-            ResponseItem::FunctionCallOutput { call_id, output, .. } => {
+            ResponseItem::FunctionCallOutput {
+                call_id, output, ..
+            } => {
                 flush_assistant(&mut messages, &mut pending_assistant_blocks);
                 let text = output
                     .text_content()
@@ -3050,10 +3110,15 @@ fn build_messages_messages(instructions: &str, input: Vec<ResponseItem>) -> Vec<
 fn anthropic_tool_use_block(name: &str, id: &str, arguments: &str) -> serde_json::Value {
     // No-argument tools must serialize input as {} (not null) or the Messages
     // API rejects the replayed tool_use block with a 400.
-    let input = serde_json::from_str::<serde_json::Value>(arguments)
-        .ok()
-        .filter(|value| !value.is_null())
-        .unwrap_or_else(|| json!({}));
+    let input = match serde_json::from_str::<serde_json::Value>(arguments) {
+        Ok(value) if !value.is_null() => value,
+        _ => {
+            debug!(
+                "anthropic replay of tool '{name}' had unparseable arguments; using empty object"
+            );
+            json!({})
+        }
+    };
     json!({
         "type": "tool_use",
         "id": id,
@@ -3062,11 +3127,7 @@ fn anthropic_tool_use_block(name: &str, id: &str, arguments: &str) -> serde_json
     })
 }
 
-fn push_anthropic_tool_result(
-    messages: &mut Vec<serde_json::Value>,
-    call_id: &str,
-    text: String,
-) {
+fn push_anthropic_tool_result(messages: &mut Vec<serde_json::Value>, call_id: &str, text: String) {
     let block = json!({
         "type": "tool_result",
         "tool_use_id": call_id,
@@ -3077,10 +3138,7 @@ fn push_anthropic_tool_result(
     if let Some(last) = messages.last_mut()
         && last["role"] == "user"
         && let Some(content) = last["content"].as_array_mut()
-        && content
-            .first()
-            .and_then(|block| block["type"].as_str())
-            == Some("tool_result")
+        && content.first().and_then(|block| block["type"].as_str()) == Some("tool_result")
     {
         content.push(block);
         return;
@@ -3091,7 +3149,8 @@ fn push_anthropic_tool_result(
     }));
 }
 
-fn content_items_to_text(content: &[codex_protocol::models::ContentItem]) -> Option<String> {    let mut text_parts = Vec::new();
+fn content_items_to_text(content: &[codex_protocol::models::ContentItem]) -> Option<String> {
+    let mut text_parts = Vec::new();
     for item in content {
         match item {
             codex_protocol::models::ContentItem::InputText { text }

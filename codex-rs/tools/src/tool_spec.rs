@@ -14,6 +14,8 @@ use serde::Serialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
 use std::sync::Arc;
+use tracing::debug;
+use tracing::warn;
 
 /// When serialized as JSON, this produces a valid "Tool" in the OpenAI
 /// Responses API.
@@ -155,29 +157,15 @@ pub fn create_tools_json_for_chat_completions(
                 tools_json.push(chat_completions_function_tool_json(function));
             }
             ToolSpec::Freeform(freeform) => {
-                let input_description = format!(
-                    "{}\n\nSyntax: {}\n\n{}",
-                    freeform.description, freeform.format.syntax, freeform.format.definition
+                // A wrapped function-shaped stand-in would advertise a tool
+                // whose calls always fail: freeform handlers only accept
+                // `ToolPayload::Custom`, while a chat upstream can only produce
+                // `ToolPayload::Function`. Explicitly degrade to omitting the
+                // tool instead (chat has no freeform concept).
+                warn!(
+                    "chat wire cannot carry freeform tool '{}'; omitting it from the tool list",
+                    freeform.name
                 );
-                tools_json.push(serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": freeform.name,
-                        "description": freeform.description,
-                        "strict": false,
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "input": {
-                                    "type": "string",
-                                    "description": input_description
-                                }
-                            },
-                            "required": ["input"],
-                            "additionalProperties": false
-                        }
-                    }
-                }));
             }
             ToolSpec::Namespace(namespace) => {
                 // Chat Completions has no namespace concept: expand the namespace
@@ -188,29 +176,18 @@ pub fn create_tools_json_for_chat_completions(
                             tools_json.push(chat_completions_function_tool_json(function));
                         }
                         crate::ResponsesApiNamespaceTool::Custom(freeform) => {
-                            tools_json.push(serde_json::json!({
-                                "type": "function",
-                                "function": {
-                                    "name": freeform.name,
-                                    "description": freeform.description,
-                                    "strict": false,
-                                    "parameters": {
-                                        "type": "object",
-                                        "properties": {
-                                            "input": {"type": "string"}
-                                        },
-                                        "required": ["input"],
-                                        "additionalProperties": false
-                                    }
-                                }
-                            }));
+                            warn!(
+                                "chat wire cannot carry freeform tool '{}'; omitting it from the tool list",
+                                freeform.name
+                            );
                         }
                     }
                 }
             }
             ToolSpec::ToolSearch { .. } | ToolSpec::WebSearch { .. } => {
-                // Chat Completions only accepts function tools; skip responses-only
-                // tools that have no function equivalent.
+                // Chat Completions only accepts function tools; these
+                // responses-only tools have no function equivalent.
+                debug!("responses-only tool omitted from chat tool list");
             }
         }
     }
@@ -292,25 +269,13 @@ pub fn create_tools_json_for_anthropic(
                 tools_json.push(anthropic_tool_json(function));
             }
             ToolSpec::Freeform(freeform) => {
-                let input_description = format!(
-                    "{}\n\nSyntax: {}\n\n{}",
-                    freeform.description, freeform.format.syntax, freeform.format.definition
+                // Same explicit degradation as the chat converter: function-shaped
+                // stand-ins would always fail at dispatch (freeform handlers only
+                // accept `ToolPayload::Custom`).
+                warn!(
+                    "anthropic wire cannot carry freeform tool '{}'; omitting it from the tool list",
+                    freeform.name
                 );
-                tools_json.push(serde_json::json!({
-                    "name": freeform.name,
-                    "description": freeform.description,
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {
-                            "input": {
-                                "type": "string",
-                                "description": input_description
-                            }
-                        },
-                        "required": ["input"],
-                        "additionalProperties": false
-                    }
-                }));
             }
             ToolSpec::Namespace(namespace) => {
                 // The Messages API has no namespace concept: expand the
@@ -321,25 +286,18 @@ pub fn create_tools_json_for_anthropic(
                             tools_json.push(anthropic_tool_json(function));
                         }
                         crate::ResponsesApiNamespaceTool::Custom(freeform) => {
-                            tools_json.push(serde_json::json!({
-                                "name": freeform.name,
-                                "description": freeform.description,
-                                "input_schema": {
-                                    "type": "object",
-                                    "properties": {
-                                        "input": {"type": "string"}
-                                    },
-                                    "required": ["input"],
-                                    "additionalProperties": false
-                                }
-                            }));
+                            warn!(
+                                "anthropic wire cannot carry freeform tool '{}'; omitting it from the tool list",
+                                freeform.name
+                            );
                         }
                     }
                 }
             }
             ToolSpec::ToolSearch { .. } | ToolSpec::WebSearch { .. } => {
-                // The Messages API accepts function-shaped tools only; skip
-                // responses-only tools that have no function equivalent.
+                // The Messages API accepts function-shaped tools only; these
+                // responses-only tools have no function equivalent.
+                debug!("responses-only tool omitted from anthropic tool list");
             }
         }
     }

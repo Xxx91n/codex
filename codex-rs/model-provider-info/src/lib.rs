@@ -66,8 +66,9 @@ pub enum WireApi {
     Responses,
     /// The classic Chat Completions API at `/v1/chat/completions`.
     ///
-    /// Removed upstream; restored in this fork for OpenAI-compatible
-    /// chat-only upstreams. Transport not implemented yet.
+    /// Removed upstream; restored in this fork with a full in-process
+    /// transport so OpenAI-compatible chat-only upstreams work without an
+    /// external translation layer.
     Chat,
     /// The Anthropic Messages API at `/v1/messages`.
     ///

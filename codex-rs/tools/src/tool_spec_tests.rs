@@ -8,8 +8,8 @@ use crate::FreeformToolFormat;
 use crate::JsonSchema;
 use crate::ResponsesApiNamespaceTool;
 use crate::ResponsesApiTool;
-use crate::create_tools_json_for_chat_completions;
 use crate::create_tools_json_for_anthropic;
+use crate::create_tools_json_for_chat_completions;
 use crate::create_tools_json_for_responses_api;
 use crate::create_tools_json_for_responses_lite;
 use crate::create_tools_raw_json_for_responses_api;
@@ -424,9 +424,7 @@ fn chat_completions_tools_use_nested_function_shape() {
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
-            properties,
-            /*required*/ None,
-            /*additional_properties*/ None,
+            properties, /*required*/ None, /*additional_properties*/ None,
         ),
         output_schema: None,
     })];
@@ -467,7 +465,11 @@ fn chat_completions_skips_non_function_tools() {
 }
 
 #[test]
-fn chat_completions_maps_freeform_tool_to_function_input_param() {
+fn chat_completions_omits_freeform_tool() {
+    // Freeform tools (e.g. experimental apply_patch) have no chat-completions
+    // equivalent; a function-shaped stand-in would fail at dispatch because
+    // freeform handlers only accept `ToolPayload::Custom`
+    // (core/src/tools/router.rs). The explicit degradation is omission.
     let tools = vec![ToolSpec::Freeform(FreeformTool {
         name: "apply_patch".to_string(),
         description: "Apply a patch".to_string(),
@@ -480,17 +482,7 @@ fn chat_completions_maps_freeform_tool_to_function_input_param() {
     })];
 
     let chat_json = create_tools_json_for_chat_completions(&tools).unwrap();
-    assert_eq!(chat_json.len(), 1);
-    assert_eq!(chat_json[0]["type"], json!("function"));
-    assert_eq!(chat_json[0]["function"]["name"], json!("apply_patch"));
-    assert_eq!(
-        chat_json[0]["function"]["parameters"]["required"],
-        json!(["input"])
-    );
-    assert_eq!(
-        chat_json[0]["function"]["parameters"]["properties"]["input"]["type"],
-        json!("string")
-    );
+    assert!(chat_json.is_empty());
 }
 
 #[test]
@@ -503,9 +495,7 @@ fn anthropic_tools_use_input_schema_shape() {
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
-            properties,
-            /*required*/ None,
-            /*additional_properties*/ None,
+            properties, /*required*/ None, /*additional_properties*/ None,
         ),
         output_schema: None,
     })];
@@ -542,7 +532,10 @@ fn anthropic_skips_non_function_tools() {
 }
 
 #[test]
-fn anthropic_maps_freeform_tool_to_input_param() {
+fn anthropic_omits_freeform_tool() {
+    // Freeform tools have no Messages-API equivalent; wrapping one as an
+    // `input`-string tool would advertise a call that always fails at dispatch
+    // (freeform handlers only accept `ToolPayload::Custom`). Omit it instead.
     let tools = vec![ToolSpec::Freeform(FreeformTool {
         name: "apply_patch".to_string(),
         description: "Apply a patch".to_string(),
@@ -555,14 +548,5 @@ fn anthropic_maps_freeform_tool_to_input_param() {
     })];
 
     let anthropic_json = create_tools_json_for_anthropic(&tools).unwrap();
-    assert_eq!(anthropic_json.len(), 1);
-    assert_eq!(anthropic_json[0]["name"], json!("apply_patch"));
-    assert_eq!(
-        anthropic_json[0]["input_schema"]["required"],
-        json!(["input"])
-    );
-    assert_eq!(
-        anthropic_json[0]["input_schema"]["properties"]["input"]["type"],
-        json!("string")
-    );
+    assert!(anthropic_json.is_empty());
 }

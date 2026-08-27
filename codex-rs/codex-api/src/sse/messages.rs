@@ -42,6 +42,20 @@ struct MessageEvent {
     delta: Option<MessageDelta>,
     #[serde(default)]
     usage: Option<MessageUsage>,
+    #[serde(default)]
+    error: Option<MessagesErrorBody>,
+}
+
+/// Payload of a terminal `event: error` frame (official streaming contract):
+/// `{"type": "error", "error": {"type": "overloaded_error", "message": "..."}}`.
+/// The official SDK raises on it instead of continuing to consume the stream.
+#[derive(Debug, Deserialize)]
+struct MessagesErrorBody {
+    #[serde(rename = "type")]
+    #[serde(default)]
+    error_type: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,6 +155,7 @@ async fn process_messages_sse(
     // Buffers keyed by content-block index, per the official streaming
     // contract; goose uses the same pattern so interleaved blocks stay sane.
     let mut tool_uses: BTreeMap<usize, AggregatedToolUse> = BTreeMap::new();
+    let mut stop_reason: Option<String> = None;
 
     loop {
         let start = Instant::now();
@@ -172,12 +187,13 @@ async fn process_messages_sse(
         };
 
         if sse.data.trim() == "[DONE]" {
-            emit_messages_completion(
+            finish_messages_stream(
                 &tx_event,
                 &assistant_text,
                 &tool_uses,
                 response_id.unwrap_or_default(),
                 output_usage.map(|usage| usage.into_token_usage(input_tokens)),
+                stop_reason.as_deref(),
             )
             .await;
             return;
@@ -261,22 +277,47 @@ async fn process_messages_sse(
             }
             "message_delta" => {
                 if let Some(usage) = event.usage {
-                    let _ = event.delta.and_then(|d| d.stop_reason);
                     output_usage = Some(usage);
+                }
+                if let Some(reason) = event.delta.and_then(|d| d.stop_reason) {
+                    // stop_reason arrives only on message_delta per the official
+                    // streaming contract; max_tokens means the output (possibly
+                    // a tool_use's input JSON) was truncated.
+                    if reason == "max_tokens" {
+                        debug!("messages stream stopped at max_tokens; output may be truncated");
+                    }
+                    stop_reason = Some(reason);
                 }
             }
             "message_stop" => {
-                emit_messages_completion(
+                finish_messages_stream(
                     &tx_event,
                     &assistant_text,
                     &tool_uses,
                     response_id.unwrap_or_default(),
                     output_usage.map(|usage| usage.into_token_usage(input_tokens)),
+                    stop_reason.as_deref(),
                 )
                 .await;
                 return;
             }
-            "content_block_stop" | "ping" | "error" => {}
+            "content_block_stop" | "ping" => {}
+            "error" => {
+                // Official SDK behavior: an error frame is terminal — surface it
+                // instead of hanging until the idle timeout.
+                let body = event.error;
+                let kind = body
+                    .as_ref()
+                    .and_then(|b| b.error_type.as_deref())
+                    .unwrap_or("unknown_error")
+                    .to_string();
+                let detail = body.and_then(|b| b.message).unwrap_or_else(|| sse.data.clone());
+                debug!("messages stream error frame: {kind}: {detail}");
+                let _ = tx_event
+                    .send(Err(ApiError::Stream(format!("{kind}: {detail}"))))
+                    .await;
+                return;
+            }
             other => {
                 trace!("ignoring unhandled messages SSE event: {other}");
             }
@@ -284,23 +325,38 @@ async fn process_messages_sse(
     }
 }
 
-async fn emit_messages_completion(
+/// Emits the buffered items and the completion marker, or a terminal error
+/// when the stream left a tool_use with truncated input JSON: replaying a
+/// silently-substituted argument object would corrupt the agent loop (goose
+/// issue #7527 / PR #7840 lesson — fail loud, do not fake a call).
+async fn finish_messages_stream(
     tx_event: &mpsc::Sender<Result<ResponseEvent, ApiError>>,
     assistant_text: &str,
     tool_uses: &BTreeMap<usize, AggregatedToolUse>,
     response_id: String,
     usage: Option<TokenUsage>,
+    stop_reason: Option<&str>,
 ) {
     for (index, call) in tool_uses {
         if call.name.trim().is_empty() {
             continue;
         }
-        // Guard against max_tokens truncation leaving partial JSON that will
-        // not parse; fall back to an empty object rather than failing.
-        let arguments = if serde_json::from_str::<serde_json::Value>(&call.partial_json).is_ok() {
+        // No-argument tool_use streams carry no input_json_delta; an empty
+        // buffer legitimately means {}. A non-empty buffer that fails to parse
+        // is truncated mid-JSON (max_tokens) and must surface as an error.
+        let arguments = if call.partial_json.is_empty() {
+            "{}".to_string()
+        } else if serde_json::from_str::<serde_json::Value>(&call.partial_json).is_ok() {
             call.partial_json.clone()
         } else {
-            "{}".to_string()
+            let _ = tx_event
+                .send(Err(ApiError::Stream(format!(
+                    "tool_use '{}' input JSON truncated (stop_reason={})",
+                    call.name,
+                    stop_reason.unwrap_or("unknown"),
+                ))))
+                .await;
+            return;
         };
         let call_id = if call.id.is_empty() {
             format!("toolu_stream_{index}")
@@ -354,110 +410,5 @@ async fn emit_messages_completion(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn input_json_delta_fragments_concatenate_by_block_index() {
-        let mut tool_uses: BTreeMap<usize, AggregatedToolUse> = BTreeMap::new();
-        tool_uses.insert(
-            0,
-            AggregatedToolUse {
-                id: "toolu_1".to_string(),
-                name: "exec_command".to_string(),
-                partial_json: String::new(),
-            },
-        );
-        for fragment in ["{\"cmd\":\"p", "wd\"}"] {
-            if let Some(entry) = tool_uses.get_mut(&0) {
-                entry.partial_json.push_str(fragment);
-            }
-        }
-        let entry = &tool_uses[&0];
-        assert!(serde_json::from_str::<serde_json::Value>(&entry.partial_json).is_ok());
-        assert_eq!(entry.partial_json, "{\"cmd\":\"pwd\"}");
-    }
-
-    #[tokio::test]
-    async fn emit_messages_completion_emits_tool_message_and_completed() {
-        let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent, ApiError>>(8);
-        let mut tool_uses: BTreeMap<usize, AggregatedToolUse> = BTreeMap::new();
-        tool_uses.insert(
-            0,
-            AggregatedToolUse {
-                id: "toolu_1".to_string(),
-                name: "exec_command".to_string(),
-                partial_json: "{\"cmd\":\"pwd\"}".to_string(),
-            },
-        );
-
-        emit_messages_completion(&tx, "done", &tool_uses, "msg_1".to_string(), None).await;
-
-        let first = rx.recv().await.expect("event").expect("ok event");
-        let second = rx.recv().await.expect("event").expect("ok event");
-        let third = rx.recv().await.expect("event").expect("ok event");
-
-        match first {
-            ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
-                name,
-                call_id,
-                arguments,
-                ..
-            }) => {
-                assert_eq!(name, "exec_command");
-                assert_eq!(call_id, "toolu_1");
-                assert_eq!(arguments, "{\"cmd\":\"pwd\"}");
-            }
-            other => panic!("unexpected first event: {other:?}"),
-        }
-
-        match second {
-            ResponseEvent::OutputItemDone(ResponseItem::Message { role, content, .. }) => {
-                assert_eq!(role, "assistant");
-                assert_eq!(
-                    content,
-                    vec![ContentItem::OutputText {
-                        text: "done".to_string(),
-                    }]
-                );
-            }
-            other => panic!("unexpected second event: {other:?}"),
-        }
-
-        match third {
-            ResponseEvent::Completed {
-                response_id,
-                end_turn,
-                ..
-            } => {
-                assert_eq!(response_id, "msg_1");
-                assert_eq!(end_turn, Some(true));
-            }
-            other => panic!("unexpected third event: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn emit_messages_completion_guards_truncated_partial_json() {
-        let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent, ApiError>>(8);
-        let mut tool_uses: BTreeMap<usize, AggregatedToolUse> = BTreeMap::new();
-        tool_uses.insert(
-            0,
-            AggregatedToolUse {
-                id: "toolu_1".to_string(),
-                name: "exec_command".to_string(),
-                partial_json: "{\"cmd\":\"pw".to_string(),
-            },
-        );
-
-        emit_messages_completion(&tx, "", &tool_uses, "msg_2".to_string(), None).await;
-
-        let first = rx.recv().await.expect("event").expect("ok event");
-        match first {
-            ResponseEvent::OutputItemDone(ResponseItem::FunctionCall { arguments, .. }) => {
-                assert_eq!(arguments, "{}");
-            }
-            other => panic!("unexpected first event: {other:?}"),
-        }
-    }
-}
+#[path = "messages_tests.rs"]
+mod tests;

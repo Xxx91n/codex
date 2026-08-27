@@ -235,7 +235,10 @@ async fn anthropic_wire_tool_call_roundtrip() -> Result<()> {
     .await;
 
     test.codex.submit(Op::Shutdown).await?;
-    wait_for_event(&test.codex, |event| matches!(event, EventMsg::ShutdownComplete)).await;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ShutdownComplete)
+    })
+    .await;
 
     assert_eq!(
         first_requests.lock().unwrap().len(),

@@ -1150,7 +1150,7 @@ fn build_messages_messages_serializes_tool_roundtrip_items() {
         },
     ];
 
-    let messages = super::build_messages_messages("be helpful", input);
+    let messages = super::build_messages_messages(input);
     assert_eq!(
         messages,
         vec![
@@ -1236,12 +1236,29 @@ fn build_chat_messages_serializes_tool_roundtrip_items() {
             call_id: "call_1".to_string(),
             internal_chat_message_metadata_passthrough: None,
         },
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "notify".to_string(),
+            namespace: None,
+            arguments: "{}".to_string(),
+            encrypted_function_args: None,
+            call_id: "call_2".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
         ResponseItem::FunctionCallOutput {
             id: None,
             call_id: Some("call_1".to_string()),
             name: None,
             namespace: None,
             output: FunctionCallOutputPayload::from_text("ok".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("call_2".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("sent".to_string()),
             internal_chat_message_metadata_passthrough: None,
         },
     ];
@@ -1252,6 +1269,9 @@ fn build_chat_messages_serializes_tool_roundtrip_items() {
         vec![
             json!({"role":"system","content":"be helpful"}),
             json!({"role":"user","content":"hello"}),
+            // Parallel calls from one turn replay as a single assistant message
+            // with a multi-entry tool_calls array: strict OpenAI-compatible
+            // servers 400 on assistant-split replays.
             json!({
                 "role":"assistant",
                 "content":"",
@@ -1260,10 +1280,16 @@ fn build_chat_messages_serializes_tool_roundtrip_items() {
                         "id":"call_1",
                         "type":"function",
                         "function":{"name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"}
+                    },
+                    {
+                        "id":"call_2",
+                        "type":"function",
+                        "function":{"name":"notify","arguments":"{}"}
                     }
                 ]
             }),
             json!({"role":"tool","tool_call_id":"call_1","content":"ok"}),
+            json!({"role":"tool","tool_call_id":"call_2","content":"sent"}),
         ]
     );
 }

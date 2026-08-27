@@ -13,11 +13,11 @@ use core_test_support::responses::start_mock_server;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use wiremock::Mock;
+use wiremock::MockServer;
 use wiremock::Request;
 use wiremock::Respond;
 use wiremock::matchers::method;
 use wiremock::matchers::path_regex;
-use wiremock::MockServer;
 
 type RecordedRequests = Arc<Mutex<Vec<Vec<u8>>>>;
 
@@ -113,9 +113,11 @@ fn chat_sse_tool_call(call_id: &str, tool_name: &str, arguments_json: &str) -> S
             }
         })
     ));
-    body.push_str("data: [DONE]
+    body.push_str(
+        "data: [DONE]
 
-");
+",
+    );
     body
 }
 
@@ -155,7 +157,9 @@ fn body_reports_tool_output(request: &Request, call_id: &str) -> bool {
             .is_some_and(|messages| {
                 messages.iter().any(|message| {
                     message.get("role").and_then(serde_json::Value::as_str) == Some("tool")
-                        && message.get("tool_call_id").and_then(serde_json::Value::as_str)
+                        && message
+                            .get("tool_call_id")
+                            .and_then(serde_json::Value::as_str)
                             == Some(call_id)
                 })
             })
@@ -215,7 +219,10 @@ async fn chat_wire_tool_call_roundtrip() -> Result<()> {
     .await;
 
     test.codex.submit(Op::Shutdown).await?;
-    wait_for_event(&test.codex, |event| matches!(event, EventMsg::ShutdownComplete)).await;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ShutdownComplete)
+    })
+    .await;
 
     assert_eq!(
         first_requests.lock().unwrap().len(),
@@ -226,6 +233,85 @@ async fn chat_wire_tool_call_roundtrip() -> Result<()> {
         second_requests.lock().unwrap().len(),
         1,
         "expected exactly one follow-up request with tool output"
+    );
+
+    Ok(())
+}
+
+/// Plain first turn over the chat wire (empty history, text only): the request
+/// opens with a system message built from base instructions, then the user
+/// message; the streamed text answer completes the turn. Complements the
+/// tool-call roundtrip, which covers the tool-history class.
+#[tokio::test]
+async fn chat_wire_plain_text_turn() -> Result<()> {
+    let server = start_mock_server().await;
+
+    let requests = mount_chat_sse_once_match(
+        &server,
+        |_request: &Request| true,
+        chat_sse_final_text("plain text complete"),
+    )
+    .await;
+
+    let test = test_codex()
+        .with_config(|config| {
+            config.model_provider.wire_api = WireApi::Chat;
+        })
+        .build(&server)
+        .await?;
+
+    test.codex
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "say hello back".to_string(),
+                text_elements: Vec::new(),
+            }])
+            .with_thread_settings(
+                codex_protocol::protocol::ThreadSettingsOverrides {
+                    approval_policy: Some(AskForApproval::Never),
+                    ..Default::default()
+                },
+            ),
+        )
+        .await?;
+
+    wait_for_event(&test.codex, |event| match event {
+        EventMsg::TurnComplete(_) => true,
+        EventMsg::Error(error) => panic!("unexpected turn error: {error:?}"),
+        _ => false,
+    })
+    .await;
+
+    test.codex.submit(Op::Shutdown).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ShutdownComplete)
+    })
+    .await;
+
+    let recorded = requests.lock().unwrap();
+    assert_eq!(recorded.len(), 1, "expected exactly one request");
+    let body: serde_json::Value =
+        serde_json::from_slice(&recorded[0]).expect("request body is json");
+    let messages = body["messages"].as_array().expect("messages array");
+    assert_eq!(
+        messages.first().and_then(|m| m["role"].as_str()),
+        Some("system"),
+        "chat request must open with the system message"
+    );
+    assert!(
+        messages.iter().any(|m| {
+            m["role"] == "user"
+                && m["content"]
+                    .as_str()
+                    .is_some_and(|c| c.contains("say hello back"))
+        }),
+        "chat request must contain the user message"
+    );
+    assert!(
+        body.get("store").is_none()
+            && body.get("previous_response_id").is_none()
+            && body.get("reasoning").is_none(),
+        "chat request must not carry responses-only fields"
     );
 
     Ok(())
