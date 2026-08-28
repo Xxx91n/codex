@@ -4,6 +4,9 @@ name: fork-cli-test-release
 on:
   workflow_dispatch: {}
 
+permissions:
+  contents: write
+
 jobs:
   build-windows-cli:
     runs-on: windows-latest
@@ -34,3 +37,17 @@ jobs:
           name: codex-cli-win-x86_64-msvc-${{ github.sha }}
           path: codex-rs/out/codex-win-x86_64-pc-windows-msvc.zip
           retention-days: 14
+      - name: Publish rolling prerelease (public download)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: codex-rs
+        run: |
+          $tag = "tri-wire-test"
+          $title = "Tri-wire test build (CLI) — $($env:GITHUB_SHA.Substring(0,8))"
+          gh release delete $tag --yes --cleanup-tag 2>$null
+          gh release create $tag `
+            --repo ${{ github.repository }} `
+            --title $title `
+            --notes "Test build of the tri-wire fork CLI (feat/tri-wire-api). Windows x86_64 (msvc). Not signed. Report issues in this repo." `
+            --prerelease `
+            out\codex-win-x86_64-pc-windows-msvc.zip
