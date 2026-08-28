@@ -151,6 +151,11 @@ async fn slash_rename_generates_editable_title_through_embedded_app_server()
     app.config.model = Some("gpt-5.2".to_string());
     app.config.model_provider_id = provider_id.to_string();
     app.config.model_provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         name: "Thread title test".to_string(),
         base_url: Some(format!("{}/v1", server.uri())),
         request_max_retries: Some(0),

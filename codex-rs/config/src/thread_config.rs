@@ -296,6 +296,11 @@ mod tests {
 
     fn test_provider(name: &str) -> ModelProviderInfo {
         ModelProviderInfo {
+            anthropic_max_tokens: None,
+
+            anthropic_thinking_budget: None,
+
+            anthropic_prompt_caching: None,
             name: name.to_string(),
             base_url: Some("http://127.0.0.1:8061/api/codex".to_string()),
             env_key: None,

@@ -38,6 +38,7 @@ async fn finish_messages_stream_emits_tool_message_and_completed() {
         &tx,
         "done",
         &tool_uses,
+        &std::collections::BTreeMap::new(),
         "msg_1".to_string(),
         None,
         Some("end_turn"),
@@ -102,7 +103,16 @@ async fn finish_messages_stream_serializes_no_argument_tool_use_as_empty_object(
         },
     );
 
-    finish_messages_stream(&tx, "", &tool_uses, "msg_2".to_string(), None, None).await;
+    finish_messages_stream(
+        &tx,
+        "",
+        &tool_uses,
+        &std::collections::BTreeMap::new(),
+        "msg_2".to_string(),
+        None,
+        None,
+    )
+    .await;
 
     let first = rx.recv().await.expect("event").expect("ok event");
     match first {
@@ -132,6 +142,7 @@ async fn finish_messages_stream_fails_loudly_on_truncated_tool_input() {
         &tx,
         "",
         &tool_uses,
+        &std::collections::BTreeMap::new(),
         "msg_3".to_string(),
         None,
         Some("max_tokens"),
@@ -160,4 +171,78 @@ fn error_frame_payload_deserializes_official_shape() {
     let body = event.error.expect("error body");
     assert_eq!(body.error_type.as_deref(), Some("overloaded_error"));
     assert_eq!(body.message.as_deref(), Some("Overloaded"));
+}
+
+#[test]
+fn thinking_delta_and_signature_frames_parse() {
+    let delta: MessageEvent = serde_json::from_str(
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}"#,
+    )
+    .expect("thinking_delta parses");
+    assert_eq!(
+        delta.delta.as_ref().unwrap().thinking.as_deref(),
+        Some("hmm")
+    );
+
+    let sig: MessageEvent = serde_json::from_str(
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-abc"}}"#,
+    )
+    .expect("signature_delta parses");
+    assert_eq!(
+        sig.delta.as_ref().unwrap().signature.as_deref(),
+        Some("sig-abc")
+    );
+
+    let start: MessageEvent = serde_json::from_str(
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+    )
+    .expect("thinking block start parses");
+    assert_eq!(start.content_block.as_ref().unwrap().block_type, "thinking");
+}
+
+#[tokio::test]
+async fn finish_messages_stream_flushes_unsigned_thinking_block() {
+    let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent, ApiError>>(8);
+    let tool_uses: BTreeMap<usize, AggregatedToolUse> = BTreeMap::new();
+    let mut thinking: BTreeMap<usize, AggregatedThinking> = BTreeMap::new();
+    thinking.insert(
+        0,
+        AggregatedThinking {
+            text: "let me reason".to_string(),
+            signature: Some("sig-xyz".to_string()),
+        },
+    );
+
+    finish_messages_stream(
+        &tx,
+        "",
+        &tool_uses,
+        &thinking,
+        "msg_t".to_string(),
+        None,
+        Some("end_turn"),
+    )
+    .await;
+
+    let events: Vec<_> = [rx.recv().await, rx.recv().await, rx.recv().await]
+        .into_iter()
+        .flat_map(|item| item.into_iter())
+        .collect::<Vec<_>>();
+    let added = events
+        .iter()
+        .find_map(|ev| match ev {
+            Ok(ResponseEvent::OutputItemAdded(ResponseItem::Reasoning {
+                content,
+                encrypted_content,
+                ..
+            })) => Some((content.clone(), encrypted_content.clone())),
+            _ => None,
+        })
+        .expect("reasoning item added");
+    assert_eq!(added.1, Some("sig-xyz".to_string()));
+    let text = match &added.0.as_ref().unwrap()[0] {
+        codex_protocol::models::ReasoningItemContent::ReasoningText { text } => text.clone(),
+        other => panic!("unexpected content: {other:?}"),
+    };
+    assert_eq!(text, "let me reason");
 }

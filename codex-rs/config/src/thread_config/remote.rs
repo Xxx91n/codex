@@ -172,6 +172,11 @@ fn model_provider_from_proto(
         }
     };
     let info = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         name: provider.name,
         base_url: provider.base_url,
         env_key: provider.env_key,
@@ -203,6 +208,9 @@ fn model_provider_to_proto(
     provider: ModelProviderInfo,
 ) -> proto::ModelProvider {
     let ModelProviderInfo {
+        anthropic_max_tokens: _,
+        anthropic_thinking_budget: _,
+        anthropic_prompt_caching: _,
         name,
         base_url,
         env_key,
@@ -456,6 +464,11 @@ mod tests {
     #[test]
     fn model_provider_proto_defaults_standalone_web_search_to_false() {
         let expected = ModelProviderInfo {
+            anthropic_max_tokens: None,
+
+            anthropic_thinking_budget: None,
+
+            anthropic_prompt_caching: None,
             supports_standalone_web_search: false,
             ..expected_provider()
         };
@@ -546,6 +559,11 @@ mod tests {
 
     fn expected_provider() -> ModelProviderInfo {
         ModelProviderInfo {
+            anthropic_max_tokens: None,
+
+            anthropic_thinking_budget: None,
+
+            anthropic_prompt_caching: None,
             name: "Local".to_string(),
             base_url: Some("http://127.0.0.1:8061/api/codex".to_string()),
             env_key: None,

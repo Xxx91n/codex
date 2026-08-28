@@ -72,6 +72,11 @@ async fn responses_stream_includes_subagent_header_on_review() {
     .await;
 
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         name: "mock".into(),
         base_url: Some(format!("{}/v1", server.uri())),
         env_key: None,
@@ -209,6 +214,11 @@ async fn responses_stream_includes_subagent_header_on_other() {
     .await;
 
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         name: "mock".into(),
         base_url: Some(format!("{}/v1", server.uri())),
         env_key: None,
@@ -327,6 +337,11 @@ async fn responses_respects_model_info_overrides_from_config() {
     let request_recorder = responses::mount_sse_once(&server, response_body).await;
 
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         name: "mock".into(),
         base_url: Some(format!("{}/v1", server.uri())),
         env_key: None,

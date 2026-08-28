@@ -2076,6 +2076,22 @@
       "additionalProperties": false,
       "description": "Serializable representation of a provider definition.",
       "properties": {
+        "anthropic_max_tokens": {
+          "description": "`max_tokens` budget sent on the \"anthropic\" (messages) wire. When unset, the client falls back to its built-in default (8192).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "anthropic_prompt_caching": {
+          "description": "When true, the \"anthropic\" (messages) wire marks the system prompt and the last tool definition with `cache_control: {\"type\": \"ephemeral\"}` breakpoints for prompt caching.",
+          "type": "boolean"
+        },
+        "anthropic_thinking_budget": {
+          "description": "Thinking budget (in tokens) requested on the \"anthropic\" (messages) wire. When set, the client sends `thinking: { type: \"enabled\", budget_tokens }`. Values below 1024 are clamped up; Anthropic rejects budgets >= `max_tokens`, so the effective value is clamped below `max_tokens` as well.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "auth": {
           "allOf": [
             {
@@ -5397,6 +5413,20 @@
           "description": "The Responses API exposed by OpenAI at `/v1/responses`.",
           "enum": [
             "responses"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The classic Chat Completions API at `/v1/chat/completions`.\n\nRemoved upstream; restored in this fork with a full in-process transport so OpenAI-compatible chat-only upstreams work without an external translation layer.",
+          "enum": [
+            "chat"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The Anthropic Messages API at `/v1/messages`.\n\nFork addition (goose-blueprint transport) so anthropic-native upstreams work in-process without an external translation layer.",
+          "enum": [
+            "anthropic"
           ],
           "type": "string"
         }

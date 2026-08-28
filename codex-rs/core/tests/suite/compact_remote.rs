@@ -380,6 +380,11 @@ fn amazon_bedrock_test_codex() -> TestCodexBuilder {
         .with_config(|config| {
             let _ = config.features.enable(Feature::RemoteCompactionV2);
             config.model_provider = ModelProviderInfo {
+                anthropic_max_tokens: None,
+
+                anthropic_thinking_budget: None,
+
+                anthropic_prompt_caching: None,
                 base_url: config.model_provider.base_url.clone(),
                 ..ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None)
             };

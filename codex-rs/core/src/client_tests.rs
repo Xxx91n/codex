@@ -60,6 +60,9 @@ use codex_rollout_trace::RawTraceEventPayload;
 use codex_rollout_trace::RolloutTrace;
 use codex_rollout_trace::TraceWriter;
 use codex_rollout_trace::replay_bundle;
+use codex_tools::JsonSchema;
+use codex_tools::ResponsesApiTool;
+use codex_tools::ToolSpec;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -1185,6 +1188,175 @@ fn build_messages_messages_serializes_tool_roundtrip_items() {
             }),
         ]
     );
+}
+
+#[test]
+fn build_messages_messages_emits_image_blocks_and_replays_thinking_with_signature() {
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ReasoningItemContent;
+    use codex_protocol::models::ResponseItem;
+
+    let input = vec![
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![
+                ContentItem::InputText {
+                    text: "what is this?".to_string(),
+                },
+                ContentItem::InputImage {
+                    image_url: "data:image/png;base64,aGVsbG8=".to_string(),
+                    detail: None,
+                },
+            ],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::Reasoning {
+            id: None,
+            summary: vec![],
+            content: Some(vec![
+                ReasoningItemContent::ReasoningText {
+                    text: "let me think".to_string(),
+                },
+                ReasoningItemContent::Text {
+                    text: " more".to_string(),
+                },
+            ]),
+            encrypted_content: Some("sig-abc".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: "the answer".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+
+    let messages = super::build_messages_messages(input);
+    let user = &messages[0];
+    assert_eq!(user["role"], "user");
+    let blocks = user["content"].as_array().expect("user content array");
+    assert_eq!(blocks[0]["type"], "text");
+    assert_eq!(blocks[0]["text"], "what is this?");
+    assert_eq!(blocks[1]["type"], "image");
+    assert_eq!(blocks[1]["source"]["type"], "base64");
+    assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+    assert_eq!(blocks[1]["source"]["data"], "aGVsbG8=");
+
+    // thinking must precede the assistant text within the same assistant
+    // message, per the Messages API ordering contract.
+    let assistant = &messages[1];
+    assert_eq!(assistant["role"], "assistant");
+    let content = assistant["content"].as_array().unwrap();
+    assert_eq!(content[0]["type"], "thinking");
+    assert_eq!(content[0]["thinking"], "let me think more");
+    assert_eq!(content[0]["signature"], "sig-abc");
+    assert_eq!(content[1]["type"], "text");
+    assert_eq!(content[1]["text"], "the answer");
+}
+
+#[test]
+fn build_messages_messages_drops_unsigned_thinking_replay() {
+    use codex_protocol::models::ResponseItem;
+    // Without a signature, Anthropic would 400 ("cannot be modified")
+    // on tool-call replays; drop the block instead (contract allows
+    // omission on relaxed paths).
+    let input = vec![ResponseItem::Reasoning {
+        id: None,
+        summary: vec![],
+        content: Some(vec![]),
+        encrypted_content: None,
+        internal_chat_message_metadata_passthrough: None,
+    }];
+    let messages = super::build_messages_messages(input);
+    assert!(messages.is_empty());
+}
+
+#[test]
+fn build_messages_request_emits_thinking_and_cache_control_when_configured() {
+    let mut provider =
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Anthropic);
+    provider.anthropic_max_tokens = Some(128_000);
+    provider.anthropic_thinking_budget = Some(8_192);
+    provider.anthropic_prompt_caching = Some(true);
+    let client = ModelClient::new(
+        None,
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        provider,
+        SessionSource::Cli,
+        "test_originator".to_string(),
+        None,
+        true,
+        false,
+        false,
+        None,
+        false,
+        None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    );
+    let mut prompt = Prompt::default();
+    let tool = ToolSpec::Function(ResponsesApiTool {
+        name: "exec_command".to_string(),
+        description: "run".to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::default(),
+        output_schema: None,
+    });
+    prompt.tools = Arc::from(vec![tool]);
+    let model_info = test_model_info();
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &model_info)
+        .expect("messages request should build");
+    let obj = request.as_object().expect("object");
+    assert_eq!(obj["thinking"]["type"], "enabled");
+    assert_eq!(obj["thinking"]["budget_tokens"], 8_192);
+    let system = obj["system"]
+        .as_array()
+        .expect("system should be block array");
+    assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+    let tools = obj["tools"].as_array().unwrap();
+    assert_eq!(tools.last().unwrap()["cache_control"]["type"], "ephemeral");
+}
+
+#[test]
+fn build_messages_request_clamps_thinking_budget_below_max_tokens() {
+    let mut provider =
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Anthropic);
+    provider.anthropic_max_tokens = Some(4_096);
+    provider.anthropic_thinking_budget = Some(100_000);
+    let client = ModelClient::new(
+        None,
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        provider,
+        SessionSource::Cli,
+        "test_originator".to_string(),
+        None,
+        true,
+        false,
+        false,
+        None,
+        false,
+        None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    );
+    let prompt = Prompt::default();
+    let model_info = test_model_info();
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &model_info)
+        .expect("messages request should build");
+    let obj = request.as_object().expect("object");
+    // doc contract: budget_tokens must be < max_tokens
+    assert_eq!(obj["thinking"]["budget_tokens"], 4_096 - 1);
 }
 
 #[test]

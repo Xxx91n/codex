@@ -28,6 +28,16 @@ struct AggregatedToolUse {
     partial_json: String,
 }
 
+/// Streaming accumulator for an extended-thinking content block. The block
+/// closes with a `signature_delta`; the signature is the encrypted blob the
+/// replay side must echo back verbatim on tool-use turns, so it lands in
+/// `ResponseItem::Reasoning::encrypted_content`.
+#[derive(Debug, Default)]
+struct AggregatedThinking {
+    text: String,
+    signature: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct MessageEvent {
     #[serde(rename = "type")]
@@ -86,6 +96,10 @@ struct MessageDelta {
     text: Option<String>,
     #[serde(default)]
     partial_json: Option<String>,
+    #[serde(default)]
+    thinking: Option<String>,
+    #[serde(default)]
+    signature: Option<String>,
     #[serde(default)]
     stop_reason: Option<String>,
 }
@@ -155,6 +169,7 @@ async fn process_messages_sse(
     // Buffers keyed by content-block index, per the official streaming
     // contract; goose uses the same pattern so interleaved blocks stay sane.
     let mut tool_uses: BTreeMap<usize, AggregatedToolUse> = BTreeMap::new();
+    let mut thinking_blocks: BTreeMap<usize, AggregatedThinking> = BTreeMap::new();
     let mut stop_reason: Option<String> = None;
 
     loop {
@@ -191,6 +206,7 @@ async fn process_messages_sse(
                 &tx_event,
                 &assistant_text,
                 &tool_uses,
+                &thinking_blocks,
                 response_id.unwrap_or_default(),
                 output_usage.map(|usage| usage.into_token_usage(input_tokens)),
                 stop_reason.as_deref(),
@@ -228,6 +244,25 @@ async fn process_messages_sse(
             }
             "content_block_start" => {
                 if let (Some(index), Some(block)) = (event.index, &event.content_block)
+                    && block.block_type == "thinking"
+                {
+                    thinking_blocks
+                        .entry(index)
+                        .or_insert_with(AggregatedThinking::default);
+                    // Emit OutputItemAdded up front so thinking_delta events
+                    // (ReasoningContentDelta) have an active item in core.
+                    let item = ResponseItem::Reasoning {
+                        id: None,
+                        summary: Vec::new(),
+                        content: None,
+                        encrypted_content: None,
+                        internal_chat_message_metadata_passthrough: None,
+                    };
+                    let _ = tx_event
+                        .send(Ok(ResponseEvent::OutputItemAdded(item)))
+                        .await;
+                }
+                if let (Some(index), Some(block)) = (event.index, &event.content_block)
                     && block.block_type == "tool_use"
                 {
                     tool_uses.insert(
@@ -244,6 +279,26 @@ async fn process_messages_sse(
                 let index = event.index.unwrap_or(0);
                 if let Some(delta) = event.delta {
                     match delta.delta_type.as_deref() {
+                        Some("thinking_delta") => {
+                            if let Some(thinking) = delta.thinking {
+                                if let Some(entry) = thinking_blocks.get_mut(&index) {
+                                    entry.text.push_str(&thinking);
+                                }
+                                let _ = tx_event
+                                    .send(Ok(ResponseEvent::ReasoningContentDelta {
+                                        delta: thinking,
+                                        content_index: index as i64,
+                                    }))
+                                    .await;
+                            }
+                        }
+                        Some("signature_delta") => {
+                            if let Some(signature) = delta.signature
+                                && let Some(entry) = thinking_blocks.get_mut(&index)
+                            {
+                                entry.signature = Some(signature);
+                            }
+                        }
                         Some("input_json_delta") => {
                             if let Some(fragment) = delta.partial_json
                                 && let Some(entry) = tool_uses.get_mut(&index)
@@ -294,6 +349,7 @@ async fn process_messages_sse(
                     &tx_event,
                     &assistant_text,
                     &tool_uses,
+                    &thinking_blocks,
                     response_id.unwrap_or_default(),
                     output_usage.map(|usage| usage.into_token_usage(input_tokens)),
                     stop_reason.as_deref(),
@@ -301,7 +357,24 @@ async fn process_messages_sse(
                 .await;
                 return;
             }
-            "content_block_stop" | "ping" => {}
+            "content_block_stop" => {
+                let index = event.index.unwrap_or(0);
+                if let Some(thinking) = thinking_blocks.remove(&index) {
+                    let item = ResponseItem::Reasoning {
+                        id: None,
+                        summary: Vec::new(),
+                        content: Some(vec![
+                            codex_protocol::models::ReasoningItemContent::ReasoningText {
+                                text: thinking.text,
+                            },
+                        ]),
+                        encrypted_content: thinking.signature,
+                        internal_chat_message_metadata_passthrough: None,
+                    };
+                    let _ = tx_event.send(Ok(ResponseEvent::OutputItemDone(item))).await;
+                }
+            }
+            "ping" => {}
             "error" => {
                 // Official SDK behavior: an error frame is terminal — surface it
                 // instead of hanging until the idle timeout.
@@ -311,7 +384,9 @@ async fn process_messages_sse(
                     .and_then(|b| b.error_type.as_deref())
                     .unwrap_or("unknown_error")
                     .to_string();
-                let detail = body.and_then(|b| b.message).unwrap_or_else(|| sse.data.clone());
+                let detail = body
+                    .and_then(|b| b.message)
+                    .unwrap_or_else(|| sse.data.clone());
                 debug!("messages stream error frame: {kind}: {detail}");
                 let _ = tx_event
                     .send(Err(ApiError::Stream(format!("{kind}: {detail}"))))
@@ -333,10 +408,29 @@ async fn finish_messages_stream(
     tx_event: &mpsc::Sender<Result<ResponseEvent, ApiError>>,
     assistant_text: &str,
     tool_uses: &BTreeMap<usize, AggregatedToolUse>,
+    thinking_blocks: &BTreeMap<usize, AggregatedThinking>,
     response_id: String,
     usage: Option<TokenUsage>,
     stop_reason: Option<&str>,
 ) {
+    for (index, thinking) in thinking_blocks {
+        let item = ResponseItem::Reasoning {
+            id: None,
+            summary: Vec::new(),
+            content: Some(vec![
+                codex_protocol::models::ReasoningItemContent::ReasoningText {
+                    text: thinking.text.clone(),
+                },
+            ]),
+            encrypted_content: thinking.signature.clone(),
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let _ = tx_event
+            .send(Ok(ResponseEvent::OutputItemAdded(item.clone())))
+            .await;
+        let _ = tx_event.send(Ok(ResponseEvent::OutputItemDone(item))).await;
+        let _ = index;
+    }
     for (index, call) in tool_uses {
         if call.name.trim().is_empty() {
             continue;

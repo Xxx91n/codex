@@ -152,6 +152,21 @@ pub struct ModelProviderInfo {
     /// Maximum time (in milliseconds) to wait for a websocket connection attempt before treating
     /// it as failed.
     pub websocket_connect_timeout_ms: Option<u64>,
+    /// `max_tokens` budget sent on the "anthropic" (messages) wire. When unset, the
+    /// client falls back to its built-in default (8192).
+    pub anthropic_max_tokens: Option<u32>,
+
+    /// Thinking budget (in tokens) requested on the "anthropic" (messages)
+    /// wire. When set, the client sends `thinking: { type: "enabled",
+    /// budget_tokens }`. Values below 1024 are clamped up; Anthropic rejects
+    /// budgets >= `max_tokens`, so the effective value is clamped below
+    /// `max_tokens` as well.
+    pub anthropic_thinking_budget: Option<u32>,
+
+    /// When true, the "anthropic" (messages) wire marks the system prompt
+    /// and the last tool definition with `cache_control: {"type":
+    /// "ephemeral"}` breakpoints for prompt caching.
+    pub anthropic_prompt_caching: Option<bool>,
     /// Does this provider require an OpenAI API Key or ChatGPT login token? If true,
     /// user is presented with login screen on first run, and login preference and token/key
     /// are stored in auth.json. If false (which is the default), login screen is skipped,
@@ -400,6 +415,11 @@ impl ModelProviderInfo {
 
     pub fn create_openai_provider(base_url: Option<String>) -> ModelProviderInfo {
         ModelProviderInfo {
+            anthropic_max_tokens: None,
+
+            anthropic_thinking_budget: None,
+
+            anthropic_prompt_caching: None,
             name: OPENAI_PROVIDER_NAME.into(),
             base_url,
             env_key: None,
@@ -440,6 +460,11 @@ impl ModelProviderInfo {
         aws: Option<ModelProviderAwsAuthInfo>,
     ) -> ModelProviderInfo {
         ModelProviderInfo {
+            anthropic_max_tokens: None,
+
+            anthropic_thinking_budget: None,
+
+            anthropic_prompt_caching: None,
             name: AMAZON_BEDROCK_PROVIDER_NAME.into(),
             // The runtime provider derives the regional Mantle endpoint when
             // this is unset. A configured value is therefore unambiguously an
@@ -617,6 +642,11 @@ pub fn create_oss_provider(default_provider_port: u16, wire_api: WireApi) -> Mod
 
 pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> ModelProviderInfo {
     ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         name: "gpt-oss".into(),
         base_url: Some(base_url.into()),
         env_key: None,

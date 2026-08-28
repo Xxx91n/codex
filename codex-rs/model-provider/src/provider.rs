@@ -540,6 +540,11 @@ mod tests {
 
     fn provider_info_with_command_auth() -> ModelProviderInfo {
         ModelProviderInfo {
+            anthropic_max_tokens: None,
+
+            anthropic_thinking_budget: None,
+
+            anthropic_prompt_caching: None,
             auth: Some(ModelProviderAuthInfo {
                 command: "print-token".to_string(),
                 args: Vec::new(),
@@ -561,6 +566,11 @@ mod tests {
 
     fn provider_for(base_url: String) -> ModelProviderInfo {
         ModelProviderInfo {
+            anthropic_max_tokens: None,
+
+            anthropic_thinking_budget: None,
+
+            anthropic_prompt_caching: None,
             name: "mock".into(),
             base_url: Some(base_url),
             env_key: None,
@@ -657,6 +667,11 @@ mod tests {
             ),
             (
                 ModelProviderInfo {
+                    anthropic_max_tokens: None,
+
+                    anthropic_thinking_budget: None,
+
+                    anthropic_prompt_caching: None,
                     name: "Azure".to_string(),
                     base_url: Some("https://example.com/openai".to_string()),
                     ..ModelProviderInfo::default()
@@ -665,6 +680,11 @@ mod tests {
             ),
             (
                 ModelProviderInfo {
+                    anthropic_max_tokens: None,
+
+                    anthropic_thinking_budget: None,
+
+                    anthropic_prompt_caching: None,
                     name: "Custom".to_string(),
                     base_url: Some("https://example.openai.azure.com/openai/v1".to_string()),
                     ..ModelProviderInfo::default()
@@ -996,6 +1016,11 @@ mod tests {
     fn custom_non_openai_provider_returns_no_account_state() {
         let provider = create_model_provider(
             ModelProviderInfo {
+                anthropic_max_tokens: None,
+
+                anthropic_thinking_budget: None,
+
+                anthropic_prompt_caching: None,
                 name: "Custom".to_string(),
                 base_url: Some("http://localhost:1234/v1".to_string()),
                 wire_api: WireApi::Responses,

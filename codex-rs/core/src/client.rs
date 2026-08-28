@@ -82,6 +82,7 @@ use codex_protocol::auth::AuthMode;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::Verbosity as VerbosityConfig;
+use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
@@ -1891,17 +1892,62 @@ impl ModelClientSession {
         let mut request = json!({
             "model": model_info.slug.clone(),
             "messages": messages,
-            "max_tokens": DEFAULT_ANTHROPIC_MAX_TOKENS,
+            "max_tokens": self
+                .client
+                .state
+                .provider
+                .info()
+                .anthropic_max_tokens
+                .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS),
             "stream": true,
         });
 
+        let provider = self.client.state.provider.info();
+        let mut tools = tools;
+
         if let Some(obj) = request.as_object_mut() {
-            obj.insert(
-                "system".to_string(),
-                serde_json::Value::String(instructions.clone()),
-            );
+            if provider.anthropic_prompt_caching.unwrap_or(false) {
+                // Prompt caching: the system prompt becomes a block array so
+                // the breakpoint marker has somewhere to live; the last tool
+                // definition gets the same marker (one breakpoint per span).
+                obj.insert(
+                    "system".to_string(),
+                    json!([{
+                        "type": "text",
+                        "text": instructions.clone(),
+                        "cache_control": { "type": "ephemeral" },
+                    }]),
+                );
+                if let Some(last) = tools.last_mut() {
+                    last.as_object_mut().map(|t| {
+                        t.insert("cache_control".to_string(), json!({ "type": "ephemeral" }))
+                    });
+                }
+            } else {
+                obj.insert(
+                    "system".to_string(),
+                    serde_json::Value::String(instructions.clone()),
+                );
+            }
             if !tools.is_empty() {
                 obj.insert("tools".to_string(), serde_json::Value::Array(tools));
+            }
+
+            // Extended thinking: budget must be in [1024, max_tokens - 1].
+            // Clamp rather than fail — a provider-level misconfig should not
+            // abort a turn (degradation table: log + clamp).
+            if let Some(budget) = provider.anthropic_thinking_budget {
+                let max_tokens = provider
+                    .anthropic_max_tokens
+                    .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS);
+                let clamped = budget.clamp(1024, max_tokens.saturating_sub(1));
+                if clamped != budget {
+                    debug!("anthropic thinking budget {budget} out of range; clamped to {clamped}");
+                }
+                obj.insert(
+                    "thinking".to_string(),
+                    json!({ "type": "enabled", "budget_tokens": clamped }),
+                );
             }
         }
 
@@ -3043,21 +3089,61 @@ fn build_messages_messages(input: Vec<ResponseItem>) -> Vec<serde_json::Value> {
         match item {
             ResponseItem::Message { role, content, .. } => {
                 let is_assistant = role == "assistant";
-                if let Some(text) = content_items_to_text(&content) {
-                    if is_assistant {
+                let text = content_items_to_text(&content);
+                let image_blocks = content_items_to_image_blocks(&content);
+                if text.is_none() && image_blocks.is_empty() {
+                    continue;
+                }
+                if is_assistant {
+                    // Assistant turns cannot carry images on the Messages
+                    // wire; images degrade to a mention in the text (already
+                    // dropped by content_items_to_text context).
+                    if let Some(text) = text {
                         pending_assistant_blocks.push(json!({
                             "type": "text",
                             "text": text,
                         }));
-                    } else {
-                        flush_assistant(&mut messages, &mut pending_assistant_blocks);
-                        // The Messages API only knows user/assistant; developer
-                        // and system degrades to user per the degradation table.
-                        messages.push(json!({
-                            "role": "user",
-                            "content": [{"type": "text", "text": text}],
-                        }));
                     }
+                } else {
+                    flush_assistant(&mut messages, &mut pending_assistant_blocks);
+                    // The Messages API only knows user/assistant; developer
+                    // and system degrades to user per the degradation table.
+                    let mut blocks: Vec<serde_json::Value> = Vec::new();
+                    if let Some(text) = text {
+                        blocks.push(json!({"type": "text", "text": text}));
+                    }
+                    blocks.extend(image_blocks);
+                    messages.push(json!({
+                        "role": "user",
+                        "content": blocks,
+                    }));
+                }
+            }
+            ResponseItem::Reasoning {
+                content,
+                encrypted_content,
+                ..
+            } => {
+                // Thinking replay: Anthropic requires thinking blocks be
+                // passed back verbatim (text + signature) inside tool-use
+                // rounds; without the signature the server 400s the whole
+                // turn. Without a signature we drop the block — validation
+                // was relaxed for non-tool turns (2026 steering docs).
+                if let Some(signature) = encrypted_content {
+                    let thinking: String = content
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|fragment| match fragment {
+                            ReasoningItemContent::ReasoningText { text }
+                            | ReasoningItemContent::Text { text } => text.clone(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    pending_assistant_blocks.push(json!({
+                        "type": "thinking",
+                        "thinking": thinking,
+                        "signature": signature,
+                    }));
                 }
             }
             ResponseItem::FunctionCall {
@@ -3147,6 +3233,38 @@ fn push_anthropic_tool_result(messages: &mut Vec<serde_json::Value>, call_id: &s
         "role": "user",
         "content": [block],
     }));
+}
+
+/// Converts Responses `input_image` content items to Anthropic
+/// `image` blocks. Only base64 data-URIs are accepted — the Messages API
+/// has no URL-fetch variant, so plain http(s) URLs degrade to being dropped
+/// (the text sibling already carries the fallback marker).
+fn content_items_to_image_blocks(
+    content: &[codex_protocol::models::ContentItem],
+) -> Vec<serde_json::Value> {
+    let mut blocks = Vec::new();
+    for item in content {
+        let codex_protocol::models::ContentItem::InputImage { image_url, .. } = item else {
+            continue;
+        };
+        let Some(rest) = image_url.strip_prefix("data:") else {
+            debug!("anthropic replay: non-data-URI image dropped: {image_url:?}");
+            continue;
+        };
+        let Some((media_type, data)) = rest.split_once(";base64,") else {
+            debug!("anthropic replay: malformed data-URI image dropped");
+            continue;
+        };
+        blocks.push(json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": data,
+            },
+        }));
+    }
+    blocks
 }
 
 fn content_items_to_text(content: &[codex_protocol::models::ContentItem]) -> Option<String> {
