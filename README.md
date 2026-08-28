@@ -27,6 +27,58 @@ This is a fork of `openai/codex` that restores and natively implements **three o
 
 Upstream is tracked as `upstream/main`. This fork's local agent docs (`docs/agents`, `docs/specs`, `PONYTAIL-DEBT.md`, etc.) are intentionally **not** committed here — they live in the working machine's sibling `D:/Aworker/codex/docs/` directory and are not pushed.
 
+### Using the three wires (Responses / Chat / Anthropic Messages)
+
+`wire_api` is **one protocol per provider** — there is no auto-negotiation and no failover. To use several protocols at once you declare multiple providers (they can even point at the same base URL) and pick one per run with `-p`:
+
+```toml
+# ~/.codex/config.toml
+
+# default: upstream behaviour, one provider, one wire
+model_provider = "openai"
+
+# --- Responses wire (OpenAI native /v1/responses) ---
+[model_providers.gw-resp]
+name        = "gw-resp"
+base_url    = "https://example.com/v1"   # note: path stays at /v1; the wire appends /responses, /chat/completions, or /messages itself
+wire_api    = "responses"
+env_key     = "MY_API_KEY"
+
+# --- Chat Completions wire (OpenAI legacy, restored by this fork) ---
+[model_providers.gw-chat]
+name        = "gw-chat"
+base_url    = "https://example.com/v1"
+wire_api    = "chat"
+env_key     = "MY_API_KEY"
+
+# --- Anthropic Messages wire (/v1/messages) ---
+[model_providers.gw-msg]
+name        = "gw-msg"
+base_url    = "https://example.com/v1"
+wire_api    = "anthropic"
+env_key     = "MY_API_KEY"
+
+# optional anthropic-only knobs (per-provider; leave unset to use built-in defaults):
+anthropic_max_tokens      = 128000   # output budget, otherwise a built-in default
+anthropic_thinking_budget = 8192     # extended-thinking budget_tokens (clamped to 1024..max_tokens-1)
+anthropic_prompt_caching  = true     # marks system prompt + last tool with cache_control: ephemeral
+```
+
+Then select a wire and model per invocation:
+
+```shell
+codex -p gw-resp -m some-openai-model    "…"
+codex -p gw-chat -m deepseekpro          "…"
+codex -p gw-msg  -m claude-…             "…"   # thinking chain streams natively (TUI shows reasoning deltas)
+```
+
+Behaviour notes:
+
+- **`experimental_bearer_token = "PROXY_MANAGED"`** (or a real token) also works in place of `env_key` for gateways that inject auth downstream.
+- The same physical gateway endpoints strike all three wires (`POST /v1/responses`, `POST /v1/chat/completions`, `POST /v1/messages`) — fork never strips or rewrites paths.
+- On the Anthropic wire, replay of the model's `thinking` blocks is done verbatim with the SSE `signature` (anthropic's tool-use round contract); unsigned reasonings are **dropped** rather than altered. Non-data-URI images are dropped loudly. Truncated tool-call JSON errors out — never silently fabricated.
+- A turn always runs on exactly one wire; switching wires mid-thread means starting a new turn with `-p`.
+
 ---
 
 ## Quickstart
