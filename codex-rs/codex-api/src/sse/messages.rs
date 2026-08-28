@@ -499,6 +499,7 @@ async fn finish_messages_stream(
             response_id,
             token_usage: usage,
             end_turn: Some(true),
+            usage_metadata: None,
         }))
         .await;
 }
