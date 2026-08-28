@@ -77,6 +77,7 @@ jobs:
           tag=tri-wire-test
           title="Tri-wire test build (CLI) — ${GITHUB_SHA:0:8}"
           gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
+          gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null || true
           gh release create "$tag" \
             --repo "${{ github.repository }}" \
             --title "$title" \
