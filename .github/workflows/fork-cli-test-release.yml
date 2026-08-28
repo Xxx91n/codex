@@ -1,0 +1,36 @@
+# fork-only workflow: build a testble release codex.exe (windows x86_64 msvc)
+# on demand; uploads it as a workflow artifact. NOT upstream-shipped.
+name: fork-cli-test-release
+on:
+  workflow_dispatch: {}
+
+jobs:
+  build-windows-cli:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: codex-rs
+      - name: Build codex-cli (release)
+        run: |
+          $env:RUST_MIN_STACK = "16777216"
+          cargo build --release --locked -p codex-cli --bin codex --target x86_64-pc-windows-msvc
+      - name: Verify binary
+        run: |
+          .\target\x86_64-pc-windows-msvc\release\codex.exe --version
+      - name: Stage artifact
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Compress-Archive -Path .\target\x86_64-pc-windows-msvc\release\codex.exe -DestinationPath out\codex-win-x86_64-pc-windows-msvc.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codex-cli-win-x86_64-msvc-${{ github.sha }}
+          path: codex-rs/out/codex-win-x86_64-pc-windows-msvc.zip
+          retention-days: 14
