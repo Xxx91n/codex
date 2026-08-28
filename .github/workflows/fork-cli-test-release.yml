@@ -1,5 +1,5 @@
-# fork-only workflow: build a testble release codex.exe (windows x86_64 msvc)
-# on demand; uploads it as a workflow artifact. NOT upstream-shipped.
+# fork-only workflow: build tri-wire test binaries for Windows/macOS/Linux and
+# publish one public rolling prerelease with per-OS assets. NOT upstream-shipped.
 name: fork-cli-test-release
 on:
   workflow_dispatch: {}
@@ -8,8 +8,24 @@ permissions:
   contents: write
 
 jobs:
-  build-windows-cli:
-    runs-on: windows-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: codex-win-x86_64-pc-windows-msvc.zip
+            bin: codex.exe
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: codex-linux-x86_64-unknown-linux-gnu.tar.gz
+            bin: codex
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: codex-mac-aarch64-apple-darwin.tar.gz
+            bin: codex
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: codex-rs
@@ -17,37 +33,53 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: codex-rs
       - name: Build codex-cli (release)
+        shell: bash
         run: |
-          $env:RUST_MIN_STACK = "16777216"
-          cargo build --release --locked -p codex-cli --bin codex --target x86_64-pc-windows-msvc
+          export RUST_MIN_STACK=16777216
+          cargo build --release --locked -p codex-cli --bin codex --target ${{ matrix.target }}
       - name: Verify binary
+        shell: bash
+        run: ./target/${{ matrix.target }}/release/${{ matrix.bin }} --version
+      - name: Package artifact
+        shell: bash
         run: |
-          .\target\x86_64-pc-windows-msvc\release\codex.exe --version
-      - name: Stage artifact
-        run: |
-          New-Item -ItemType Directory -Force -Path out | Out-Null
-          Compress-Archive -Path .\target\x86_64-pc-windows-msvc\release\codex.exe -DestinationPath out\codex-win-x86_64-pc-windows-msvc.zip
+          mkdir -p out
+          cd target/${{ matrix.target }}/release
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            7z a ../../../out/${{ matrix.asset }} ${{ matrix.bin }}
+          else
+            tar czf ../../../out/${{ matrix.asset }} ${{ matrix.bin }}
+          fi
       - uses: actions/upload-artifact@v4
         with:
-          name: codex-cli-win-x86_64-msvc-${{ github.sha }}
-          path: codex-rs/out/codex-win-x86_64-pc-windows-msvc.zip
+          name: cli-${{ matrix.target }}
+          path: codex-rs/out/${{ matrix.asset }}
           retention-days: 14
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*
+          merge-multiple: true
+          path: dist
       - name: Publish rolling prerelease (public download)
         env:
           GH_TOKEN: ${{ github.token }}
-        working-directory: codex-rs
         run: |
-          $tag = "tri-wire-test"
-          $title = "Tri-wire test build (CLI) — $($env:GITHUB_SHA.Substring(0,8))"
-          gh release delete $tag --yes --cleanup-tag 2>$null
-          gh release create $tag `
-            --repo ${{ github.repository }} `
-            --title $title `
-            --notes "Test build of the tri-wire fork CLI (feat/tri-wire-api). Windows x86_64 (msvc). Not signed. Report issues in this repo." `
-            --prerelease `
-            out\codex-win-x86_64-pc-windows-msvc.zip
+          tag=tri-wire-test
+          title="Tri-wire test build (CLI) — ${GITHUB_SHA:0:8}"
+          gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$tag" \
+            --repo "${{ github.repository }}" \
+            --title "$title" \
+            --notes "Test build of the tri-wire fork CLI (feat/tri-wire-api). Windows x86_64 / Linux x86_64 / macOS aarch64 (Apple Silicon). Unsigned. Report issues in this repo." \
+            --prerelease \
+            dist/*.zip dist/*.tar.gz
