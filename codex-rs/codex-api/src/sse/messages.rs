@@ -246,9 +246,7 @@ async fn process_messages_sse(
                 if let (Some(index), Some(block)) = (event.index, &event.content_block)
                     && block.block_type == "thinking"
                 {
-                    thinking_blocks
-                        .entry(index)
-                        .or_default();
+                    thinking_blocks.entry(index).or_default();
                     // Emit OutputItemAdded up front so thinking_delta events
                     // (ReasoningContentDelta) have an active item in core.
                     let item = ResponseItem::Reasoning {
@@ -425,9 +423,6 @@ async fn finish_messages_stream(
             encrypted_content: thinking.signature.clone(),
             internal_chat_message_metadata_passthrough: None,
         };
-        let _ = tx_event
-            .send(Ok(ResponseEvent::OutputItemAdded(item.clone())))
-            .await;
         let _ = tx_event.send(Ok(ResponseEvent::OutputItemDone(item))).await;
         let _ = index;
     }
