@@ -2763,7 +2763,9 @@ impl WebsocketTelemetry for ApiTelemetry {
 #[cfg(test)]
 use wire::anthropic::build_messages_messages;
 #[cfg(test)]
-use wire::chat::{build_chat_messages, map_chat_role};
+use wire::chat::build_chat_messages;
+#[cfg(test)]
+use wire::chat::map_chat_role;
 
 #[cfg(test)]
 #[path = "client_tests.rs"]
