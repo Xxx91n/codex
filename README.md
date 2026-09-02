@@ -79,6 +79,10 @@ Behaviour notes:
 - On the Anthropic wire, replay of the model's `thinking` blocks is done verbatim with the SSE `signature` (anthropic's tool-use round contract); unsigned reasonings are **dropped** rather than altered. Non-data-URI images are dropped loudly. Truncated tool-call JSON errors out — never silently fabricated.
 - A turn always runs on exactly one wire; switching wires mid-thread means starting a new turn with `-p`.
 
+### Local dev vs. cloud CI
+
+**Local machines only keep lightweight development — every heavy build, check, and release runs in GitHub Actions.** Locally you only need the Rust toolchain (pinned to `1.95.0` by `codex-rs/rust-toolchain.toml`) and `just` for quick `fmt`/`clippy`/`test` runs. The `fork-cli-test-release` workflow (triggered manually with `workflow_dispatch`) runs the `check` job (fmt + clippy + fork-scoped tests) and the release `build` job across Windows, macOS, and Linux, then publishes the rolling prerelease — so a local `codex-rs/target/` is just a disposable on-disk cache: delete it to reclaim ~110G of disk.
+
 ---
 
 ## Quickstart
