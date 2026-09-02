@@ -1,4 +1,7 @@
 use super::*;
+use codex_client::TransportError;
+use futures::TryStreamExt;
+use tokio_util::io::ReaderStream;
 
 #[test]
 fn input_json_delta_fragments_concatenate_by_block_index() {
@@ -201,7 +204,7 @@ fn thinking_delta_and_signature_frames_parse() {
 }
 
 #[tokio::test]
-async fn finish_messages_stream_flushes_unsigned_thinking_block() {
+async fn finish_messages_stream_flushes_thinking_block_as_done_without_added() {
     let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent, ApiError>>(8);
     let tool_uses: BTreeMap<usize, AggregatedToolUse> = BTreeMap::new();
     let mut thinking: BTreeMap<usize, AggregatedThinking> = BTreeMap::new();
@@ -224,25 +227,118 @@ async fn finish_messages_stream_flushes_unsigned_thinking_block() {
     )
     .await;
 
-    let events: Vec<_> = [rx.recv().await, rx.recv().await, rx.recv().await]
-        .into_iter()
-        .flat_map(|item| item.into_iter())
-        .collect::<Vec<_>>();
+    let mut events = Vec::new();
+    // Close the channel before draining: finish_messages_stream only takes
+    // &tx, so without an explicit drop the recv loop would never see EOF.
+    drop(tx);
+    while let Some(ev) = rx.recv().await {
+        events.push(ev);
+    }
+    // The thinking block was never Added before the flush (no
+    // content_block_start occurred), so flush must emit exactly one Done
+    // and zero Added events.
     let added = events
         .iter()
+        .filter(|ev| matches!(ev, Ok(ResponseEvent::OutputItemAdded(_))))
+        .count();
+    assert_eq!(added, 0, "flush must not emit Added: {events:?}");
+    let done = events
+        .iter()
         .find_map(|ev| match ev {
-            Ok(ResponseEvent::OutputItemAdded(ResponseItem::Reasoning {
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning {
                 content,
                 encrypted_content,
                 ..
             })) => Some((content.clone(), encrypted_content.clone())),
             _ => None,
         })
-        .expect("reasoning item added");
-    assert_eq!(added.1, Some("sig-xyz".to_string()));
-    let text = match &added.0.as_ref().unwrap()[0] {
+        .expect("reasoning item done from flush");
+    assert_eq!(done.1, Some("sig-xyz".to_string()));
+    let text = match &done.0.as_ref().unwrap()[0] {
         codex_protocol::models::ReasoningItemContent::ReasoningText { text } => text.clone(),
         other => panic!("unexpected content: {other:?}"),
     };
     assert_eq!(text, "let me reason");
+}
+
+#[tokio::test]
+async fn truncated_stream_never_double_adds_active_thinking_block() {
+    // Regression for the PONYTAIL yellow edge: a stream truncated by
+    // max_tokens never sends content_block_stop for the thinking block that
+    // already emitted OutputItemAdded on content_block_start, so the flush
+    // path must NOT emit a second Added for it.
+    let thinking_start = serde_json::json!({
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {"type": "thinking", "id": "blk_1"}
+    })
+    .to_string();
+    let thinking_delta = serde_json::json!({
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {"type": "thinking_delta", "thinking": "partial reasoning"}
+    })
+    .to_string();
+    let message_delta = serde_json::json!({
+        "type": "message_delta",
+        "delta": {"stop_reason": "max_tokens"},
+        "usage": {"input_tokens": 10, "output_tokens": 5}
+    })
+    .to_string();
+    let message_stop = serde_json::json!({"type": "message_stop"}).to_string();
+
+    let mut body = String::new();
+    for (kind, data) in [
+        ("message_start", serde_json::json!({
+            "type": "message_start",
+            "message": {"id": "msg_trunc", "model": "claude-x",
+                        "usage": {"input_tokens": 10, "output_tokens": 1}}
+        }).to_string()),
+        ("content_block_start", thinking_start),
+        ("content_block_delta", thinking_delta),
+        ("message_delta", message_delta),
+        ("message_stop", message_stop),
+    ] {
+        body.push_str(&format!("event: {kind}\ndata: {data}\n\n"));
+    }
+
+    let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent, ApiError>>(16);
+    let stream = ReaderStream::new(std::io::Cursor::new(body))
+        .map_err(|err| TransportError::Network(err.to_string()));
+    tokio::spawn(super::process_messages_sse(
+        Box::pin(stream),
+        tx,
+        std::time::Duration::from_secs(30),
+        /*telemetry*/ None,
+    ));
+
+    let mut events = Vec::new();
+    while let Some(ev) = rx.recv().await {
+        events.push(ev);
+    }
+
+    let added = events
+        .iter()
+        .filter(|ev| matches!(ev, Ok(ResponseEvent::OutputItemAdded(_))))
+        .count();
+    let done_reasoning = events
+        .iter()
+        .filter(|ev| {
+            matches!(
+                ev,
+                Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning { .. }))
+            )
+        })
+        .count();
+    assert_eq!(added, 1, "expected exactly one Added, got {added}: {events:?}");
+    assert_eq!(
+        done_reasoning, 1,
+        "expected exactly one reasoning Done from flush, got {done_reasoning}: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, Ok(ResponseEvent::Completed { .. }))),
+        "stream should still complete after flush: {events:?}"
+    );
 }
