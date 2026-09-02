@@ -289,11 +289,15 @@ async fn truncated_stream_never_double_adds_active_thinking_block() {
 
     let mut body = String::new();
     for (kind, data) in [
-        ("message_start", serde_json::json!({
-            "type": "message_start",
-            "message": {"id": "msg_trunc", "model": "claude-x",
-                        "usage": {"input_tokens": 10, "output_tokens": 1}}
-        }).to_string()),
+        (
+            "message_start",
+            serde_json::json!({
+                "type": "message_start",
+                "message": {"id": "msg_trunc", "model": "claude-x",
+                            "usage": {"input_tokens": 10, "output_tokens": 1}}
+            })
+            .to_string(),
+        ),
         ("content_block_start", thinking_start),
         ("content_block_delta", thinking_delta),
         ("message_delta", message_delta),
@@ -326,11 +330,16 @@ async fn truncated_stream_never_double_adds_active_thinking_block() {
         .filter(|ev| {
             matches!(
                 ev,
-                Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning { .. }))
+                Ok(ResponseEvent::OutputItemDone(
+                    ResponseItem::Reasoning { .. }
+                ))
             )
         })
         .count();
-    assert_eq!(added, 1, "expected exactly one Added, got {added}: {events:?}");
+    assert_eq!(
+        added, 1,
+        "expected exactly one Added, got {added}: {events:?}"
+    );
     assert_eq!(
         done_reasoning, 1,
         "expected exactly one reasoning Done from flush, got {done_reasoning}: {events:?}"
