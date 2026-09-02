@@ -320,3 +320,74 @@ Tests and features must support Linux, macOS and Windows unless feature is expli
 
 Codex supports running connected app-server and exec-server on different operating systems. See the
 `$remote-tests` skill for details about integration testing these configurations.
+
+## Fork delta: tri-wire-api
+
+This fork (`feat/tri-wire-api`) speaks three outbound wire protocols on one
+internal representation (`ResponseItem`): **Responses** (upstream's only wire),
+**Chat Completions** (removed upstream Feb 2026, PR #10157; restored here), and
+**Anthropic Messages** (added here, goose-blueprint in-process transport).
+
+### Registration points (red line - do not move)
+
+Fork divergence is confined to three registration points. Never rename or
+relocate them, and never add a wire without touching all three:
+
+1. `WireApi` enum - `codex-rs/model-provider-info/src/lib.rs:63`:
+
+   ```rust
+   #[serde(rename_all = "lowercase")]
+   pub enum WireApi {
+       #[default]
+       Responses,   // upstream's only wire
+       Chat,        // fork: restored (removed upstream Feb 2026)
+       Anthropic,   // fork: added (goose-blueprint transport)
+   }
+   ```
+
+2. `ModelProviderInfo` - `codex-rs/model-provider-info/src/lib.rs:112`; its
+   `wire_api` field selects the protocol per provider (defaults to `Responses`):
+
+   ```rust
+   pub struct ModelProviderInfo {
+       // ...
+       /// Which wire protocol this provider expects.
+       #[serde(default)]
+       pub wire_api: WireApi,
+       // ...
+   }
+   ```
+
+3. `ModelClientSession::stream` dispatch - `codex-rs/core/src/client.rs:2402`:
+
+   ```rust
+   let wire_api = self.client.state.provider.info().wire_api;
+   match wire_api {
+       WireApi::Responses  => self.stream_responses_api(..).await,
+       WireApi::Chat       => self.stream_chat_completions(..).await,
+       WireApi::Anthropic  => self.stream_anthropic_messages(..).await,
+   }
+   ```
+
+Extracting wire-specific logic out of `client.rs` into per-wire modules is
+encouraged (new files + imports), but these three registration points stay put.
+
+### Build & test
+
+- `just test -p codex-api` - SSE unit tests for the Chat/Messages wires.
+- `just test -p codex-core` - client_tests + wiremock suites (anthropic/chat).
+- `just test` - full workspace suite; only after changes to shared crates.
+- `just fix -p <project>`, `just clippy -p <project>`, `just fmt`, `just fmt-check`.
+- Release build (CI parity):
+  `RUST_MIN_STACK=16777216 cargo build --release --locked -p codex-cli --bin codex`.
+- `just` sets `RUST_MIN_STACK=8388608` and `NEXTEST_PROFILE=local` for local
+  tests. No wire-specific env vars are required to build or run the wiremock
+  suites; live Anthropic/Chat smoke tests need a real gateway and a provider
+  `env_key` (see the README three-wire usage guide).
+
+### Sync
+
+- `upstream` = `openai/codex`; `origin` = this fork. Track `upstream/main`.
+- Merge, never rebase. Rebase rewrites the fork seam and destroys auditability.
+- After each upstream merge, record rulings in a new `docs/adr/NNNN-*.md`
+  (Nygard: Status/Context/Decision/Consequences), incrementing the counter.
