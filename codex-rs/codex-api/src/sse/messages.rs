@@ -248,7 +248,7 @@ async fn process_messages_sse(
                 {
                     thinking_blocks
                         .entry(index)
-                        .or_insert_with(AggregatedThinking::default);
+                        .or_default();
                     // Emit OutputItemAdded up front so thinking_delta events
                     // (ReasoningContentDelta) have an active item in core.
                     let item = ResponseItem::Reasoning {
