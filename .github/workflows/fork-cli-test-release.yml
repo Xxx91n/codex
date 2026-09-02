@@ -61,6 +61,42 @@ jobs:
           path: codex-rs/out/${{ matrix.asset }}
           retention-days: 14
 
+  check:
+    # fmt + clippy + fork-scoped tests on the same three platforms as `build`.
+    # Independent of the release path and never touches its artifacts.
+    name: check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # rust-cache keys off codex-rs/Cargo.lock (lock hash included) and only
+      # writes the cache on long-lived branches; every other run just reads it.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: codex-rs
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feat/tri-wire-api' }}
+      - name: Check formatting
+        shell: bash
+        run: cargo fmt -- --config imports_granularity=Item --check
+      - name: Clippy (fork packages)
+        shell: bash
+        run: cargo clippy --locked --lib -p codex-api -p codex-model-provider-info -p codex-core -- -D warnings
+      - name: Test (fork packages + wiremock suites)
+        shell: bash
+        run: |
+          export RUST_MIN_STACK=16777216
+          cargo test --locked --lib -p codex-api -p codex-model-provider-info
+          cargo test --locked -p codex-core --test all -- anthropic_wiremock chat_wiremock
+
   release:
     needs: build
     runs-on: ubuntu-latest
