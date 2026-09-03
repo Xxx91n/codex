@@ -43,6 +43,16 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
 - 禁止用法：改/编 signature 再回传（触发上游 400）；thinking 文本拼进 content。
 - 源：ADR-0003（红线，同 anthropic 签名红线同级）；ARCH-tri-wire-20260902。
 
+### reasoning_content 透传
+- 本仓用法：Chat wire 入站把 `delta.reasoning_content ?? delta.reasoning`（vLLM 0.18+
+  更名期双名 coalesce）合成为 `ResponseItem::Reasoning{content:[ReasoningText],
+  encrypted_content: None}`，三事件协议 Added→ReasoningContentDelta→Done；出站
+  builder 把 Reasoning 历史回传为 assistant `reasoning_content`。复用现型不加新枚举
+  变体（per ADR-0004）。
+- 禁止用法：为 chat 思维链新增 ReasoningPart 变体或第二 IR；伪造签名；透传原始字节
+  不经 IR；把本词条与 thinking signature 红线混淆（chat 无签名）。
+- 源：ADR-0004；research/10-atomcode-reasoning-content-20260904.md。
+
 ### cache_control 注入
 - 本仓用法：仅 anthropic wire 出站侧注入；向 OpenAI 兼容方向无等价物，不出现。
 - 禁止用法：往 responses/chat 输出写 cache_control 块；当跨 wire 通用语义。

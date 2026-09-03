@@ -5,6 +5,7 @@ use crate::telemetry::SseTelemetry;
 use codex_client::ByteStream;
 use codex_client::StreamResponse;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::TokenUsage;
 use eventsource_stream::Eventsource;
@@ -51,6 +52,13 @@ struct ChatChoice {
 struct ChatDelta {
     #[serde(default)]
     content: Option<String>,
+    /// Chain-of-thought delta: `reasoning_content` is the DeepSeek-established
+    /// de-facto standard; vLLM 0.18+ renamed it to `reasoning`, so both names
+    /// coalesce (first non-empty wins) during the ecosystem migration.
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<ChatToolCallDelta>>,
 }
@@ -78,6 +86,14 @@ struct ChatUsage {
     prompt_tokens: i64,
     completion_tokens: i64,
     total_tokens: i64,
+    #[serde(default)]
+    completion_tokens_details: Option<ChatCompletionTokensDetails>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ChatCompletionTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: Option<i64>,
 }
 
 impl From<ChatUsage> for TokenUsage {
@@ -87,7 +103,10 @@ impl From<ChatUsage> for TokenUsage {
             cached_input_tokens: 0,
             cache_write_input_tokens: 0,
             output_tokens: usage.completion_tokens,
-            reasoning_output_tokens: 0,
+            reasoning_output_tokens: usage
+                .completion_tokens_details
+                .and_then(|details| details.reasoning_tokens)
+                .unwrap_or(0),
             total_tokens: usage.total_tokens,
             codex_rollout_budget_units: None,
         }
@@ -139,6 +158,11 @@ async fn process_chat_sse(
     let mut tool_calls: Vec<AggregatedToolCall> = Vec::new();
     let mut last_server_model: Option<String> = None;
     let mut length_truncated = false;
+    // Chain-of-thought aggregation: `None` while no reasoning segment is open.
+    // Chat has no explicit block boundaries, so the segment closes at the
+    // first content/tool_calls delta (the switch point) or at [DONE].
+    let mut reasoning_text: Option<String> = None;
+    let mut reasoning_done = false;
 
     loop {
         let start = Instant::now();
@@ -170,6 +194,7 @@ async fn process_chat_sse(
         };
 
         if sse.data.trim() == "[DONE]" {
+            close_reasoning_segment(&tx_event, &mut reasoning_text, &mut reasoning_done).await;
             if let Err(err) = emit_chat_completion_items(
                 &tx_event,
                 &assistant_text,
@@ -218,6 +243,46 @@ async fn process_chat_sse(
         }
 
         for choice in event.choices {
+            if let Some(reasoning) = reasoning_delta(&choice.delta) {
+                if reasoning_done {
+                    // The segment closed at its switch point; a later
+                    // reasoning delta would have no active item to attach to.
+                    // No known chat-compatible provider interleaves reasoning
+                    // after content/tool_calls.
+                    debug!("ignoring reasoning delta after reasoning segment closed");
+                } else {
+                    if reasoning_text.is_none() {
+                        // Emit OutputItemAdded up front so ReasoningContentDelta
+                        // events have an active item in core (same protocol as
+                        // the Anthropic wire's thinking blocks).
+                        let item = ResponseItem::Reasoning {
+                            id: None,
+                            summary: Vec::new(),
+                            content: None,
+                            encrypted_content: None,
+                            internal_chat_message_metadata_passthrough: None,
+                        };
+                        let _ = tx_event
+                            .send(Ok(ResponseEvent::OutputItemAdded(item)))
+                            .await;
+                        reasoning_text = Some(String::new());
+                    }
+                    if let Some(text) = reasoning_text.as_mut() {
+                        text.push_str(&reasoning);
+                    }
+                    let _ = tx_event
+                        .send(Ok(ResponseEvent::ReasoningContentDelta {
+                            delta: reasoning,
+                            content_index: 0,
+                        }))
+                        .await;
+                }
+            }
+            // The first content or tool_calls delta marks the end of the
+            // reasoning segment: emit the complete Reasoning item now.
+            if choice.delta.content.is_some() || choice.delta.tool_calls.is_some() {
+                close_reasoning_segment(&tx_event, &mut reasoning_text, &mut reasoning_done).await;
+            }
             if let Some(content) = choice.delta.content {
                 if !assistant_item_open {
                     let msg = ResponseItem::Message {
@@ -245,6 +310,45 @@ async fn process_chat_sse(
                 length_truncated = true;
             }
         }
+    }
+}
+
+/// Coalesces the reasoning delta across the ecosystem's field-name split:
+/// `reasoning_content` (DeepSeek/SGLang/Kimi) vs `reasoning` (vLLM 0.18+
+/// rename, with `reasoning_content` deprecated to null). The first non-empty
+/// value wins.
+fn reasoning_delta(delta: &ChatDelta) -> Option<String> {
+    delta
+        .reasoning_content
+        .clone()
+        .filter(|text| !text.is_empty())
+        .or_else(|| delta.reasoning.clone().filter(|text| !text.is_empty()))
+}
+
+/// Emits the completed Reasoning item for an open reasoning segment. Chat has
+/// no block-stop event, so this runs at the first content/tool_calls delta
+/// (the switch point) and again at [DONE] for reasoning-only turns. An empty
+/// segment produces no item; a closed segment never re-emits.
+async fn close_reasoning_segment(
+    tx_event: &mpsc::Sender<Result<ResponseEvent, ApiError>>,
+    reasoning_text: &mut Option<String>,
+    reasoning_done: &mut bool,
+) {
+    if let Some(text) = reasoning_text.take()
+        && !*reasoning_done
+    {
+        *reasoning_done = true;
+        if text.trim().is_empty() {
+            return;
+        }
+        let item = ResponseItem::Reasoning {
+            id: None,
+            summary: Vec::new(),
+            content: Some(vec![ReasoningItemContent::ReasoningText { text }]),
+            encrypted_content: None,
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let _ = tx_event.send(Ok(ResponseEvent::OutputItemDone(item))).await;
     }
 }
 
