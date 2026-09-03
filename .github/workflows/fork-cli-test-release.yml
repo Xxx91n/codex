@@ -83,7 +83,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: codex-rs
-          save-if: true # TEMPORARY: rust-cache increment verification on this branch (reverted in next commit)
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feat/tri-wire-api' }}
       - name: Check formatting
         shell: bash
         run: cargo fmt -- --config imports_granularity=Item --check
