@@ -1,0 +1,171 @@
+# fork-health.yml — upstream-drift watchdog for the tri-wire fork seam.
+# Fork-only (NOT upstream-shipped). Runs daily on the default branch (which is
+# feat/tri-wire-api, the branch that carries the seam) plus on demand via
+# workflow_dispatch. Verifies the fork seam — the three registration points
+# (WireApi / ModelProviderInfo.wire_api / client.rs dispatch) and the per-wire
+# modules — with fmt, clippy over all three seam crates, and the full wiremock
+# suites; reports upstream drift on the high-frequency seam surface; opens or
+# refreshes a `fork-health` issue on failure. It never builds release binaries
+# and never publishes — that stays in fork-cli-test-release.yml.
+name: fork-health
+
+on:
+  schedule:
+    # Daily 06:00 UTC (the how2.sh template's cadence). GitHub schedules are
+    # best-effort (typically 5-45 min late) and fire on the DEFAULT branch
+    # only — this fork's default branch carries the seam, so the daily run
+    # always exercises feat/tri-wire-api. workflow_dispatch stays as the
+    # always-immediate fallback for post-merge and incident reruns.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: Ref to health-check (defaults to the ref you dispatch from)
+        type: string
+        required: false
+        default: ''
+      full_matrix:
+        description: Run the seam suites on all three OSes (cron is ubuntu-only)
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: fork-health-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  seam-check:
+    # Skip when this repo itself is forked downstream, so the inherited cron
+    # does not burn minutes and spam notifications there (quarto-cli#10235).
+    if: github.repository == 'Xxx91n/codex'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ (inputs.full_matrix == true) && fromJSON('["ubuntu-latest", "macos-latest", "windows-latest"]') || fromJSON('["ubuntu-latest"]') }}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history: the drift-probe diff needs a merge-base
+          ref: ${{ inputs.target_ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # `just test` is the repo-mandated test entrypoint and shells out to
+      # cargo-nextest (NEXTEST_PROFILE=local) — same install path the repo's
+      # own rust-ci-full nextest jobs use.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-nextest
+      # Deterministic per-OS key shared across daily runs (add-job-id-key:
+      # false) so each cron hit restores the previous day's artifacts; writes
+      # are gated to long-lived branches exactly like fork-cli-test-release.yml's
+      # check job (measured 3-5x incremental speedup, key v0-rust-*<lock-hash>);
+      # cache-on-failure keeps a red seam debuggable without cold rebuilds.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: codex-rs
+          shared-key: fork-health-${{ matrix.os }}
+          add-job-id-key: false
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feat/tri-wire-api' }}
+      - name: Check formatting
+        shell: bash
+        run: cargo fmt -- --config imports_granularity=Item --check
+      # Clippy covers the whole seam surface — upstream's high-frequency
+      # collision files (sse/responses.rs, endpoint/responses*.rs, client.rs)
+      # live in these three crates. codex-core is included because
+      # wire-module-extraction landed and fixed its collapsible_match debt,
+      # so the leaf-crate-only scoping in fork-cli-test-release.yml is no
+      # longer forced on this daily job.
+      - name: Clippy (seam crates)
+        shell: bash
+        run: cargo clippy --locked --lib -p codex-api -p codex-core -p codex-model-provider-info -- -D warnings
+      # The wiremock suites (chat_wiremock / anthropic_wiremock / client)
+      # live in codex-core's single aggregated test binary — deliberately
+      # kept out of fork-cli-test-release.yml's latency-sensitive check job;
+      # this daily, non-PR-blocking job is their home. `just test` follows
+      # the repo nextest defaults.
+      - name: Test fork seam suites
+        shell: bash
+        run: just test -p codex-api -p codex-core
+      # Advisory drift probe (ADR-0001 weekly merge cadence): report how far
+      # upstream main has moved and which seam-surface files it touched, so
+      # the "what to read after a merge" list from the architecture review
+      # (section 4.4) is generated automatically, in the style of VSCodium's
+      # check job. Never gates the job — a fetch failure is not a seam failure.
+      - name: Drift probe vs upstream/main (advisory)
+        continue-on-error: true
+        shell: bash
+        run: |
+          git remote get-url upstream >/dev/null 2>&1 || git remote add upstream https://github.com/openai/codex.git
+          git fetch upstream main --filter=blob:none
+          {
+            echo "## Upstream drift (advisory)"
+            echo "upstream/main: $(git rev-parse --short upstream/main)"
+            echo "behind by $(git rev-list --count HEAD..upstream/main) commit(s)"
+            echo
+            echo "### Upstream touched on the seam surface"
+            git diff --name-only HEAD...upstream/main -- \
+              codex-rs/codex-api/src/sse/responses.rs \
+              codex-rs/codex-api/src/endpoint/responses_websocket.rs \
+              codex-rs/codex-api/src/endpoint/responses.rs \
+              codex-rs/core/src/client.rs \
+              codex-rs/model-provider-info/src/lib.rs
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  alert:
+    # Only when seam-check actually failed (skipped or cancelled never alerts).
+    needs: seam-check
+    if: failure() && !cancelled()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or refresh the fork-health failure issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            // Idempotently ensure the label exists so the issue below always
+            // carries it, even on a repo where it was never created manually.
+            await github.rest.issues.createLabel({
+              owner, repo, name: 'fork-health', color: 'd93f0b',
+              description: 'Daily fork-seam health check failure',
+            }).catch(() => {});
+            const title = `fork-health failed on ${context.ref} @ ${context.sha.slice(0, 8)}`;
+            const body = [
+              'Daily fork-seam health check **failed**.',
+              '',
+              `- Run: ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
+              `- Branch: ${context.ref}`,
+              '- Fix path: open the run log; the "Drift probe" step summary lists',
+              '  upstream files that moved on the seam surface since the last sync.',
+              '',
+              '_Auto-opened by fork-health.yml. Resolve and close; the next daily run re-checks._',
+            ].join('\n');
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner, repo, state: 'open', labels: 'fork-health',
+            });
+            const existing = open.find((i) => i.title.startsWith('fork-health failed'));
+            if (existing) {
+              await github.rest.issues.update({ owner, repo, issue_number: existing.number, body });
+            } else {
+              await github.rest.issues.create({ owner, repo, title, body, labels: ['fork-health'] });
+            }
+      - name: Notify Slack if a webhook is configured
+        if: env.SLACK_WEBHOOK != ''
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+        run: |
+          curl -fsS -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"fork-health failed on $GITHUB_REF — $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"}" \
+            "$SLACK_WEBHOOK" || true
