@@ -1,0 +1,366 @@
+{
+  "schema_version": 1,
+  "ir": "codex_protocol::models::ResponseItem",
+  "meta": {
+    "purpose": "Semantic-to-wire cross-reference table: for each semantic, how it is expressed on each of the three wires (Responses / Chat Completions / Anthropic Messages). Fixture names resolve relative to this directory. Vocabulary per CONTEXT.md (ticket 06); wire constants and usage_metadata rulings per ADR-0002; per-wire module shapes per core/src/client/wire/{chat,anthropic}.rs and codex-api/src/sse/{responses,chat_completions,messages}.rs.",
+    "verified_date": "2026-09-04",
+    "verified_against": "fork merge base ed4bb72516f + second-round lanes (do/ne/fo) atop it",
+    "maintenance": "On every upstream merge, re-verify rows whose wire domain was touched and bump verified_date. Flip the degraded chat thinking row to native when ticket 10 lands, and record reasoning_effort translation when ticket 11 lands. A stale table is the frozen-fixture antipattern (reports/09-wire-mock-cross-fixture-research-index.md).",
+    "support_legend": {
+      "native": "the upstream protocol expresses the semantic natively; the fork passes it through",
+      "translated": "the fork synthesizes the semantic on this wire from the shared ResponseItem IR",
+      "degraded": "the fork drops or downgrades the semantic on this wire (fail-loud or silent-drop recorded here)",
+      "absent": "the wire has no equivalent; the fork neither sends nor accepts it"
+    }
+  },
+  "wires": [
+    {
+      "id": "responses",
+      "endpoint": "/v1/responses",
+      "frame_terminator": "response.completed | response.failed | response.incomplete",
+      "note": "Upstream [OI] Responses API. usage_metadata passes through unchanged (ADR-0002 Ruling 2)."
+    },
+    {
+      "id": "chat",
+      "endpoint": "/v1/chat/completions",
+      "frame_terminator": "data: [DONE]",
+      "note": "Fork-restored wire (PR #12234 blueprint). Synthesized Completed carries usage_metadata: None (ADR-0002 Ruling 2)."
+    },
+    {
+      "id": "anthropic",
+      "endpoint": "/v1/messages",
+      "frame_terminator": "message_stop | event: error",
+      "note": "goose-blueprint in-process transport. Synthesized Completed carries usage_metadata: None (ADR-0002 Ruling 2)."
+    }
+  ],
+  "semantics": [
+    {
+      "id": "tool_call",
+      "direction": "both",
+      "ir_mapping": "ResponseItem::FunctionCall / FunctionCallOutput (+ LocalShellCall / CustomToolCall)"
+    },
+    {
+      "id": "thinking",
+      "direction": "both",
+      "ir_mapping": "ResponseItem::Reasoning"
+    },
+    {
+      "id": "image",
+      "direction": "both",
+      "ir_mapping": "ContentItem::InputImage"
+    },
+    {
+      "id": "cache_control",
+      "direction": "request",
+      "ir_mapping": "no first-class IR item; provider flags (anthropic_prompt_caching)"
+    },
+    {
+      "id": "streaming_stop",
+      "direction": "response",
+      "ir_mapping": "ResponseEvent::Completed / TurnComplete"
+    },
+    {
+      "id": "error",
+      "direction": "response",
+      "ir_mapping": "ApiError::Stream / ApiError classification"
+    }
+  ],
+  "matrix": [
+    {
+      "semantic": "tool_call",
+      "wire": "responses",
+      "support": "native",
+      "direction": "both",
+      "ir_mapping": "ResponseItem::FunctionCall / FunctionCallOutput",
+      "stream_events": [
+        "response.output_item.added",
+        "response.function_call_arguments.delta",
+        "response.output_item.done(function_call)",
+        "response.completed"
+      ],
+      "terminator": "terminal: response.completed",
+      "replay_constraints": [
+        "output_item.done function_call item is authoritative; arguments delta fragments are not consumed verbatim"
+      ],
+      "fixtures": [
+        "tool_call/responses__roundtrip.json"
+      ]
+    },
+    {
+      "semantic": "tool_call",
+      "wire": "chat",
+      "support": "translated",
+      "direction": "both",
+      "ir_mapping": "ResponseItem::FunctionCall / FunctionCallOutput",
+      "stream_events": [
+        "choices[].delta.tool_calls (index-keyed merge)",
+        "finish_reason=\"tool_calls\"",
+        "usage frame (empty choices)",
+        "data: [DONE]"
+      ],
+      "terminator": "finish_reason=\"tool_calls\" then data: [DONE]",
+      "replay_constraints": [
+        "consecutive tool calls MUST coalesce into one assistant tool_calls array (strict servers 400 otherwise)",
+        "tool output replays as {role:\"tool\", tool_call_id, content}"
+      ],
+      "fixtures": [
+        "tool_call/chat__roundtrip_delta_split.json"
+      ]
+    },
+    {
+      "semantic": "tool_call",
+      "wire": "anthropic",
+      "support": "translated",
+      "direction": "both",
+      "ir_mapping": "ResponseItem::FunctionCall / FunctionCallOutput",
+      "stream_events": [
+        "content_block_start(tool_use)",
+        "content_block_delta(input_json_delta)",
+        "content_block_stop",
+        "message_delta(stop_reason=\"tool_use\")",
+        "message_stop"
+      ],
+      "terminator": "stop_reason=\"tool_use\" then message_stop",
+      "replay_constraints": [
+        "no-argument tool_use serializes input:{} not null (400 otherwise)",
+        "tool results travel as tool_result blocks under a user message; strict user/assistant alternation"
+      ],
+      "fixtures": [
+        "tool_call/anthropic__thinking_then_tool_use.json"
+      ]
+    },
+    {
+      "semantic": "thinking",
+      "wire": "responses",
+      "support": "native",
+      "direction": "both",
+      "ir_mapping": "ResponseItem::Reasoning (encrypted_content / ReasoningItemContent)",
+      "stream_events": [
+        "response.output_item.added(reasoning)",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_text.delta",
+        "response.output_item.done(reasoning)",
+        "response.completed(output_tokens_details.reasoning_tokens)"
+      ],
+      "terminator": "terminal: response.completed",
+      "replay_constraints": [
+        "reasoning request controls (reasoning.effort/summary) are Responses-only; chat/anthropic degrade per CONTEXT.md"
+      ],
+      "fixtures": []
+    },
+    {
+      "semantic": "thinking",
+      "wire": "chat",
+      "support": "degraded",
+      "direction": "response",
+      "ir_mapping": "inbound delta.reasoning_content is NOT parsed (ticket 10 will land ReasoningPart passthrough)",
+      "stream_events": [
+        "choices[].delta.reasoning_content (silently ignored by current state machine)"
+      ],
+      "terminator": "n/a until ticket 10",
+      "replay_constraints": [
+        "flip support to native when ticket 10 lands; until then reasoning_content is dropped on the floor"
+      ],
+      "fixtures": []
+    },
+    {
+      "semantic": "thinking",
+      "wire": "anthropic",
+      "support": "native",
+      "direction": "both",
+      "ir_mapping": "ResponseItem::Reasoning (encrypted_content = signature)",
+      "stream_events": [
+        "content_block_start(thinking)",
+        "content_block_delta(thinking_delta)",
+        "content_block_delta(signature_delta)",
+        "content_block_stop"
+      ],
+      "terminator": "n/a (block closes with signature_delta)",
+      "replay_constraints": [
+        "PERMANENT RED LINE: thinking blocks replay verbatim (text AND signature) inside tool-use rounds; server 400s the whole turn otherwise",
+        "a reasoning item WITHOUT a signature is dropped, never rewritten",
+        "never merge thinking content into text content blocks",
+        "request side: provider.anthropic_thinking_budget -> thinking:{type:\"enabled\",budget_tokens} clamped to [1024, max_tokens-1]"
+      ],
+      "fixtures": []
+    },
+    {
+      "semantic": "image",
+      "wire": "responses",
+      "support": "native",
+      "direction": "both",
+      "ir_mapping": "ContentItem::InputImage",
+      "stream_events": [
+        "response.output_item.done(image_generation_call) on output side"
+      ],
+      "terminator": "n/a",
+      "replay_constraints": [
+        "input_image accepts data-URI and http(s) URLs on this wire"
+      ],
+      "fixtures": []
+    },
+    {
+      "semantic": "image",
+      "wire": "chat",
+      "support": "degraded",
+      "direction": "request",
+      "ir_mapping": "ContentItem::InputImage (dropped: build_chat_messages only extracts text via content_items_to_text)",
+      "stream_events": [],
+      "terminator": "n/a",
+      "replay_constraints": [
+        "images are dropped entirely on the chat wire today; a fixture asserting the drop is a negative fixture"
+      ],
+      "fixtures": []
+    },
+    {
+      "semantic": "image",
+      "wire": "anthropic",
+      "support": "translated",
+      "direction": "request",
+      "ir_mapping": "ContentItem::InputImage -> {type:\"image\", source:{type:\"base64\", media_type, data}}",
+      "stream_events": [],
+      "terminator": "n/a",
+      "replay_constraints": [
+        "ONLY base64 data-URIs are accepted; plain http(s) URLs and malformed data-URIs are dropped loudly (debug log)",
+        "assistant turns cannot carry images on the Messages wire"
+      ],
+      "fixtures": []
+    },
+    {
+      "semantic": "cache_control",
+      "wire": "responses",
+      "support": "native",
+      "direction": "both",
+      "ir_mapping": "server-managed; usage.input_tokens_details.{cached_tokens,cache_write_tokens} reports hits",
+      "stream_events": [
+        "response.completed(usage.input_tokens_details.cached_tokens)"
+      ],
+      "terminator": "n/a",
+      "replay_constraints": [
+        "no explicit request-side breakpoint exists on this wire"
+      ],
+      "fixtures": []
+    },
+    {
+      "semantic": "cache_control",
+      "wire": "chat",
+      "support": "absent",
+      "direction": "both",
+      "ir_mapping": "no equivalent; usage carries no cache fields",
+      "stream_events": [],
+      "terminator": "n/a",
+      "replay_constraints": [
+        "never inject cache_control into chat requests (CONTEXT.md: injection is anthropic-only)"
+      ],
+      "fixtures": []
+    },
+    {
+      "semantic": "cache_control",
+      "wire": "anthropic",
+      "support": "translated",
+      "direction": "request",
+      "ir_mapping": "request-side breakpoints {type:\"ephemeral\"}: system block array + last tool definition",
+      "stream_events": [],
+      "terminator": "n/a",
+      "replay_constraints": [
+        "only when provider flag anthropic_prompt_caching is set",
+        "system becomes a block array so the breakpoint has somewhere to live; one breakpoint per span"
+      ],
+      "fixtures": []
+    },
+    {
+      "semantic": "streaming_stop",
+      "wire": "responses",
+      "support": "native",
+      "direction": "response",
+      "ir_mapping": "ResponseEvent::Completed (usage_metadata passthrough)",
+      "stream_events": [
+        "response.completed",
+        "response.incomplete(incomplete_details.reason)"
+      ],
+      "terminator": "response.completed | response.incomplete",
+      "replay_constraints": [
+        "a stream that ends without response.completed is an error, not a silent stop"
+      ],
+      "fixtures": []
+    },
+    {
+      "semantic": "streaming_stop",
+      "wire": "chat",
+      "support": "translated",
+      "direction": "response",
+      "ir_mapping": "ResponseEvent::Completed synthesized with usage_metadata: None (ADR-0002 Ruling 2)",
+      "stream_events": [
+        "choices[].finish_reason=\"stop\"",
+        "usage frame (empty choices)",
+        "data: [DONE]"
+      ],
+      "terminator": "data: [DONE]",
+      "replay_constraints": [
+        "finish_reason=\"length\" maps to ContextWindowExceeded",
+        "no [DONE] and no terminal frame = stream-closed error"
+      ],
+      "fixtures": []
+    },
+    {
+      "semantic": "streaming_stop",
+      "wire": "anthropic",
+      "support": "translated",
+      "direction": "response",
+      "ir_mapping": "ResponseEvent::Completed synthesized with usage_metadata: None (ADR-0002 Ruling 2)",
+      "stream_events": [
+        "message_delta(stop_reason)",
+        "message_stop"
+      ],
+      "terminator": "message_stop",
+      "replay_constraints": [
+        "stop_reason is data, not a stream-end shortcut: let message_stop drive loop termination",
+        "no [DONE] sentinel on this wire"
+      ],
+      "fixtures": []
+    },
+    {
+      "semantic": "error",
+      "wire": "responses",
+      "support": "native",
+      "direction": "response",
+      "ir_mapping": "in-band response.failed -> ApiError classification (context_window_exceeded / quota_exceeded / rate_limit_exceeded / invalid_prompt / overloaded)",
+      "stream_events": [
+        "response.failed(response.error.{code,message})"
+      ],
+      "terminator": "response.failed",
+      "replay_constraints": [
+        "error.code decides the ApiError classification"
+      ],
+      "fixtures": []
+    },
+    {
+      "semantic": "error",
+      "wire": "chat",
+      "support": "absent",
+      "direction": "response",
+      "ir_mapping": "no in-band error frame; errors arrive as HTTP status bodies or truncated streams",
+      "stream_events": [],
+      "terminator": "n/a (HTTP status / missing [DONE])",
+      "replay_constraints": [
+        "a stream ending without [DONE] surfaces \"stream closed\" instead of a silent stop"
+      ],
+      "fixtures": []
+    },
+    {
+      "semantic": "error",
+      "wire": "anthropic",
+      "support": "native",
+      "direction": "response",
+      "ir_mapping": "terminal event:error frame {type:\"error\", error:{type, message}}",
+      "stream_events": [
+        "event: error"
+      ],
+      "terminator": "event: error",
+      "replay_constraints": [
+        "official SDK semantics: an error frame is terminal - raise instead of hanging until idle timeout"
+      ],
+      "fixtures": []
+    }
+  ]
+}
