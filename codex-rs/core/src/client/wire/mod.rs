@@ -16,10 +16,10 @@ pub(crate) fn content_items_to_text(
     for item in content {
         match item {
             codex_protocol::models::ContentItem::InputText { text }
-            | codex_protocol::models::ContentItem::OutputText { text } => {
-                if !text.trim().is_empty() {
-                    text_parts.push(text.clone());
-                }
+            | codex_protocol::models::ContentItem::OutputText { text }
+                if !text.trim().is_empty() =>
+            {
+                text_parts.push(text.clone());
             }
             _ => {}
         }

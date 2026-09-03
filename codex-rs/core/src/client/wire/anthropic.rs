@@ -290,7 +290,7 @@ pub(crate) fn build_messages_messages(input: Vec<ResponseItem>) -> Vec<serde_jso
             }
             ResponseItem::Reasoning {
                 content,
-                encrypted_content,
+                encrypted_content: Some(signature),
                 ..
             } => {
                 // Thinking replay: Anthropic requires thinking blocks be
@@ -298,22 +298,20 @@ pub(crate) fn build_messages_messages(input: Vec<ResponseItem>) -> Vec<serde_jso
                 // rounds; without the signature the server 400s the whole
                 // turn. Without a signature we drop the block — validation
                 // was relaxed for non-tool turns (2026 steering docs).
-                if let Some(signature) = encrypted_content {
-                    let thinking: String = content
-                        .unwrap_or_default()
-                        .iter()
-                        .map(|fragment| match fragment {
-                            ReasoningItemContent::ReasoningText { text }
-                            | ReasoningItemContent::Text { text } => text.clone(),
-                        })
-                        .collect::<Vec<_>>()
-                        .join("");
-                    pending_assistant_blocks.push(json!({
-                        "type": "thinking",
-                        "thinking": thinking,
-                        "signature": signature,
-                    }));
-                }
+                let thinking: String = content
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|fragment| match fragment {
+                        ReasoningItemContent::ReasoningText { text }
+                        | ReasoningItemContent::Text { text } => text.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                pending_assistant_blocks.push(json!({
+                    "type": "thinking",
+                    "thinking": thinking,
+                    "signature": signature,
+                }));
             }
             ResponseItem::FunctionCall {
                 name,
