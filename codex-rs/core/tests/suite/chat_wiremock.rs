@@ -148,6 +148,80 @@ data: [DONE]
     )
 }
 
+/// Chat Completions SSE body with a `reasoning_content` segment followed by a
+/// tool call, mirroring how DeepSeek-R1-class upstreams stream
+/// chain-of-thought before a tool round (the exact shape where DeepSeek/Kimi
+/// require the reasoning history to be replayed).
+fn chat_sse_reasoning_then_tool_call(
+    reasoning: &str,
+    call_id: &str,
+    tool_name: &str,
+    arguments_json: &str,
+) -> String {
+    let mid = arguments_json.len() / 2;
+    let (a, b) = arguments_json.split_at(mid);
+    let chunk = |delta: serde_json::Value, finish: Option<&str>| {
+        format!(
+            "data: {}
+
+",
+            serde_json::json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": delta,
+                    "finish_reason": finish,
+                }]
+            })
+        )
+    };
+    let mut body = String::new();
+    body.push_str(&chunk(
+        serde_json::json!({"reasoning_content": reasoning}),
+        None,
+    ));
+    body.push_str(&chunk(
+        serde_json::json!({
+            "tool_calls": [{
+                "index": 0,
+                "id": call_id,
+                "type": "function",
+                "function": {"name": tool_name, "arguments": a},
+            }]
+        }),
+        None,
+    ));
+    body.push_str(&chunk(
+        serde_json::json!({
+            "tool_calls": [{
+                "index": 0,
+                "function": {"arguments": b},
+            }]
+        }),
+        None,
+    ));
+    body.push_str(&chunk(serde_json::json!({}), Some("tool_calls")));
+    body.push_str(&format!(
+        "data: {}
+
+",
+        serde_json::json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 8,
+                "total_tokens": 20,
+                "completion_tokens_details": {"reasoning_tokens": 6}
+            }
+        })
+    ));
+    body.push_str(
+        "data: [DONE]
+
+",
+    );
+    body
+}
+
 /// True when the request is a chat payload whose messages include the tool
 /// result for the given call id (i.e. the tool output got fed back upstream).
 fn body_reports_tool_output(request: &Request, call_id: &str) -> bool {
@@ -233,6 +307,105 @@ async fn chat_wire_tool_call_roundtrip() -> Result<()> {
         second_requests.lock().unwrap().len(),
         1,
         "expected exactly one follow-up request with tool output"
+    );
+
+    Ok(())
+}
+
+/// True when the request is a chat payload whose messages include an
+/// assistant `reasoning_content` replay (i.e. the thinking history got fed
+/// back upstream, as DeepSeek/Kimi tool rounds require).
+fn body_reports_reasoning_replay(request: &Request, reasoning: &str) -> bool {
+    serde_json::from_slice::<serde_json::Value>(&request.body).is_ok_and(|body| {
+        body.get("messages")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|messages| {
+                messages.iter().any(|message| {
+                    message.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+                        && message
+                            .get("reasoning_content")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(reasoning)
+                })
+            })
+    })
+}
+
+/// Roundtrip with chain-of-thought: the first upstream answer streams a
+/// `reasoning_content` segment before requesting a tool call; the follow-up
+/// request must replay that reasoning verbatim as assistant
+/// `reasoning_content` (DeepSeek/Kimi contract: missing reasoning history in
+/// tool rounds 400s or degrades the follow-up). The second mount only matches
+/// when both the tool output and the verbatim reasoning replay are present,
+/// so reaching TurnComplete proves the reasoning survived the full
+/// round-trip: SSE delta -> ResponseItem::Reasoning -> history -> replay.
+#[tokio::test]
+async fn chat_wire_reasoning_content_roundtrip() -> Result<()> {
+    let server = start_mock_server().await;
+    let call_id = "chat-reasoning-call-1";
+    let reasoning = "step-by-step thinking trace";
+    let args = r#"{"cmd":"echo reasoning-roundtrip"}"#;
+
+    let first_requests = mount_chat_sse_once_match(
+        &server,
+        |request: &Request| !body_reports_tool_output(request, call_id),
+        chat_sse_reasoning_then_tool_call(reasoning, call_id, "shell", args),
+    )
+    .await;
+    let second_requests = mount_chat_sse_once_match(
+        &server,
+        move |request: &Request| {
+            body_reports_tool_output(request, call_id)
+                && body_reports_reasoning_replay(request, reasoning)
+        },
+        chat_sse_final_text("reasoning roundtrip complete"),
+    )
+    .await;
+
+    let test = test_codex()
+        .with_config(|config| {
+            config.model_provider.wire_api = WireApi::Chat;
+        })
+        .build(&server)
+        .await?;
+
+    test.codex
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "run the echo command".to_string(),
+                text_elements: Vec::new(),
+            }])
+            .with_thread_settings(
+                codex_protocol::protocol::ThreadSettingsOverrides {
+                    approval_policy: Some(AskForApproval::Never),
+                    ..Default::default()
+                },
+            ),
+        )
+        .await?;
+
+    wait_for_event(&test.codex, |event| match event {
+        EventMsg::TurnComplete(_) => true,
+        EventMsg::Error(error) => panic!("unexpected turn error: {error:?}"),
+        _ => false,
+    })
+    .await;
+
+    test.codex.submit(Op::Shutdown).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ShutdownComplete)
+    })
+    .await;
+
+    assert_eq!(
+        first_requests.lock().unwrap().len(),
+        1,
+        "expected exactly one reasoning turn request"
+    );
+    assert_eq!(
+        second_requests.lock().unwrap().len(),
+        1,
+        "expected exactly one follow-up request with verbatim reasoning replay"
     );
 
     Ok(())

@@ -10,6 +10,7 @@ use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_otel::SessionTelemetry;
 use codex_protocol::error::Result;
+use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_response_debug_context::extract_response_debug_context;
@@ -232,6 +233,30 @@ pub(crate) fn build_chat_messages(
                     messages.push(json!({
                         "role": map_chat_role(&role),
                         "content": text,
+                    }));
+                }
+            }
+            ResponseItem::Reasoning { content, .. } => {
+                // Thinking replay: DeepSeek (with tools) and Kimi
+                // (Preserved Thinking) require historical reasoning_content
+                // to be passed back or they 400 / degrade the follow-up turn.
+                // Chat reasoning carries no signature, so unlike the
+                // Anthropic wire there is no signature to preserve and none
+                // may be fabricated.
+                let reasoning: String = content
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|fragment| match fragment {
+                        ReasoningItemContent::ReasoningText { text }
+                        | ReasoningItemContent::Text { text } => text.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                if !reasoning.is_empty() {
+                    flush_tool_calls!();
+                    messages.push(json!({
+                        "role": "assistant",
+                        "reasoning_content": reasoning,
                     }));
                 }
             }
