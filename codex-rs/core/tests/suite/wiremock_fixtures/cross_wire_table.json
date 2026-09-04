@@ -3,8 +3,8 @@
   "ir": "codex_protocol::models::ResponseItem",
   "meta": {
     "purpose": "Semantic-to-wire cross-reference table: for each semantic, how it is expressed on each of the three wires (Responses / Chat Completions / Anthropic Messages). Fixture names resolve relative to this directory. Vocabulary per CONTEXT.md (ticket 06); wire constants and usage_metadata rulings per ADR-0002; per-wire module shapes per core/src/client/wire/{chat,anthropic}.rs and codex-api/src/sse/{responses,chat_completions,messages}.rs.",
-    "verified_date": "2026-09-04",
-    "verified_against": "fork merge base ed4bb72516f + second-round lanes (do/ne/fo) atop it",
+    "verified_date": "2026-09-05",
+    "verified_against": "fork merge base ed4bb72516f + second-round lanes + ticket 10/11 wire changes",
     "maintenance": "On every upstream merge, re-verify rows whose wire domain was touched and bump verified_date. Flip the degraded chat thinking row to native when ticket 10 lands, and record reasoning_effort translation when ticket 11 lands. A stale table is the frozen-fixture antipattern (reports/09-wire-mock-cross-fixture-research-index.md).",
     "support_legend": {
       "native": "the upstream protocol expresses the semantic natively; the fork passes it through",
@@ -38,6 +38,11 @@
       "id": "tool_call",
       "direction": "both",
       "ir_mapping": "ResponseItem::FunctionCall / FunctionCallOutput (+ LocalShellCall / CustomToolCall)"
+    },
+    {
+      "id": "reasoning_effort",
+      "direction": "request",
+      "ir_mapping": "ReasoningEffort session setting translated per wire"
     },
     {
       "id": "thinking",
@@ -144,22 +149,24 @@
       ],
       "terminator": "terminal: response.completed",
       "replay_constraints": [
-        "reasoning request controls (reasoning.effort/summary) are Responses-only; chat/anthropic degrade per CONTEXT.md"
+        "reasoning request controls (reasoning.effort/summary) are native on Responses; chat/anthropic request controls are translated per their wire mappings"
       ],
       "fixtures": []
     },
     {
       "semantic": "thinking",
       "wire": "chat",
-      "support": "degraded",
-      "direction": "response",
-      "ir_mapping": "inbound delta.reasoning_content is NOT parsed (ticket 10 will land ReasoningPart passthrough)",
+      "support": "translated",
+      "direction": "both",
+      "ir_mapping": "ResponseItem::Reasoning via reasoning_content (ticket 10)",
       "stream_events": [
-        "choices[].delta.reasoning_content (silently ignored by current state machine)"
+        "choices[].delta.reasoning_content (coalesced into Reasoning)",
+        "top-level reasoning_effort request field"
       ],
-      "terminator": "n/a until ticket 10",
+      "terminator": "data: [DONE]",
       "replay_constraints": [
-        "flip support to native when ticket 10 lands; until then reasoning_content is dropped on the floor"
+        "reasoning_content is synthesized into ResponseItem::Reasoning and replayed as assistant reasoning_content",
+        "reasoning_effort is translated on the request side"
       ],
       "fixtures": []
     },
@@ -181,6 +188,52 @@
         "a reasoning item WITHOUT a signature is dropped, never rewritten",
         "never merge thinking content into text content blocks",
         "request side: provider.anthropic_thinking_budget -> thinking:{type:\"enabled\",budget_tokens} clamped to [1024, max_tokens-1]"
+      ],
+      "fixtures": []
+    },
+    {
+      "semantic": "reasoning_effort",
+      "wire": "responses",
+      "support": "absent",
+      "direction": "request",
+      "ir_mapping": "Responses reasoning.effort is outside this ticket",
+      "stream_events": [],
+      "terminator": "n/a",
+      "replay_constraints": [
+        "This ticket does not modify Responses"
+      ],
+      "fixtures": []
+    },
+    {
+      "semantic": "reasoning_effort",
+      "wire": "chat",
+      "support": "translated",
+      "direction": "request",
+      "ir_mapping": "ReasoningEffort -> top-level reasoning_effort",
+      "stream_events": [
+        "request body reasoning_effort"
+      ],
+      "terminator": "n/a",
+      "replay_constraints": [
+        "none/persistent/custom are omitted"
+      ],
+      "fixtures": []
+    },
+    {
+      "semantic": "reasoning_effort",
+      "wire": "anthropic",
+      "support": "translated",
+      "direction": "request",
+      "ir_mapping": "ReasoningEffort -> thinking.budget_tokens or adaptive output_config.effort",
+      "stream_events": [
+        "request body thinking",
+        "request body output_config.effort (adaptive)"
+      ],
+      "terminator": "n/a",
+      "replay_constraints": [
+        "manual buckets 1024/2048/4096 clamp below max_tokens",
+        "session effort overrides legacy budget",
+        "adaptive selected by anthropic_adaptive_thinking"
       ],
       "fixtures": []
     },

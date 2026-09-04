@@ -254,7 +254,6 @@ async fn anthropic_wire_tool_call_roundtrip() -> Result<()> {
     Ok(())
 }
 
-
 /// Session-level reasoning effort must reach the Anthropic Messages wire
 /// (ticket 11 / ADR-0005): manual-track budgets the session effort into thinking.budget_tokens.
 #[tokio::test]
