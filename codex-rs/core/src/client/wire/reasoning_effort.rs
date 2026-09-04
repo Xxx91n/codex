@@ -125,10 +125,16 @@ mod tests {
     #[test]
     fn chat_reasoning_effort_uses_the_universal_vocabulary() {
         assert_eq!(chat_reasoning_effort(&ReasoningEffort::Low), Some("low"));
-        assert_eq!(chat_reasoning_effort(&ReasoningEffort::Medium), Some("medium"));
+        assert_eq!(
+            chat_reasoning_effort(&ReasoningEffort::Medium),
+            Some("medium")
+        );
         assert_eq!(chat_reasoning_effort(&ReasoningEffort::High), Some("high"));
         // Non-universal tiers degrade to the nearest universal tier.
-        assert_eq!(chat_reasoning_effort(&ReasoningEffort::Minimal), Some("low"));
+        assert_eq!(
+            chat_reasoning_effort(&ReasoningEffort::Minimal),
+            Some("low")
+        );
         assert_eq!(chat_reasoning_effort(&ReasoningEffort::XHigh), Some("high"));
         assert_eq!(chat_reasoning_effort(&ReasoningEffort::Max), Some("high"));
         // Disable-style and unknown values omit the field entirely.
@@ -142,25 +148,49 @@ mod tests {
 
     #[test]
     fn manual_buckets_follow_the_litellm_constants() {
-        assert_eq!(budget_tokens_for_effort(&ReasoningEffort::Minimal), Some(1_024));
+        assert_eq!(
+            budget_tokens_for_effort(&ReasoningEffort::Minimal),
+            Some(1_024)
+        );
         assert_eq!(budget_tokens_for_effort(&ReasoningEffort::Low), Some(1_024));
-        assert_eq!(budget_tokens_for_effort(&ReasoningEffort::Medium), Some(2_048));
-        assert_eq!(budget_tokens_for_effort(&ReasoningEffort::High), Some(4_096));
-        assert_eq!(budget_tokens_for_effort(&ReasoningEffort::XHigh), Some(4_096));
+        assert_eq!(
+            budget_tokens_for_effort(&ReasoningEffort::Medium),
+            Some(2_048)
+        );
+        assert_eq!(
+            budget_tokens_for_effort(&ReasoningEffort::High),
+            Some(4_096)
+        );
+        assert_eq!(
+            budget_tokens_for_effort(&ReasoningEffort::XHigh),
+            Some(4_096)
+        );
         assert_eq!(budget_tokens_for_effort(&ReasoningEffort::Max), Some(4_096));
         assert_eq!(budget_tokens_for_effort(&ReasoningEffort::None), None);
-        assert_eq!(budget_tokens_for_effort(&ReasoningEffort::Custom("off".to_string())), None);
+        assert_eq!(
+            budget_tokens_for_effort(&ReasoningEffort::Custom("off".to_string())),
+            None
+        );
     }
 
     #[test]
     fn adaptive_effort_maps_directly_with_nearest_tier_fallback() {
-        assert_eq!(adaptive_effort_value(&ReasoningEffort::Minimal), Some("low"));
+        assert_eq!(
+            adaptive_effort_value(&ReasoningEffort::Minimal),
+            Some("low")
+        );
         assert_eq!(adaptive_effort_value(&ReasoningEffort::Low), Some("low"));
-        assert_eq!(adaptive_effort_value(&ReasoningEffort::Medium), Some("medium"));
+        assert_eq!(
+            adaptive_effort_value(&ReasoningEffort::Medium),
+            Some("medium")
+        );
         assert_eq!(adaptive_effort_value(&ReasoningEffort::High), Some("high"));
         assert_eq!(adaptive_effort_value(&ReasoningEffort::Max), Some("high"));
         assert_eq!(adaptive_effort_value(&ReasoningEffort::None), None);
-        assert_eq!(adaptive_effort_value(&ReasoningEffort::Custom("tier9".to_string())), None);
+        assert_eq!(
+            adaptive_effort_value(&ReasoningEffort::Custom("tier9".to_string())),
+            None
+        );
     }
 
     #[test]

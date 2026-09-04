@@ -490,7 +490,6 @@ async fn chat_wire_plain_text_turn() -> Result<()> {
     Ok(())
 }
 
-
 /// Session-level reasoning effort must reach the chat wire as the top-level
 /// `reasoning_effort` field (ticket 11 / ADR-0005): the OpenAI-compatible
 /// effort knob rides on the outbound request body.
