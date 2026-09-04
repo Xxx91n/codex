@@ -67,6 +67,7 @@ async fn continue_after_stream_error() {
         anthropic_max_tokens: None,
 
         anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
 
         anthropic_prompt_caching: None,
         name: "mock-openai".into(),

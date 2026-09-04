@@ -11,6 +11,7 @@ use codex_login::CodexAuth;
 use codex_otel::SessionTelemetry;
 use codex_protocol::error::Result;
 use codex_protocol::models::ReasoningItemContent;
+use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_response_debug_context::extract_response_debug_context;
@@ -41,6 +42,7 @@ impl ModelClientSession {
     pub(crate) async fn stream_chat_completions(
         &self,
         prompt: &Prompt,
+        effort: Option<ReasoningEffortConfig>,
         model_info: &ModelInfo,
         session_telemetry: &SessionTelemetry,
         responses_metadata: &CodexResponsesMetadata,
@@ -85,7 +87,7 @@ impl ModelClientSession {
                 compression: responses_options.compression,
             };
 
-            let request = self.build_chat_request(prompt, model_info)?;
+            let request = self.build_chat_request(prompt, model_info, effort.clone())?;
             let client = ApiChatCompletionsClient::new(
                 transport,
                 client_setup.api_provider,
@@ -154,11 +156,15 @@ impl ModelClientSession {
     ///
     /// Chat Completions has no Responses-only controls (store, prompt-cache,
     /// reasoning, include); those degrade away per CONTEXT.md's degradation
+    /// table. The chat-native `reasoning_effort` knob (ticket 11) is the
+    /// one exception: it is emitted when the session sets an effort; the
+    /// Responses `reasoning` object itself still degrades away.
     /// table.
     pub(crate) fn build_chat_request(
         &self,
         prompt: &Prompt,
         model_info: &ModelInfo,
+        effort: Option<ReasoningEffortConfig>,
     ) -> Result<serde_json::Value> {
         let instructions = &prompt.base_instructions.text;
         let input = prompt.get_formatted_input_for_request(/*use_responses_lite*/ false);
@@ -185,6 +191,18 @@ impl ModelClientSession {
             obj.insert(
                 "parallel_tool_calls".to_string(),
                 serde_json::Value::Bool(prompt.parallel_tool_calls),
+            );
+        }
+
+        // Reasoning effort (ticket 11 / ADR-0005): emit the chat-native knob
+        // only when the session set an effort that has a portable spelling.
+        if let Some(effort) = effort.as_ref()
+            && let Some(value) = super::reasoning_effort::chat_reasoning_effort(effort)
+            && let Some(obj) = request.as_object_mut()
+        {
+            obj.insert(
+                "reasoning_effort".to_string(),
+                serde_json::Value::String(value.to_string()),
             );
         }
 

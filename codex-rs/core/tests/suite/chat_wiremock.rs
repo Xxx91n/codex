@@ -489,3 +489,67 @@ async fn chat_wire_plain_text_turn() -> Result<()> {
 
     Ok(())
 }
+
+
+/// Session-level reasoning effort must reach the chat wire as the top-level
+/// `reasoning_effort` field (ticket 11 / ADR-0005): the OpenAI-compatible
+/// effort knob rides on the outbound request body.
+#[tokio::test]
+async fn chat_wire_reasoning_effort_passthrough() -> Result<()> {
+    let server = start_mock_server().await;
+
+    let requests = mount_chat_sse_once_match(
+        &server,
+        |_request: &Request| true,
+        chat_sse_final_text("reasoning effort complete"),
+    )
+    .await;
+
+    let test = test_codex()
+        .with_config(|config| {
+            config.model_provider.wire_api = WireApi::Chat;
+            config.model_reasoning_effort =
+                Some(codex_protocol::openai_models::ReasoningEffort::High);
+        })
+        .build(&server)
+        .await?;
+
+    test.codex
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "say hello back".to_string(),
+                text_elements: Vec::new(),
+            }])
+            .with_thread_settings(
+                codex_protocol::protocol::ThreadSettingsOverrides {
+                    approval_policy: Some(AskForApproval::Never),
+                    ..Default::default()
+                },
+            ),
+        )
+        .await?;
+
+    wait_for_event(&test.codex, |event| match event {
+        EventMsg::TurnComplete(_) => true,
+        EventMsg::Error(error) => panic!("unexpected turn error: {error:?}"),
+        _ => false,
+    })
+    .await;
+
+    test.codex.submit(Op::Shutdown).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ShutdownComplete)
+    })
+    .await;
+
+    let recorded = requests.lock().unwrap();
+    assert_eq!(recorded.len(), 1, "expected exactly one request");
+    let body: serde_json::Value =
+        serde_json::from_slice(&recorded[0]).expect("request body is json");
+    assert_eq!(
+        body["reasoning_effort"], "high",
+        "chat request must carry the session reasoning effort"
+    );
+
+    Ok(())
+}

@@ -176,6 +176,8 @@ fn model_provider_from_proto(
 
         anthropic_thinking_budget: None,
 
+        anthropic_adaptive_thinking: false,
+
         anthropic_prompt_caching: None,
         name: provider.name,
         base_url: provider.base_url,
@@ -210,6 +212,7 @@ fn model_provider_to_proto(
     let ModelProviderInfo {
         anthropic_max_tokens: _,
         anthropic_thinking_budget: _,
+        anthropic_adaptive_thinking: _,
         anthropic_prompt_caching: _,
         name,
         base_url,
@@ -562,6 +565,8 @@ mod tests {
             anthropic_max_tokens: None,
 
             anthropic_thinking_budget: None,
+
+            anthropic_adaptive_thinking: false,
 
             anthropic_prompt_caching: None,
             name: "Local".to_string(),

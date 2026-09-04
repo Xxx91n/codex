@@ -49,6 +49,7 @@ async fn retries_on_early_close() {
         anthropic_max_tokens: None,
 
         anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
 
         anthropic_prompt_caching: None,
         name: "openai".into(),

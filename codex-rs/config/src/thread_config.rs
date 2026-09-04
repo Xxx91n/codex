@@ -300,6 +300,8 @@ mod tests {
 
             anthropic_thinking_budget: None,
 
+            anthropic_adaptive_thinking: false,
+
             anthropic_prompt_caching: None,
             name: name.to_string(),
             base_url: Some("http://127.0.0.1:8061/api/codex".to_string()),

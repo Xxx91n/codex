@@ -75,6 +75,7 @@ async fn responses_stream_includes_subagent_header_on_review() {
         anthropic_max_tokens: None,
 
         anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
 
         anthropic_prompt_caching: None,
         name: "mock".into(),
@@ -217,6 +218,7 @@ async fn responses_stream_includes_subagent_header_on_other() {
         anthropic_max_tokens: None,
 
         anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
 
         anthropic_prompt_caching: None,
         name: "mock".into(),
@@ -340,6 +342,7 @@ async fn responses_respects_model_info_overrides_from_config() {
         anthropic_max_tokens: None,
 
         anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
 
         anthropic_prompt_caching: None,
         name: "mock".into(),

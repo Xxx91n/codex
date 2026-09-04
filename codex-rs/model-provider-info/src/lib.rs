@@ -163,6 +163,15 @@ pub struct ModelProviderInfo {
     /// `max_tokens` as well.
     pub anthropic_thinking_budget: Option<u32>,
 
+    /// Speak the adaptive thinking track on the "anthropic" (messages) wire:
+    /// `thinking: { type: "adaptive" }` plus `output_config.effort`
+    /// (Claude 4.6+ deployments; manual `budget_tokens` is deprecated there
+    /// and rejected outright by 4.7+ models). When false (the default), the
+    /// manual track applies and a session reasoning effort is bucketed into
+    /// `budget_tokens`.
+    #[serde(default)]
+    pub anthropic_adaptive_thinking: bool,
+
     /// When true, the "anthropic" (messages) wire marks the system prompt
     /// and the last tool definition with `cache_control: {"type":
     /// "ephemeral"}` breakpoints for prompt caching.
@@ -418,6 +427,7 @@ impl ModelProviderInfo {
             anthropic_max_tokens: None,
 
             anthropic_thinking_budget: None,
+            anthropic_adaptive_thinking: false,
 
             anthropic_prompt_caching: None,
             name: OPENAI_PROVIDER_NAME.into(),
@@ -463,6 +473,8 @@ impl ModelProviderInfo {
             anthropic_max_tokens: None,
 
             anthropic_thinking_budget: None,
+
+            anthropic_adaptive_thinking: false,
 
             anthropic_prompt_caching: None,
             name: AMAZON_BEDROCK_PROVIDER_NAME.into(),
@@ -654,6 +666,7 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
         anthropic_max_tokens: None,
 
         anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
 
         anthropic_prompt_caching: None,
         name: "gpt-oss".into(),
