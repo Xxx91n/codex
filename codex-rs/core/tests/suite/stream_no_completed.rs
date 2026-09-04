@@ -46,6 +46,12 @@ async fn retries_on_early_close() {
     // environment variables.
 
     let model_provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
+
+        anthropic_prompt_caching: None,
         name: "openai".into(),
         base_url: Some(format!("{}/v1", server.uri())),
         // Environment variable that should exist in the test environment.

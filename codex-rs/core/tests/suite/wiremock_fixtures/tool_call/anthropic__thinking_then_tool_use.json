@@ -1,0 +1,116 @@
+{
+  "meta": {
+    "semantic": "tool_call",
+    "wire": "anthropic",
+    "scenario": "thinking_then_tool_use",
+    "call_id": "toolu_cross_1",
+    "signature": "sig-cross-wire-fixture-0",
+    "verified_at": "2026-09-04",
+    "source": "core/src/client/wire/anthropic.rs + codex-api/src/sse/messages.rs + tests/suite/anthropic_wiremock.rs"
+  },
+  "requests": [
+    {
+      "phase": "turn-1",
+      "expect": {
+        "system": "<top-level>",
+        "max_tokens": "<8192 default per ADR-0002 Ruling 1>",
+        "messages": "<strict alternation>"
+      }
+    },
+    {
+      "phase": "turn-2",
+      "expect": {
+        "assistant_block": {
+          "type": "thinking",
+          "signature": "sig-cross-wire-fixture-0"
+        },
+        "user_block": {
+          "type": "tool_result",
+          "tool_use_id": "toolu_cross_1"
+        }
+      }
+    }
+  ],
+  "stream_body_events": [
+    {
+      "type": "message_start",
+      "message": {
+        "id": "msg_cross_1",
+        "model": "claude-mock-1",
+        "usage": {
+          "input_tokens": 12,
+          "output_tokens": 0
+        }
+      }
+    },
+    {
+      "type": "content_block_start",
+      "index": 0,
+      "content_block": {
+        "type": "thinking"
+      }
+    },
+    {
+      "type": "content_block_delta",
+      "index": 0,
+      "delta": {
+        "type": "thinking_delta",
+        "thinking": "thinking about it"
+      }
+    },
+    {
+      "type": "content_block_delta",
+      "index": 0,
+      "delta": {
+        "type": "signature_delta",
+        "signature": "sig-cross-wire-fixture-0"
+      }
+    },
+    {
+      "type": "content_block_stop",
+      "index": 0
+    },
+    {
+      "type": "content_block_start",
+      "index": 1,
+      "content_block": {
+        "type": "tool_use",
+        "id": "toolu_cross_1",
+        "name": "shell"
+      }
+    },
+    {
+      "type": "content_block_delta",
+      "index": 1,
+      "delta": {
+        "type": "input_json_delta",
+        "partial_json": "{\"cmd\":\"echo cross-wire-fixture\"}"
+      }
+    },
+    {
+      "type": "content_block_stop",
+      "index": 1
+    },
+    {
+      "type": "message_delta",
+      "delta": {
+        "stop_reason": "tool_use"
+      },
+      "usage": {
+        "output_tokens": 5
+      }
+    },
+    {
+      "type": "message_stop"
+    }
+  ],
+  "replay_constraints": [
+    "thinking block + signature replay verbatim in turn-2 (server 400s otherwise)",
+    "tool_result travels under a user message; strict user/assistant alternation"
+  ],
+  "expect_ir": [
+    "Reasoning{encrypted_content:sig-cross-wire-fixture-0}",
+    "FunctionCall{call_id:toolu_cross_1, name:\"shell\"}",
+    "Completed{usage_metadata:None}"
+  ]
+}

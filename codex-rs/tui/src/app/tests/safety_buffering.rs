@@ -190,6 +190,11 @@ stream_max_retries = 0
     app.config.model = Some(CURRENT_MODEL.to_string());
     app.config.model_provider_id = MODEL_PROVIDER_ID.to_string();
     app.config.model_provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         name: "Interrupt test".to_string(),
         base_url: Some(format!("{}/v1", server.uri())),
         request_max_retries: Some(0),
@@ -408,6 +413,11 @@ goals = true
     app.config.model = Some(CURRENT_MODEL.to_string());
     app.config.model_provider_id = MODEL_PROVIDER_ID.to_string();
     app.config.model_provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         name: "Safety retry test".to_string(),
         base_url: Some(format!("{}/v1", server.uri())),
         request_max_retries: Some(0),

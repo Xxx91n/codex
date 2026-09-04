@@ -8,6 +8,8 @@ use crate::FreeformToolFormat;
 use crate::JsonSchema;
 use crate::ResponsesApiNamespaceTool;
 use crate::ResponsesApiTool;
+use crate::create_tools_json_for_anthropic;
+use crate::create_tools_json_for_chat_completions;
 use crate::create_tools_json_for_responses_api;
 use crate::create_tools_json_for_responses_lite;
 use crate::create_tools_raw_json_for_responses_api;
@@ -410,4 +412,141 @@ fn tool_search_tool_spec_serializes_expected_wire_shape() {
             },
         })
     );
+}
+
+#[test]
+fn chat_completions_tools_use_nested_function_shape() {
+    let properties =
+        BTreeMap::from([("foo".to_string(), JsonSchema::string(/*description*/ None))]);
+    let tools = vec![ToolSpec::Function(ResponsesApiTool {
+        name: "demo".to_string(),
+        description: "A demo tool".to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties, /*required*/ None, /*additional_properties*/ None,
+        ),
+        output_schema: None,
+    })];
+
+    let chat_json = create_tools_json_for_chat_completions(&tools).unwrap();
+    assert_eq!(
+        chat_json,
+        vec![json!({
+            "type": "function",
+            "function": {
+                "name": "demo",
+                "description": "A demo tool",
+                "strict": false,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "foo": { "type": "string" }
+                    },
+                },
+            },
+        })]
+    );
+}
+
+#[test]
+fn chat_completions_skips_non_function_tools() {
+    let tools = vec![ToolSpec::WebSearch {
+        external_web_access: Some(true),
+        indexed_web_access: None,
+        filters: None,
+        user_location: None,
+        search_context_size: None,
+        search_content_types: None,
+    }];
+
+    let chat_json = create_tools_json_for_chat_completions(&tools).unwrap();
+    assert!(chat_json.is_empty());
+}
+
+#[test]
+fn chat_completions_omits_freeform_tool() {
+    // Freeform tools (e.g. experimental apply_patch) have no chat-completions
+    // equivalent; a function-shaped stand-in would fail at dispatch because
+    // freeform handlers only accept `ToolPayload::Custom`
+    // (core/src/tools/router.rs). The explicit degradation is omission.
+    let tools = vec![ToolSpec::Freeform(FreeformTool {
+        name: "apply_patch".to_string(),
+        description: "Apply a patch".to_string(),
+        defer_loading: None,
+        format: FreeformToolFormat {
+            r#type: "grammar".to_string(),
+            syntax: "*** Begin Patch ... *** End Patch".to_string(),
+            definition: "Lark grammar".to_string(),
+        },
+    })];
+
+    let chat_json = create_tools_json_for_chat_completions(&tools).unwrap();
+    assert!(chat_json.is_empty());
+}
+
+#[test]
+fn anthropic_tools_use_input_schema_shape() {
+    let properties =
+        BTreeMap::from([("foo".to_string(), JsonSchema::string(/*description*/ None))]);
+    let tools = vec![ToolSpec::Function(ResponsesApiTool {
+        name: "demo".to_string(),
+        description: "A demo tool".to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties, /*required*/ None, /*additional_properties*/ None,
+        ),
+        output_schema: None,
+    })];
+
+    let anthropic_json = create_tools_json_for_anthropic(&tools).unwrap();
+    assert_eq!(
+        anthropic_json,
+        vec![json!({
+            "name": "demo",
+            "description": "A demo tool",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "foo": { "type": "string" }
+                },
+            },
+        })]
+    );
+}
+
+#[test]
+fn anthropic_skips_non_function_tools() {
+    let tools = vec![ToolSpec::WebSearch {
+        external_web_access: Some(true),
+        indexed_web_access: None,
+        filters: None,
+        user_location: None,
+        search_context_size: None,
+        search_content_types: None,
+    }];
+
+    let anthropic_json = create_tools_json_for_anthropic(&tools).unwrap();
+    assert!(anthropic_json.is_empty());
+}
+
+#[test]
+fn anthropic_omits_freeform_tool() {
+    // Freeform tools have no Messages-API equivalent; wrapping one as an
+    // `input`-string tool would advertise a call that always fails at dispatch
+    // (freeform handlers only accept `ToolPayload::Custom`). Omit it instead.
+    let tools = vec![ToolSpec::Freeform(FreeformTool {
+        name: "apply_patch".to_string(),
+        description: "Apply a patch".to_string(),
+        defer_loading: None,
+        format: FreeformToolFormat {
+            r#type: "grammar".to_string(),
+            syntax: "*** Begin Patch ... *** End Patch".to_string(),
+            definition: "Lark grammar".to_string(),
+        },
+    })];
+
+    let anthropic_json = create_tools_json_for_anthropic(&tools).unwrap();
+    assert!(anthropic_json.is_empty());
 }

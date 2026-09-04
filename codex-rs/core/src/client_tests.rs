@@ -18,6 +18,7 @@ use crate::test_support::responses_metadata as test_responses_metadata;
 use codex_api::AgentIdentityTelemetry;
 use codex_api::ApiError;
 use codex_api::ResponseEvent;
+use codex_api::ResponsesEndpoint;
 use codex_api::TransportError;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
@@ -30,6 +31,7 @@ use codex_model_provider::BearerAuthProvider;
 use codex_model_provider::ModelProvider;
 use codex_model_provider::ModelProviderFuture;
 use codex_model_provider::ProviderAccountResult;
+use codex_model_provider::ProviderAuthRecoveryMessages;
 use codex_model_provider::ProviderUnauthorizedRecovery;
 use codex_model_provider::SharedModelProvider;
 use codex_model_provider::create_model_provider;
@@ -49,6 +51,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -60,6 +63,9 @@ use codex_rollout_trace::RawTraceEventPayload;
 use codex_rollout_trace::RolloutTrace;
 use codex_rollout_trace::TraceWriter;
 use codex_rollout_trace::replay_bundle;
+use codex_tools::JsonSchema;
+use codex_tools::ResponsesApiTool;
+use codex_tools::ToolSpec;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -283,6 +289,71 @@ fn test_model_info() -> ModelInfo {
     .expect("deserialize test model info")
 }
 
+#[test]
+fn responses_lite_prefix_ids_track_thread_and_payload() -> anyhow::Result<()> {
+    let thread_id = ThreadId::new();
+    let client = test_model_client_with_thread_id(thread_id, SessionSource::Cli);
+    let mut model = test_model_info();
+    model.use_responses_lite = true;
+    let mut prompt = Prompt {
+        base_instructions: BaseInstructions {
+            text: "base instructions".to_string(),
+            provenance: None,
+        },
+        ..Default::default()
+    };
+    let build = |client: &ModelClient, prompt: &Prompt| {
+        client.build_responses_request(
+            prompt,
+            &model,
+            /*effort*/ None,
+            codex_protocol::config_types::ReasoningSummary::None,
+            /*service_tier*/ None,
+            &test_responses_metadata_for_client(
+                client,
+                /*turn_id*/ None,
+                format!("{}:0", client.state.thread_id),
+                /*parent_thread_id*/ None,
+                TestCodexResponsesRequestKind::Turn,
+            ),
+        )
+    };
+
+    let original = build(&client, &prompt)?;
+    assert_eq!(build(&client, &prompt)?, original);
+
+    prompt.base_instructions.text.push_str(" with an update");
+    let changed_instructions = build(&client, &prompt)?;
+    assert_eq!(changed_instructions.input[0], original.input[0]);
+    assert_ne!(changed_instructions.input[1].id(), original.input[1].id());
+
+    prompt.tools = vec![codex_tools::ToolSpec::Freeform(codex_tools::FreeformTool {
+        name: "exec".to_string(),
+        description: "Execute JavaScript.".to_string(),
+        defer_loading: None,
+        format: codex_tools::FreeformToolFormat {
+            r#type: "grammar".to_string(),
+            syntax: "lark".to_string(),
+            definition: "start: /.+/".to_string(),
+        },
+    })]
+    .into();
+    let changed_tools = build(&client, &prompt)?;
+    assert_ne!(
+        changed_tools.input[0].id(),
+        changed_instructions.input[0].id()
+    );
+    assert_eq!(changed_tools.input[1], changed_instructions.input[1]);
+
+    let independent = build(
+        &test_model_client_with_thread_id(ThreadId::new(), SessionSource::Cli),
+        &prompt,
+    )?;
+    assert_ne!(independent.input[0].id(), changed_tools.input[0].id());
+    assert_ne!(independent.input[1].id(), changed_tools.input[1].id());
+    Ok(())
+}
+
 fn test_session_telemetry() -> SessionTelemetry {
     SessionTelemetry::new(
         ThreadId::new(),
@@ -298,14 +369,137 @@ fn test_session_telemetry() -> SessionTelemetry {
     )
 }
 
+fn spawned_session_source() -> SessionSource {
+    SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: ThreadId::new(),
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    })
+}
+
+fn reasoning_effort_in_request(
+    model_info: &ModelInfo,
+    session_source: SessionSource,
+    effort: ReasoningEffort,
+) -> ReasoningEffort {
+    let client = test_model_client(session_source);
+    client
+        .build_responses_request(
+            &Prompt::default(),
+            model_info,
+            Some(effort),
+            codex_protocol::config_types::ReasoningSummary::None,
+            /*service_tier*/ None,
+            &test_responses_metadata_for_client(
+                &client,
+                /*turn_id*/ None,
+                format!("{}:0", client.state.thread_id),
+                /*parent_thread_id*/ None,
+                TestCodexResponsesRequestKind::Turn,
+            ),
+        )
+        .expect("build responses request")
+        .reasoning
+        .expect("request should include reasoning")
+        .effort
+        .expect("request should include reasoning effort")
+}
+
 #[test]
-fn ultra_reasoning_uses_max_for_requests() {
+fn reasoning_effort_for_requests_uses_multi_agent_override_for_ultra() {
+    let mut model_info = test_model_info();
+    model_info.multi_agent_reasoning_effort = Some(ReasoningEffort::High);
+    model_info
+        .supported_reasoning_levels
+        .push(ReasoningEffortPreset {
+            effort: ReasoningEffort::High,
+            description: "high".to_string(),
+        });
+
+    let actual = [SessionSource::Cli, spawned_session_source()].map(|session_source| {
+        reasoning_effort_in_request(&model_info, session_source, ReasoningEffort::Ultra)
+    });
+
+    assert_eq!(actual, [ReasoningEffort::High, ReasoningEffort::High]);
+}
+
+#[test]
+fn reasoning_effort_for_requests_falls_back_for_missing_or_invalid_override() {
+    let mut model_info = test_model_info();
+    model_info.supported_reasoning_levels = vec![
+        ReasoningEffortPreset {
+            effort: ReasoningEffort::Low,
+            description: "low".to_string(),
+        },
+        ReasoningEffortPreset {
+            effort: ReasoningEffort::XHigh,
+            description: "xhigh".to_string(),
+        },
+        ReasoningEffortPreset {
+            effort: ReasoningEffort::Ultra,
+            description: "ultra".to_string(),
+        },
+    ];
+
+    let actual = [
+        None,
+        Some(ReasoningEffort::Ultra),
+        Some(ReasoningEffort::High),
+    ]
+    .map(|multi_agent_reasoning_effort| {
+        model_info.multi_agent_reasoning_effort = multi_agent_reasoning_effort;
+        reasoning_effort_in_request(&model_info, SessionSource::Cli, ReasoningEffort::Ultra)
+    });
+
+    assert_eq!(
+        actual,
+        [
+            ReasoningEffort::XHigh,
+            ReasoningEffort::XHigh,
+            ReasoningEffort::XHigh,
+        ]
+    );
+
+    model_info.multi_agent_reasoning_effort = None;
+    model_info.supported_reasoning_levels.insert(
+        1,
+        ReasoningEffortPreset {
+            effort: ReasoningEffort::Max,
+            description: "max".to_string(),
+        },
+    );
+    assert_eq!(
+        reasoning_effort_in_request(&model_info, SessionSource::Cli, ReasoningEffort::Ultra),
+        ReasoningEffort::Max
+    );
+
+    model_info.supported_reasoning_levels.clear();
+    assert_eq!(
+        reasoning_effort_in_request(&model_info, SessionSource::Cli, ReasoningEffort::Ultra),
+        ReasoningEffort::Medium
+    );
+}
+
+#[test]
+fn reasoning_effort_for_requests_preserves_non_ultra_and_persistent_behavior() {
+    let mut model_info = test_model_info();
+    model_info.multi_agent_reasoning_effort = Some(ReasoningEffort::Low);
+
     assert_eq!(
         (
-            super::reasoning_effort_for_request(ReasoningEffort::Ultra),
-            super::reasoning_effort_for_request(ReasoningEffort::High),
+            reasoning_effort_in_request(&model_info, SessionSource::Cli, ReasoningEffort::High,),
+            reasoning_effort_in_request(
+                &model_info,
+                SessionSource::Cli,
+                ReasoningEffort::Persistent,
+            ),
         ),
-        (ReasoningEffort::Max, ReasoningEffort::High,)
+        (
+            ReasoningEffort::High,
+            ReasoningEffort::Custom("disabled".to_string()),
+        )
     );
 }
 
@@ -657,6 +851,7 @@ async fn response_stream_records_last_model_feedback_ids() {
         Ok(ResponseEvent::Completed {
             response_id: "resp-123".to_string(),
             token_usage: None,
+            usage_metadata: None,
             end_turn: Some(true),
         }),
     ]);
@@ -704,6 +899,8 @@ async fn bedrock_unauthorized_error_uses_provider_mapping() {
         &mut provider_auth_recovery_attempted,
         &test_session_telemetry(),
         &provider,
+        /*event_sender*/ None,
+        /*turn_id*/ None,
     )
     .await
     .expect_err("expired Bedrock signature should fail");
@@ -738,6 +935,13 @@ impl ModelProvider for TestRecoveryProvider {
 
     fn account_state(&self) -> ProviderAccountResult {
         self.inner.account_state()
+    }
+
+    fn auth_recovery_messages(&self) -> Option<ProviderAuthRecoveryMessages> {
+        Some(ProviderAuthRecoveryMessages {
+            started: "Refreshing provider authentication.",
+            succeeded: "Provider authentication recovered.",
+        })
     }
 
     fn recover_from_unauthorized(
@@ -784,12 +988,15 @@ async fn provider_owned_auth_recovery_is_bounded_and_preserves_unauthorized_fail
         let mut auth_recovery = None;
         let mut provider_auth_recovery_attempted = false;
         let telemetry = test_session_telemetry();
+        let (event_sender, event_receiver) = async_channel::unbounded();
         let result = super::handle_unauthorized(
             unauthorized(),
             &mut auth_recovery,
             &mut provider_auth_recovery_attempted,
             &telemetry,
             &provider,
+            Some(&event_sender),
+            Some("turn-1"),
         )
         .await;
 
@@ -807,6 +1014,8 @@ async fn provider_owned_auth_recovery_is_bounded_and_preserves_unauthorized_fail
                 &mut provider_auth_recovery_attempted,
                 &telemetry,
                 &provider,
+                Some(&event_sender),
+                Some("turn-1"),
             )
             .await
             .expect_err("provider recovery should not run more than once")
@@ -820,6 +1029,29 @@ async fn provider_owned_auth_recovery_is_bounded_and_preserves_unauthorized_fail
             other => panic!("unexpected error after provider recovery: {other}"),
         }
         assert_eq!(attempts.load(Ordering::Relaxed), 1);
+
+        let events = std::iter::from_fn(|| event_receiver.try_recv().ok())
+            .map(|event| serde_json::to_value(event).expect("recovery event should serialize"))
+            .collect::<Vec<_>>();
+        let mut expected = vec![json!({
+            "id": "turn-1",
+            "msg": {
+                "type": "auth_recovery_started",
+                "provider": provider.info().name,
+                "message": "Refreshing provider authentication.",
+            }
+        })];
+        if !should_fail {
+            expected.push(json!({
+                "id": "turn-1",
+                "msg": {
+                    "type": "auth_recovery_completed",
+                    "provider": provider.info().name,
+                    "message": "Provider authentication recovered.",
+                }
+            }));
+        }
+        assert_eq!(events, expected);
     }
 }
 
@@ -970,6 +1202,80 @@ fn model_client_with_counting_attestation(
     (model_client, attestation_calls)
 }
 
+#[test]
+fn guardian_reviewer_uses_dedicated_endpoint_only_with_codex_backend_auth() {
+    let (mut model_client, _) =
+        model_client_with_counting_attestation(/*include_attestation*/ true);
+    Arc::get_mut(&mut model_client.state)
+        .expect("test client should have unique session state")
+        .session_source = SessionSource::SubAgent(SubAgentSource::Other("guardian".to_owned()));
+
+    assert_eq!(
+        model_client.responses_endpoint(
+            Some(&CodexAuth::create_dummy_chatgpt_auth_for_testing()),
+            "codex-auto-review",
+        ),
+        ResponsesEndpoint::Responses
+    );
+
+    model_client = model_client.with_free_guardian_enabled(/*free_guardian_enabled*/ true);
+    assert_eq!(
+        model_client.responses_endpoint(
+            Some(&CodexAuth::create_dummy_chatgpt_auth_for_testing()),
+            "codex-auto-review",
+        ),
+        ResponsesEndpoint::Guardian
+    );
+    assert_eq!(
+        model_client.responses_endpoint(
+            Some(&CodexAuth::create_dummy_chatgpt_auth_for_testing()),
+            "required-reviewer-model",
+        ),
+        ResponsesEndpoint::Responses
+    );
+    assert_eq!(
+        model_client.responses_endpoint(
+            Some(&CodexAuth::create_dummy_chatgpt_auth_for_testing()),
+            "parent-fallback-model",
+        ),
+        ResponsesEndpoint::Responses
+    );
+    assert_eq!(
+        model_client.responses_endpoint(
+            Some(&CodexAuth::from_api_key("test-api-key")),
+            "codex-auto-review",
+        ),
+        ResponsesEndpoint::Responses
+    );
+
+    Arc::get_mut(&mut model_client.state)
+        .expect("test client should have unique session state")
+        .provider = create_model_provider(
+        ModelProviderInfo::create_openai_provider(Some("https://proxy.example.com/v1".to_owned())),
+        Some(AuthManager::from_auth_for_testing(
+            CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        )),
+    );
+    assert_eq!(
+        model_client.responses_endpoint(
+            Some(&CodexAuth::create_dummy_chatgpt_auth_for_testing()),
+            "codex-auto-review",
+        ),
+        ResponsesEndpoint::Responses
+    );
+
+    Arc::get_mut(&mut model_client.state)
+        .expect("test client should have unique session state")
+        .session_source = SessionSource::Exec;
+    assert_eq!(
+        model_client.responses_endpoint(
+            Some(&CodexAuth::create_dummy_chatgpt_auth_for_testing()),
+            "codex-auto-review",
+        ),
+        ResponsesEndpoint::Responses
+    );
+}
+
 #[tokio::test]
 async fn websocket_handshake_includes_attestation_for_chatgpt_codex_responses() {
     let (model_client, attestation_calls) =
@@ -1045,4 +1351,519 @@ async fn non_chatgpt_codex_endpoints_omit_attestation_generation() {
         None,
     );
     assert_eq!(attestation_calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn map_chat_role_handles_known_and_unknown_roles() {
+    assert_eq!(super::map_chat_role("developer"), "system");
+    assert_eq!(super::map_chat_role("assistant"), "assistant");
+    assert_eq!(super::map_chat_role("unknown-role"), "user");
+}
+
+#[test]
+fn build_chat_request_omits_responses_only_fields() {
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseItem;
+
+    // T05 degradation: the chat wire body must never carry Responses-only
+    // controls (store / previous_response_id / reasoning / include).
+    let client = test_model_client(SessionSource::Cli);
+    let prompt = Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "hello".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }],
+        ..Default::default()
+    };
+    let model_info = test_model_info();
+
+    let request = client
+        .new_session()
+        .build_chat_request(&prompt, &model_info, None)
+        .expect("chat request should build");
+    let obj = request.as_object().expect("request should be an object");
+    for field in [
+        "store",
+        "previous_response_id",
+        "reasoning",
+        "include",
+        "cache_control",
+    ] {
+        assert!(
+            !obj.contains_key(field),
+            "chat request must not contain responses-only field `{field}`"
+        );
+    }
+    assert_eq!(obj["model"], "gpt-test");
+    assert_eq!(obj["stream"], true);
+}
+
+#[test]
+fn build_messages_messages_serializes_tool_roundtrip_items() {
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::FunctionCallOutputPayload;
+    use codex_protocol::models::ResponseItem;
+    use serde_json::json;
+
+    let input = vec![
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "hello".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: r#"{"cmd":"pwd"}"#.to_string(),
+            encrypted_function_args: None,
+            call_id: "toolu_1".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "notify".to_string(),
+            namespace: None,
+            arguments: String::new(),
+            encrypted_function_args: None,
+            call_id: "toolu_2".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("toolu_1".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("ok".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("toolu_2".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("sent".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+
+    let messages = super::build_messages_messages(input);
+    assert_eq!(
+        messages,
+        vec![
+            json!({
+                "role": "user",
+                "content": [{"type": "text", "text": "hello"}],
+            }),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "exec_command",
+                        "input": {"cmd": "pwd"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_2",
+                        "name": "notify",
+                        // no-argument tools must serialize input as {}
+                        "input": {},
+                    },
+                ],
+            }),
+            json!({
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
+                    {"type": "tool_result", "tool_use_id": "toolu_2", "content": "sent"},
+                ],
+            }),
+        ]
+    );
+}
+
+#[test]
+fn build_messages_messages_emits_image_blocks_and_replays_thinking_with_signature() {
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ReasoningItemContent;
+    use codex_protocol::models::ResponseItem;
+
+    let input = vec![
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![
+                ContentItem::InputText {
+                    text: "what is this?".to_string(),
+                },
+                ContentItem::InputImage {
+                    image_url: "data:image/png;base64,aGVsbG8=".to_string(),
+                    detail: None,
+                },
+            ],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::Reasoning {
+            id: None,
+            summary: vec![],
+            content: Some(vec![
+                ReasoningItemContent::ReasoningText {
+                    text: "let me think".to_string(),
+                },
+                ReasoningItemContent::Text {
+                    text: " more".to_string(),
+                },
+            ]),
+            encrypted_content: Some("sig-abc".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: "the answer".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+
+    let messages = super::build_messages_messages(input);
+    let user = &messages[0];
+    assert_eq!(user["role"], "user");
+    let blocks = user["content"].as_array().expect("user content array");
+    assert_eq!(blocks[0]["type"], "text");
+    assert_eq!(blocks[0]["text"], "what is this?");
+    assert_eq!(blocks[1]["type"], "image");
+    assert_eq!(blocks[1]["source"]["type"], "base64");
+    assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+    assert_eq!(blocks[1]["source"]["data"], "aGVsbG8=");
+
+    // thinking must precede the assistant text within the same assistant
+    // message, per the Messages API ordering contract.
+    let assistant = &messages[1];
+    assert_eq!(assistant["role"], "assistant");
+    let content = assistant["content"].as_array().unwrap();
+    assert_eq!(content[0]["type"], "thinking");
+    assert_eq!(content[0]["thinking"], "let me think more");
+    assert_eq!(content[0]["signature"], "sig-abc");
+    assert_eq!(content[1]["type"], "text");
+    assert_eq!(content[1]["text"], "the answer");
+}
+
+#[test]
+fn build_messages_messages_drops_unsigned_thinking_replay() {
+    use codex_protocol::models::ResponseItem;
+    // Without a signature, Anthropic would 400 ("cannot be modified")
+    // on tool-call replays; drop the block instead (contract allows
+    // omission on relaxed paths).
+    let input = vec![ResponseItem::Reasoning {
+        id: None,
+        summary: vec![],
+        content: Some(vec![]),
+        encrypted_content: None,
+        internal_chat_message_metadata_passthrough: None,
+    }];
+    let messages = super::build_messages_messages(input);
+    assert!(messages.is_empty());
+}
+
+#[test]
+fn build_messages_request_emits_thinking_and_cache_control_when_configured() {
+    let mut provider =
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Anthropic);
+    provider.anthropic_max_tokens = Some(128_000);
+    provider.anthropic_thinking_budget = Some(8_192);
+    provider.anthropic_prompt_caching = Some(true);
+    let client = ModelClient::new(
+        None,
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        provider,
+        SessionSource::Cli,
+        "test_originator".to_string(),
+        None,
+        true,
+        false,
+        false,
+        None,
+        false,
+        None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    );
+    let mut prompt = Prompt::default();
+    let tool = ToolSpec::Function(ResponsesApiTool {
+        name: "exec_command".to_string(),
+        description: "run".to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::default(),
+        output_schema: None,
+    });
+    prompt.tools = Arc::from(vec![tool]);
+    let model_info = test_model_info();
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &model_info, None)
+        .expect("messages request should build");
+    let obj = request.as_object().expect("object");
+    assert_eq!(obj["thinking"]["type"], "enabled");
+    assert_eq!(obj["thinking"]["budget_tokens"], 8_192);
+    let system = obj["system"]
+        .as_array()
+        .expect("system should be block array");
+    assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+    let tools = obj["tools"].as_array().unwrap();
+    assert_eq!(tools.last().unwrap()["cache_control"]["type"], "ephemeral");
+}
+
+#[test]
+fn build_messages_request_clamps_thinking_budget_below_max_tokens() {
+    let mut provider =
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Anthropic);
+    provider.anthropic_max_tokens = Some(4_096);
+    provider.anthropic_thinking_budget = Some(100_000);
+    let client = ModelClient::new(
+        None,
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        provider,
+        SessionSource::Cli,
+        "test_originator".to_string(),
+        None,
+        true,
+        false,
+        false,
+        None,
+        false,
+        None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    );
+    let prompt = Prompt::default();
+    let model_info = test_model_info();
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &model_info, None)
+        .expect("messages request should build");
+    let obj = request.as_object().expect("object");
+    // doc contract: budget_tokens must be < max_tokens
+    assert_eq!(obj["thinking"]["budget_tokens"], 4_096 - 1);
+}
+
+#[test]
+fn build_messages_request_uses_top_level_system_and_max_tokens() {
+    let client = test_model_client(SessionSource::Cli);
+    let prompt = Prompt::default();
+    let model_info = test_model_info();
+
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &model_info, None)
+        .expect("messages request should build");
+    let obj = request.as_object().expect("request should be an object");
+    assert_eq!(obj["model"], "gpt-test");
+    assert_eq!(obj["stream"], true);
+    assert!(obj["max_tokens"].is_u64());
+    assert!(obj.contains_key("system"));
+    for field in ["store", "previous_response_id", "reasoning", "include"] {
+        assert!(
+            !obj.contains_key(field),
+            "messages request must not contain responses-only field `{field}`"
+        );
+    }
+}
+
+#[test]
+fn build_chat_request_emits_reasoning_effort_when_session_sets_it() {
+    use codex_protocol::openai_models::ReasoningEffort;
+
+    let client = test_model_client(SessionSource::Cli);
+    let prompt = Prompt::default();
+    let model_info = test_model_info();
+
+    let request = client
+        .new_session()
+        .build_chat_request(&prompt, &model_info, Some(ReasoningEffort::High))
+        .expect("chat request should build");
+    assert_eq!(request["reasoning_effort"], "high");
+
+    // Without an effort the field stays absent (model default applies).
+    let request = client
+        .new_session()
+        .build_chat_request(&prompt, &model_info, None)
+        .expect("chat request should build");
+    assert!(request.get("reasoning_effort").is_none());
+}
+
+#[test]
+fn build_messages_request_session_effort_buckets_to_budget_tokens() {
+    use codex_protocol::openai_models::ReasoningEffort;
+
+    let mut provider =
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Anthropic);
+    provider.anthropic_max_tokens = Some(128_000);
+    provider.anthropic_thinking_budget = Some(8_192);
+    let client = ModelClient::new(
+        None,
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        provider,
+        SessionSource::Cli,
+        "test_originator".to_string(),
+        None,
+        true,
+        false,
+        false,
+        None,
+        false,
+        None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    );
+    let prompt = Prompt::default();
+    let model_info = test_model_info();
+
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &model_info, Some(ReasoningEffort::Low))
+        .expect("messages request should build");
+    // Session effort wins over the legacy 8192 budget: low buckets to 1024.
+    assert_eq!(request["thinking"]["budget_tokens"], 1_024);
+
+    // No session effort: the legacy budget path is unchanged.
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &model_info, None)
+        .expect("messages request should build");
+    assert_eq!(request["thinking"]["budget_tokens"], 8_192);
+}
+
+#[test]
+fn build_messages_request_adaptive_mode_maps_effort_to_output_config() {
+    use codex_protocol::openai_models::ReasoningEffort;
+
+    let mut provider =
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Anthropic);
+    provider.anthropic_adaptive_thinking = true;
+    let client = ModelClient::new(
+        None,
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        provider,
+        SessionSource::Cli,
+        "test_originator".to_string(),
+        None,
+        true,
+        false,
+        false,
+        None,
+        false,
+        None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    );
+    let prompt = Prompt::default();
+    let model_info = test_model_info();
+
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &model_info, Some(ReasoningEffort::Medium))
+        .expect("messages request should build");
+    assert_eq!(request["thinking"]["type"], "adaptive");
+    assert_eq!(request["output_config"]["effort"], "medium");
+    assert!(request["thinking"].get("budget_tokens").is_none());
+}
+
+#[test]
+fn build_chat_messages_serializes_tool_roundtrip_items() {
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::FunctionCallOutputPayload;
+    use codex_protocol::models::ResponseItem;
+    use serde_json::json;
+
+    let input = vec![
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "hello".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: r#"{"cmd":"pwd"}"#.to_string(),
+            encrypted_function_args: None,
+            call_id: "call_1".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "notify".to_string(),
+            namespace: None,
+            arguments: "{}".to_string(),
+            encrypted_function_args: None,
+            call_id: "call_2".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("call_1".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("ok".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("call_2".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("sent".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+
+    let messages = super::build_chat_messages("be helpful", input);
+    assert_eq!(
+        messages,
+        vec![
+            json!({"role":"system","content":"be helpful"}),
+            json!({"role":"user","content":"hello"}),
+            // Parallel calls from one turn replay as a single assistant message
+            // with a multi-entry tool_calls array: strict OpenAI-compatible
+            // servers 400 on assistant-split replays.
+            json!({
+                "role":"assistant",
+                "content":"",
+                "tool_calls":[
+                    {
+                        "id":"call_1",
+                        "type":"function",
+                        "function":{"name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"}
+                    },
+                    {
+                        "id":"call_2",
+                        "type":"function",
+                        "function":{"name":"notify","arguments":"{}"}
+                    }
+                ]
+            }),
+            json!({"role":"tool","tool_call_id":"call_1","content":"ok"}),
+            json!({"role":"tool","tool_call_id":"call_2","content":"sent"}),
+        ]
+    );
 }

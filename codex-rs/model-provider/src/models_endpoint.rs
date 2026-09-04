@@ -321,6 +321,11 @@ mod tests {
 
     fn provider_info_with_command_auth() -> ModelProviderInfo {
         ModelProviderInfo {
+            anthropic_max_tokens: None,
+
+            anthropic_thinking_budget: None,
+
+            anthropic_prompt_caching: None,
             auth: Some(ModelProviderAuthInfo {
                 command: "print-token".to_string(),
                 args: Vec::new(),

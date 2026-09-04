@@ -1,0 +1,56 @@
+{
+  "meta": {
+    "semantic": "tool_call",
+    "wire": "responses",
+    "scenario": "roundtrip",
+    "call_id": "call_cross_resp_1",
+    "verified_at": "2026-09-04",
+    "source": "codex-api/src/sse/responses.rs + tests/common/responses.rs ev_* dialect"
+  },
+  "requests": [
+    {
+      "phase": "turn-2",
+      "expect": {
+        "input_contains": {
+          "type": "function_call_output",
+          "call_id": "call_cross_resp_1"
+        }
+      }
+    }
+  ],
+  "stream_body_events": [
+    {
+      "type": "response.created",
+      "response": {
+        "id": "resp_cross_1"
+      }
+    },
+    {
+      "type": "response.output_item.done",
+      "item": {
+        "type": "function_call",
+        "id": "fc_cross_1",
+        "call_id": "call_cross_resp_1",
+        "name": "shell",
+        "arguments": "{\"cmd\":\"echo cross-wire-fixture\"}"
+      }
+    },
+    {
+      "type": "response.completed",
+      "response": {
+        "id": "resp_cross_1",
+        "usage": {
+          "input_tokens": 12,
+          "input_tokens_details": null,
+          "output_tokens": 5,
+          "output_tokens_details": null,
+          "total_tokens": 17
+        }
+      }
+    }
+  ],
+  "expect_ir": [
+    "FunctionCall{call_id:call_cross_resp_1, name:\"shell\", arguments:{\"cmd\":\"echo cross-wire-fixture\"}}",
+    "Completed{usage passthrough}"
+  ]
+}

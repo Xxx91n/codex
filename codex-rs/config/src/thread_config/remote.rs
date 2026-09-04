@@ -160,6 +160,7 @@ fn model_provider_from_proto(
     let id = provider.id;
     let wire_api = match proto::WireApi::try_from(provider.wire_api) {
         Ok(proto::WireApi::Responses) => WireApi::Responses,
+        Ok(proto::WireApi::Chat) => WireApi::Chat,
         Ok(proto::WireApi::Unspecified) => {
             return Err(parse_error("remote thread config omitted wire_api"));
         }
@@ -171,6 +172,13 @@ fn model_provider_from_proto(
         }
     };
     let info = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_adaptive_thinking: false,
+
+        anthropic_prompt_caching: None,
         name: provider.name,
         base_url: provider.base_url,
         env_key: provider.env_key,
@@ -202,6 +210,10 @@ fn model_provider_to_proto(
     provider: ModelProviderInfo,
 ) -> proto::ModelProvider {
     let ModelProviderInfo {
+        anthropic_max_tokens: _,
+        anthropic_thinking_budget: _,
+        anthropic_adaptive_thinking: _,
+        anthropic_prompt_caching: _,
         name,
         base_url,
         env_key,
@@ -305,6 +317,12 @@ fn proto_string_map(values: HashMap<String, RedactedString>) -> proto::StringMap
 fn proto_wire_api(wire_api: WireApi) -> proto::WireApi {
     match wire_api {
         WireApi::Responses => proto::WireApi::Responses,
+        WireApi::Chat => proto::WireApi::Chat,
+        // The upstream proto has no Anthropic variant (regenerating protos is
+        // out of scope for this fork). Map to Unspecified so a misuse fails
+        // loudly at parse time instead of silently downgrading Anthropic to
+        // Chat on a remote-config round-trip.
+        WireApi::Anthropic => proto::WireApi::Unspecified,
     }
 }
 
@@ -449,6 +467,11 @@ mod tests {
     #[test]
     fn model_provider_proto_defaults_standalone_web_search_to_false() {
         let expected = ModelProviderInfo {
+            anthropic_max_tokens: None,
+
+            anthropic_thinking_budget: None,
+
+            anthropic_prompt_caching: None,
             supports_standalone_web_search: false,
             ..expected_provider()
         };
@@ -539,6 +562,13 @@ mod tests {
 
     fn expected_provider() -> ModelProviderInfo {
         ModelProviderInfo {
+            anthropic_max_tokens: None,
+
+            anthropic_thinking_budget: None,
+
+            anthropic_adaptive_thinking: false,
+
+            anthropic_prompt_caching: None,
             name: "Local".to_string(),
             base_url: Some("http://127.0.0.1:8061/api/codex".to_string()),
             env_key: None,
