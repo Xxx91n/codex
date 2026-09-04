@@ -1384,7 +1384,7 @@ fn build_chat_request_omits_responses_only_fields() {
 
     let request = client
         .new_session()
-        .build_chat_request(&prompt, &model_info)
+        .build_chat_request(&prompt, &model_info, None)
         .expect("chat request should build");
     let obj = request.as_object().expect("request should be an object");
     for field in [
@@ -1616,7 +1616,7 @@ fn build_messages_request_emits_thinking_and_cache_control_when_configured() {
     let model_info = test_model_info();
     let request = client
         .new_session()
-        .build_messages_request(&prompt, &model_info)
+        .build_messages_request(&prompt, &model_info, None)
         .expect("messages request should build");
     let obj = request.as_object().expect("object");
     assert_eq!(obj["thinking"]["type"], "enabled");
@@ -1655,7 +1655,7 @@ fn build_messages_request_clamps_thinking_budget_below_max_tokens() {
     let model_info = test_model_info();
     let request = client
         .new_session()
-        .build_messages_request(&prompt, &model_info)
+        .build_messages_request(&prompt, &model_info, None)
         .expect("messages request should build");
     let obj = request.as_object().expect("object");
     // doc contract: budget_tokens must be < max_tokens
@@ -1670,7 +1670,7 @@ fn build_messages_request_uses_top_level_system_and_max_tokens() {
 
     let request = client
         .new_session()
-        .build_messages_request(&prompt, &model_info)
+        .build_messages_request(&prompt, &model_info, None)
         .expect("messages request should build");
     let obj = request.as_object().expect("request should be an object");
     assert_eq!(obj["model"], "gpt-test");
@@ -1683,6 +1683,104 @@ fn build_messages_request_uses_top_level_system_and_max_tokens() {
             "messages request must not contain responses-only field `{field}`"
         );
     }
+}
+
+#[test]
+fn build_chat_request_emits_reasoning_effort_when_session_sets_it() {
+    use codex_protocol::openai_models::ReasoningEffort;
+
+    let client = test_model_client(SessionSource::Cli);
+    let prompt = Prompt::default();
+    let model_info = test_model_info();
+
+    let request = client
+        .new_session()
+        .build_chat_request(&prompt, &model_info, Some(ReasoningEffort::High))
+        .expect("chat request should build");
+    assert_eq!(request["reasoning_effort"], "high");
+
+    // Without an effort the field stays absent (model default applies).
+    let request = client
+        .new_session()
+        .build_chat_request(&prompt, &model_info, None)
+        .expect("chat request should build");
+    assert!(request.get("reasoning_effort").is_none());
+}
+
+#[test]
+fn build_messages_request_session_effort_buckets_to_budget_tokens() {
+    use codex_protocol::openai_models::ReasoningEffort;
+
+    let mut provider =
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Anthropic);
+    provider.anthropic_thinking_budget = Some(8_192);
+    let client = ModelClient::new(
+        None,
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        provider,
+        SessionSource::Cli,
+        "test_originator".to_string(),
+        None,
+        true,
+        false,
+        false,
+        None,
+        false,
+        None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    );
+    let prompt = Prompt::default();
+    let model_info = test_model_info();
+
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &model_info, Some(ReasoningEffort::Low))
+        .expect("messages request should build");
+    // Session effort wins over the legacy 8192 budget: low buckets to 1024.
+    assert_eq!(request["thinking"]["budget_tokens"], 1_024);
+
+    // No session effort: the legacy budget path is unchanged.
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &model_info, None)
+        .expect("messages request should build");
+    assert_eq!(request["thinking"]["budget_tokens"], 8_192);
+}
+
+#[test]
+fn build_messages_request_adaptive_mode_maps_effort_to_output_config() {
+    use codex_protocol::openai_models::ReasoningEffort;
+
+    let mut provider =
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Anthropic);
+    provider.anthropic_adaptive_thinking = true;
+    let client = ModelClient::new(
+        None,
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        provider,
+        SessionSource::Cli,
+        "test_originator".to_string(),
+        None,
+        true,
+        false,
+        false,
+        None,
+        false,
+        None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    );
+    let prompt = Prompt::default();
+    let model_info = test_model_info();
+
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &model_info, Some(ReasoningEffort::Medium))
+        .expect("messages request should build");
+    assert_eq!(request["thinking"]["type"], "adaptive");
+    assert_eq!(request["output_config"]["effort"], "medium");
+    assert!(request["thinking"].get("budget_tokens").is_none());
 }
 
 #[test]

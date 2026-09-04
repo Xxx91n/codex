@@ -12,6 +12,7 @@ use codex_login::CodexAuth;
 use codex_otel::SessionTelemetry;
 use codex_protocol::error::Result;
 use codex_protocol::models::ReasoningItemContent;
+use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_response_debug_context::extract_response_debug_context;
@@ -42,6 +43,7 @@ impl ModelClientSession {
     pub(crate) async fn stream_anthropic_messages(
         &self,
         prompt: &Prompt,
+        effort: Option<ReasoningEffortConfig>,
         model_info: &ModelInfo,
         session_telemetry: &SessionTelemetry,
         responses_metadata: &CodexResponsesMetadata,
@@ -86,7 +88,7 @@ impl ModelClientSession {
                 compression: responses_options.compression,
             };
 
-            let request = self.build_messages_request(prompt, model_info)?;
+            let request = self.build_messages_request(prompt, model_info, effort.clone())?;
             let client =
                 ApiMessagesClient::new(transport, client_setup.api_provider, client_setup.api_auth)
                     .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
@@ -158,6 +160,7 @@ impl ModelClientSession {
         &self,
         prompt: &Prompt,
         model_info: &ModelInfo,
+        effort: Option<ReasoningEffortConfig>,
     ) -> Result<serde_json::Value> {
         let instructions = &prompt.base_instructions.text;
         let input = prompt.get_formatted_input_for_request(/*use_responses_lite*/ false);
@@ -208,21 +211,50 @@ impl ModelClientSession {
                 obj.insert("tools".to_string(), serde_json::Value::Array(tools));
             }
 
-            // Extended thinking: budget must be in [1024, max_tokens - 1].
-            // Clamp rather than fail — a provider-level misconfig should not
-            // abort a turn (degradation table: log + clamp).
-            if let Some(budget) = provider.anthropic_thinking_budget {
-                let max_tokens = provider
-                    .anthropic_max_tokens
-                    .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS);
-                let clamped = budget.clamp(1024, max_tokens.saturating_sub(1));
-                if clamped != budget {
-                    debug!("anthropic thinking budget {budget} out of range; clamped to {clamped}");
+            // Reasoning effort translation (ticket 11 / ADR-0005): a session
+            // effort drives the thinking parameter on the track the provider
+            // selected (adaptive for Claude 4.6+ deployments, manual bucketed
+            // budget otherwise). The legacy provider-level budget stays the
+            // non-effort path so plain budget configs behave exactly as before.
+            let max_tokens = provider
+                .anthropic_max_tokens
+                .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS);
+            let thinking = match effort.as_ref() {
+                Some(effort) => {
+                    if provider.anthropic_thinking_budget.is_some() {
+                        debug!(
+                            "session reasoning_effort takes precedence over provider.anthropic_thinking_budget",
+                        );
+                    }
+                    super::reasoning_effort::anthropic_thinking_from_effort(
+                        effort,
+                        provider.anthropic_adaptive_thinking,
+                        max_tokens,
+                    )
                 }
-                obj.insert(
-                    "thinking".to_string(),
-                    json!({ "type": "enabled", "budget_tokens": clamped }),
-                );
+                None => provider.anthropic_thinking_budget.and_then(|budget| {
+                    let clamped = super::reasoning_effort::clamp_thinking_budget(budget, max_tokens);
+                    if clamped.is_none() {
+                        debug!(
+                            "anthropic thinking budget {budget} cannot fit under max_tokens {max_tokens}; omitting thinking",
+                        );
+                        return None;
+                    }
+                    let clamped = clamped.unwrap();
+                    if clamped != budget {
+                        debug!("anthropic thinking budget {budget} out of range; clamped to {clamped}");
+                    }
+                    Some(super::reasoning_effort::AnthropicThinking {
+                        thinking: json!({ "type": "enabled", "budget_tokens": clamped }),
+                        output_config: None,
+                    })
+                }),
+            };
+            if let Some(thinking) = thinking {
+                obj.insert("thinking".to_string(), thinking.thinking);
+                if let Some(output_config) = thinking.output_config {
+                    obj.insert("output_config".to_string(), output_config);
+                }
             }
         }
 

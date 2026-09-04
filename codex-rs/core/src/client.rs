@@ -2078,6 +2078,7 @@ impl ModelClientSession {
             WireApi::Chat => {
                 self.stream_chat_completions(
                     prompt,
+                    effort.clone(),
                     model_info,
                     session_telemetry,
                     responses_metadata,
@@ -2088,6 +2089,7 @@ impl ModelClientSession {
             WireApi::Anthropic => {
                 self.stream_anthropic_messages(
                     prompt,
+                    effort.clone(),
                     model_info,
                     session_telemetry,
                     responses_metadata,

@@ -14,6 +14,7 @@ base_url = "http://localhost:11434/v1"
     let expected_provider = ModelProviderInfo {
         anthropic_max_tokens: None,
         anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
         anthropic_prompt_caching: None,
         name: "Ollama".into(),
         base_url: Some("http://localhost:11434/v1".into()),
@@ -50,6 +51,7 @@ query_params = { api-version = "2025-04-01-preview" }
     let expected_provider = ModelProviderInfo {
         anthropic_max_tokens: None,
         anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
         anthropic_prompt_caching: None,
         name: "Azure".into(),
         base_url: Some("https://xxxxx.openai.azure.com/openai".into()),
@@ -90,6 +92,7 @@ supports_standalone_web_search = true
     let expected_provider = ModelProviderInfo {
         anthropic_max_tokens: None,
         anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
         anthropic_prompt_caching: None,
         name: "Example".into(),
         base_url: Some("https://example.com".into()),
@@ -181,6 +184,7 @@ fn test_uses_openai_actor_authorization() {
     let mut provider = ModelProviderInfo {
         anthropic_max_tokens: None,
         anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
         anthropic_prompt_caching: None,
         http_headers: Some(maplit::hashmap! {
             "X-OpenAI-Actor-Authorization".to_string() => "actor-token".into(),
@@ -270,6 +274,7 @@ fn test_create_amazon_bedrock_provider() {
         ModelProviderInfo {
             anthropic_max_tokens: None,
             anthropic_thinking_budget: None,
+            anthropic_adaptive_thinking: false,
             anthropic_prompt_caching: None,
             name: "Amazon Bedrock".to_string(),
             base_url: None,
@@ -411,6 +416,7 @@ fn test_merge_configured_model_providers_adds_custom_provider() {
     let custom_provider = ModelProviderInfo {
         anthropic_max_tokens: None,
         anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
         anthropic_prompt_caching: None,
         name: "Custom".to_string(),
         base_url: Some("https://example.com/v1".to_string()),
@@ -443,6 +449,7 @@ fn test_merge_configured_model_providers_applies_amazon_bedrock_aws_override() {
         ModelProviderInfo {
             anthropic_max_tokens: None,
             anthropic_thinking_budget: None,
+            anthropic_adaptive_thinking: false,
             anthropic_prompt_caching: None,
             aws: Some(ModelProviderAwsAuthInfo {
                 profile: Some("codex-bedrock".to_string()),
@@ -484,6 +491,7 @@ fn test_merge_configured_model_providers_applies_runtime_overrides_independently
         ModelProviderInfo {
             anthropic_max_tokens: None,
             anthropic_thinking_budget: None,
+            anthropic_adaptive_thinking: false,
             anthropic_prompt_caching: None,
             base_url: Some("https://runtime.example.com/openai/v1".to_string()),
             aws: Some(runtime_aws.clone()),
@@ -514,6 +522,7 @@ fn test_merge_configured_model_providers_applies_amazon_bedrock_transport_overri
         ModelProviderInfo {
             anthropic_max_tokens: None,
             anthropic_thinking_budget: None,
+            anthropic_adaptive_thinking: false,
             anthropic_prompt_caching: None,
             base_url: Some("https://proxy.example.com/v1".to_string()),
             auth: Some(auth.clone()),
@@ -561,6 +570,7 @@ fn test_merge_configured_model_providers_rejects_amazon_bedrock_non_default_fiel
         ModelProviderInfo {
             anthropic_max_tokens: None,
             anthropic_thinking_budget: None,
+            anthropic_adaptive_thinking: false,
             anthropic_prompt_caching: None,
             name: "Custom Bedrock".to_string(),
             aws: Some(ModelProviderAwsAuthInfo {
@@ -591,6 +601,7 @@ fn test_merge_configured_model_providers_allows_amazon_bedrock_default_fields() 
         ModelProviderInfo {
             anthropic_max_tokens: None,
             anthropic_thinking_budget: None,
+            anthropic_adaptive_thinking: false,
             anthropic_prompt_caching: None,
             aws: Some(ModelProviderAwsAuthInfo {
                 profile: None,
@@ -616,6 +627,7 @@ fn test_validate_provider_aws_rejects_conflicting_auth() {
     let provider = ModelProviderInfo {
         anthropic_max_tokens: None,
         anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
         anthropic_prompt_caching: None,
         aws: Some(ModelProviderAwsAuthInfo {
             profile: None,
@@ -638,6 +650,7 @@ fn test_validate_provider_aws_rejects_websockets() {
     let provider = ModelProviderInfo {
         anthropic_max_tokens: None,
         anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
         anthropic_prompt_caching: None,
         aws: Some(ModelProviderAwsAuthInfo {
             profile: None,

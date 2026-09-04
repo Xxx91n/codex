@@ -53,6 +53,19 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
   不经 IR；把本词条与 thinking signature 红线混淆（chat 无签名）。
 - 源：ADR-0004；research/10-atomcode-reasoning-content-20260904.md。
 
+### reasoning_effort 翻译
+- 本仓用法：会话级 `reasoning_effort`（protocol `ReasoningEffort` 枚举）是跨 wire
+  唯一用户档位输入。Chat wire 发顶层 `reasoning_effort`（仅 low/medium/high 可移植
+  词汇；minimal→low、xhigh/max→high 降档）；Anthropic wire 按 provider
+  `anthropic_adaptive_thinking` 分轨——adaptive 发 `thinking:{type:adaptive}` +
+  `output_config.effort`（4.6+），manual 分桶 budget_tokens 1024/2048/4096（LiteLLM
+  兼容常量，clamp [1024, max_tokens−1]）。会话 effort 优先于 provider 级 budget。
+  翻译纯函数确定性（`wire/reasoning_effort.rs`）：same effort → same payload。
+- 禁止用法：把 effort 语义说成跨厂 token 等价（仅档位方向一致）；翻译函数引入
+  时间/随机/每请求状态（cache 断点漂移）；绕过翻译函数手拼 thinking JSON；改
+  Responses wire 的 effort 行为（上游域）。
+- 源：ADR-0005；ctx 索引 atomcode-ticket11（research/11）。
+
 ### cache_control 注入
 - 本仓用法：仅 anthropic wire 出站侧注入；向 OpenAI 兼容方向无等价物，不出现。
 - 禁止用法：往 responses/chat 输出写 cache_control 块；当跨 wire 通用语义。

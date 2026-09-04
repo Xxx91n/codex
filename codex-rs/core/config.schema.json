@@ -2119,6 +2119,11 @@
       "additionalProperties": false,
       "description": "Serializable representation of a provider definition.",
       "properties": {
+        "anthropic_adaptive_thinking": {
+          "default": false,
+          "description": "Speak the adaptive thinking track on the \"anthropic\" (messages) wire: `thinking: { type: \"adaptive\" }` plus `output_config.effort` (Claude 4.6+ deployments; manual `budget_tokens` is deprecated there and rejected outright by 4.7+ models). When false (the default), the manual track applies and a session reasoning effort is bucketed into `budget_tokens`.",
+          "type": "boolean"
+        },
         "anthropic_max_tokens": {
           "description": "`max_tokens` budget sent on the \"anthropic\" (messages) wire. When unset, the client falls back to its built-in default (8192).",
           "format": "uint32",

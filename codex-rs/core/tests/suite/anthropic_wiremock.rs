@@ -253,3 +253,140 @@ async fn anthropic_wire_tool_call_roundtrip() -> Result<()> {
 
     Ok(())
 }
+
+
+/// Session-level reasoning effort must reach the Anthropic Messages wire
+/// (ticket 11 / ADR-0005): manual-track budgets the session effort into thinking.budget_tokens.
+#[tokio::test]
+async fn anthropic_wire_reasoning_effort_budget() -> Result<()> {
+    let server = start_mock_server().await;
+
+    let requests = mount_messages_sse_once_match(
+        &server,
+        |_request: &Request| true,
+        messages_sse_final_text("reasoning effort complete"),
+    )
+    .await;
+
+    let test = test_codex()
+        .with_config(|config| {
+            config.model_provider.wire_api = WireApi::Anthropic;
+            // legacy budget present to prove session effort takes precedence
+            config.model_reasoning_effort =
+                Some(codex_protocol::openai_models::ReasoningEffort::Medium);
+        })
+        .build(&server)
+        .await?;
+
+    test.codex
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "say hello back".to_string(),
+                text_elements: Vec::new(),
+            }])
+            .with_thread_settings(
+                codex_protocol::protocol::ThreadSettingsOverrides {
+                    approval_policy: Some(AskForApproval::Never),
+                    ..Default::default()
+                },
+            ),
+        )
+        .await?;
+
+    wait_for_event(&test.codex, |event| match event {
+        EventMsg::TurnComplete(_) => true,
+        EventMsg::Error(error) => panic!("unexpected turn error: {error:?}"),
+        _ => false,
+    })
+    .await;
+
+    test.codex.submit(Op::Shutdown).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ShutdownComplete)
+    })
+    .await;
+
+    let recorded = requests.lock().unwrap();
+    assert_eq!(recorded.len(), 1, "expected exactly one request");
+    let body: serde_json::Value =
+        serde_json::from_slice(&recorded[0]).expect("request body is json");
+    assert_eq!(
+        body["thinking"]["type"], "enabled",
+        "manual track must speak enabled+budget_tokens"
+    );
+    assert_eq!(
+        body["thinking"]["budget_tokens"], 2_048,
+        "medium session effort must bucket to the 2048 budget"
+    );
+    assert!(body.get("output_config").is_none());
+
+    Ok(())
+}
+
+/// Session-level reasoning effort must reach the Anthropic Messages wire
+/// (ticket 11 / ADR-0005): adaptive-track translates the session effort into output_config.effort.
+#[tokio::test]
+async fn anthropic_wire_reasoning_effort_adaptive() -> Result<()> {
+    let server = start_mock_server().await;
+
+    let requests = mount_messages_sse_once_match(
+        &server,
+        |_request: &Request| true,
+        messages_sse_final_text("reasoning effort complete"),
+    )
+    .await;
+
+    let test = test_codex()
+        .with_config(|config| {
+            config.model_provider.wire_api = WireApi::Anthropic;
+            config.model_provider.anthropic_adaptive_thinking = true;
+            config.model_reasoning_effort =
+                Some(codex_protocol::openai_models::ReasoningEffort::Medium);
+        })
+        .build(&server)
+        .await?;
+
+    test.codex
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "say hello back".to_string(),
+                text_elements: Vec::new(),
+            }])
+            .with_thread_settings(
+                codex_protocol::protocol::ThreadSettingsOverrides {
+                    approval_policy: Some(AskForApproval::Never),
+                    ..Default::default()
+                },
+            ),
+        )
+        .await?;
+
+    wait_for_event(&test.codex, |event| match event {
+        EventMsg::TurnComplete(_) => true,
+        EventMsg::Error(error) => panic!("unexpected turn error: {error:?}"),
+        _ => false,
+    })
+    .await;
+
+    test.codex.submit(Op::Shutdown).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ShutdownComplete)
+    })
+    .await;
+
+    let recorded = requests.lock().unwrap();
+    assert_eq!(recorded.len(), 1, "expected exactly one request");
+    let body: serde_json::Value =
+        serde_json::from_slice(&recorded[0]).expect("request body is json");
+    assert_eq!(
+        body["thinking"]["type"], "adaptive",
+        "adaptive track must speak thinking.type=adaptive"
+    );
+    assert_eq!(
+        body["output_config"]["effort"], "medium",
+        "adaptive track must carry the session effort verbatim"
+    );
+    assert!(body["thinking"].get("budget_tokens").is_none());
+
+    Ok(())
+}

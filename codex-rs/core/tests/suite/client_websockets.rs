@@ -2491,6 +2491,7 @@ fn websocket_provider_with_connect_timeout(
         anthropic_max_tokens: None,
 
         anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
 
         anthropic_prompt_caching: None,
         name: "mock-ws".into(),

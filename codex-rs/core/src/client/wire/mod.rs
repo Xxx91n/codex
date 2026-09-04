@@ -7,6 +7,7 @@
 //! `client.rs`.
 
 pub(crate) mod anthropic;
+pub(crate) mod reasoning_effort;
 pub(crate) mod chat;
 
 pub(crate) fn content_items_to_text(
