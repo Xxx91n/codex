@@ -12,6 +12,10 @@ name = "Ollama"
 base_url = "http://localhost:11434/v1"
         "#;
     let expected_provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+        anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
+        anthropic_prompt_caching: None,
         name: "Ollama".into(),
         base_url: Some("http://localhost:11434/v1".into()),
         env_key: None,
@@ -45,6 +49,10 @@ env_key = "AZURE_OPENAI_API_KEY"
 query_params = { api-version = "2025-04-01-preview" }
         "#;
     let expected_provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+        anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
+        anthropic_prompt_caching: None,
         name: "Azure".into(),
         base_url: Some("https://xxxxx.openai.azure.com/openai".into()),
         env_key: Some("AZURE_OPENAI_API_KEY".into()),
@@ -82,6 +90,10 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
 supports_standalone_web_search = true
         "#;
     let expected_provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+        anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
+        anthropic_prompt_caching: None,
         name: "Example".into(),
         base_url: Some("https://example.com".into()),
         env_key: Some("API_KEY".into()),
@@ -111,7 +123,7 @@ supports_standalone_web_search = true
 }
 
 #[test]
-fn test_deserialize_chat_wire_api_shows_helpful_error() {
+fn test_deserialize_chat_wire_api_parses() {
     let provider_toml = r#"
 name = "OpenAI using Chat Completions"
 base_url = "https://api.openai.com/v1"
@@ -119,8 +131,8 @@ env_key = "OPENAI_API_KEY"
 wire_api = "chat"
         "#;
 
-    let err = toml::from_str::<ModelProviderInfo>(provider_toml).unwrap_err();
-    assert!(err.to_string().contains(CHAT_WIRE_API_REMOVED_ERROR));
+    let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
+    assert_eq!(provider.wire_api, WireApi::Chat);
 }
 
 #[test]
@@ -155,8 +167,25 @@ fn test_header_auth_uses_chatgpt_codex_base_url() {
 }
 
 #[test]
+fn codex_backend_routes_require_codex_base_url() {
+    for (base_url, expected) in [
+        (None, true),
+        (Some(CHATGPT_CODEX_BASE_URL), true),
+        (Some("https://chatgpt-staging.com/backend-api/codex/"), true),
+        (Some("https://proxy.example.com/v1"), false),
+    ] {
+        let provider = ModelProviderInfo::create_openai_provider(base_url.map(str::to_owned));
+        assert_eq!(provider.supports_codex_backend_routes(), expected);
+    }
+}
+
+#[test]
 fn test_uses_openai_actor_authorization() {
     let mut provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+        anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
+        anthropic_prompt_caching: None,
         http_headers: Some(maplit::hashmap! {
             "X-OpenAI-Actor-Authorization".to_string() => "actor-token".into(),
         }),
@@ -243,6 +272,10 @@ fn test_create_amazon_bedrock_provider() {
     assert_eq!(
         ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
         ModelProviderInfo {
+            anthropic_max_tokens: None,
+            anthropic_thinking_budget: None,
+            anthropic_adaptive_thinking: false,
+            anthropic_prompt_caching: None,
             name: "Amazon Bedrock".to_string(),
             base_url: None,
             env_key: None,
@@ -381,6 +414,10 @@ fn test_built_in_model_providers_include_amazon_bedrock_runtime() {
 #[test]
 fn test_merge_configured_model_providers_adds_custom_provider() {
     let custom_provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+        anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
+        anthropic_prompt_caching: None,
         name: "Custom".to_string(),
         base_url: Some("https://example.com/v1".to_string()),
         ..ModelProviderInfo::default()
@@ -410,6 +447,10 @@ fn test_merge_configured_model_providers_applies_amazon_bedrock_aws_override() {
     let configured_model_providers = std::collections::HashMap::from([(
         AMAZON_BEDROCK_PROVIDER_ID.to_string(),
         ModelProviderInfo {
+            anthropic_max_tokens: None,
+            anthropic_thinking_budget: None,
+            anthropic_adaptive_thinking: false,
+            anthropic_prompt_caching: None,
             aws: Some(ModelProviderAwsAuthInfo {
                 profile: Some("codex-bedrock".to_string()),
                 region: Some("us-west-2".to_string()),
@@ -448,6 +489,10 @@ fn test_merge_configured_model_providers_applies_runtime_overrides_independently
     let configured_model_providers = std::collections::HashMap::from([(
         AMAZON_BEDROCK_RUNTIME_PROVIDER_ID.to_string(),
         ModelProviderInfo {
+            anthropic_max_tokens: None,
+            anthropic_thinking_budget: None,
+            anthropic_adaptive_thinking: false,
+            anthropic_prompt_caching: None,
             base_url: Some("https://runtime.example.com/openai/v1".to_string()),
             aws: Some(runtime_aws.clone()),
             ..ModelProviderInfo::default()
@@ -475,6 +520,10 @@ fn test_merge_configured_model_providers_applies_amazon_bedrock_transport_overri
     let configured_model_providers = std::collections::HashMap::from([(
         AMAZON_BEDROCK_PROVIDER_ID.to_string(),
         ModelProviderInfo {
+            anthropic_max_tokens: None,
+            anthropic_thinking_budget: None,
+            anthropic_adaptive_thinking: false,
+            anthropic_prompt_caching: None,
             base_url: Some("https://proxy.example.com/v1".to_string()),
             auth: Some(auth.clone()),
             aws: Some(ModelProviderAwsAuthInfo {
@@ -519,6 +568,10 @@ fn test_merge_configured_model_providers_rejects_amazon_bedrock_non_default_fiel
     let configured_model_providers = std::collections::HashMap::from([(
         AMAZON_BEDROCK_PROVIDER_ID.to_string(),
         ModelProviderInfo {
+            anthropic_max_tokens: None,
+            anthropic_thinking_budget: None,
+            anthropic_adaptive_thinking: false,
+            anthropic_prompt_caching: None,
             name: "Custom Bedrock".to_string(),
             aws: Some(ModelProviderAwsAuthInfo {
                 profile: Some("codex-bedrock".to_string()),
@@ -546,6 +599,10 @@ fn test_merge_configured_model_providers_allows_amazon_bedrock_default_fields() 
     let configured_model_providers = std::collections::HashMap::from([(
         AMAZON_BEDROCK_PROVIDER_ID.to_string(),
         ModelProviderInfo {
+            anthropic_max_tokens: None,
+            anthropic_thinking_budget: None,
+            anthropic_adaptive_thinking: false,
+            anthropic_prompt_caching: None,
             aws: Some(ModelProviderAwsAuthInfo {
                 profile: None,
                 region: None,
@@ -568,6 +625,10 @@ fn test_merge_configured_model_providers_allows_amazon_bedrock_default_fields() 
 #[test]
 fn test_validate_provider_aws_rejects_conflicting_auth() {
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+        anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
+        anthropic_prompt_caching: None,
         aws: Some(ModelProviderAwsAuthInfo {
             profile: None,
             region: None,
@@ -587,6 +648,10 @@ fn test_validate_provider_aws_rejects_conflicting_auth() {
 #[test]
 fn test_validate_provider_aws_rejects_websockets() {
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+        anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
+        anthropic_prompt_caching: None,
         aws: Some(ModelProviderAwsAuthInfo {
             profile: None,
             region: None,
@@ -650,4 +715,20 @@ refresh_interval_ms = 0
     let auth = provider.auth.expect("auth config should deserialize");
     assert_eq!(auth.refresh_interval_ms, 0);
     assert_eq!(auth.refresh_interval(), None);
+}
+
+#[test]
+fn anthropic_max_tokens_is_parsed_and_optional() {
+    let provider: ModelProviderInfo = toml::from_str(
+        r#"
+            name = "x"
+            anthropic_max_tokens = 128000
+        "#,
+    )
+    .expect("deserialize provider with anthropic_max_tokens");
+    assert_eq!(provider.anthropic_max_tokens, Some(128_000));
+
+    let provider: ModelProviderInfo =
+        toml::from_str(r#"name = "x""#).expect("deserialize provider without anthropic_max_tokens");
+    assert_eq!(provider.anthropic_max_tokens, None);
 }

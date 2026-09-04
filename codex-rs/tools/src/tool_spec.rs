@@ -14,6 +14,8 @@ use serde::Serialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
 use std::sync::Arc;
+use tracing::debug;
+use tracing::warn;
 
 /// When serialized as JSON, this produces a valid "Tool" in the OpenAI
 /// Responses API.
@@ -141,6 +143,70 @@ pub fn create_tools_json_for_responses_lite(
     Ok(tools_json)
 }
 
+/// Returns JSON values that are compatible with Function Calling in Chat
+/// Completions APIs. Fork addition: upstream codex removed the chat wire; this
+/// mirrors the PR #12234 blueprint so chat-only providers keep tool calling.
+pub fn create_tools_json_for_chat_completions(
+    tools: &[ToolSpec],
+) -> Result<Vec<Value>, serde_json::Error> {
+    let mut tools_json = Vec::new();
+
+    for tool in tools {
+        match tool {
+            ToolSpec::Function(function) => {
+                tools_json.push(chat_completions_function_tool_json(function));
+            }
+            ToolSpec::Freeform(freeform) => {
+                // A wrapped function-shaped stand-in would advertise a tool
+                // whose calls always fail: freeform handlers only accept
+                // `ToolPayload::Custom`, while a chat upstream can only produce
+                // `ToolPayload::Function`. Explicitly degrade to omitting the
+                // tool instead (chat has no freeform concept).
+                warn!(
+                    "chat wire cannot carry freeform tool '{}'; omitting it from the tool list",
+                    freeform.name
+                );
+            }
+            ToolSpec::Namespace(namespace) => {
+                // Chat Completions has no namespace concept: expand the namespace
+                // into individually flattened function tools.
+                for tool in &namespace.tools {
+                    match tool {
+                        crate::ResponsesApiNamespaceTool::Function(function) => {
+                            tools_json.push(chat_completions_function_tool_json(function));
+                        }
+                        crate::ResponsesApiNamespaceTool::Custom(freeform) => {
+                            warn!(
+                                "chat wire cannot carry freeform tool '{}'; omitting it from the tool list",
+                                freeform.name
+                            );
+                        }
+                    }
+                }
+            }
+            ToolSpec::ToolSearch { .. } | ToolSpec::WebSearch { .. } => {
+                // Chat Completions only accepts function tools; these
+                // responses-only tools have no function equivalent.
+                debug!("responses-only tool omitted from chat tool list");
+            }
+        }
+    }
+
+    Ok(tools_json)
+}
+
+fn chat_completions_function_tool_json(function: &ResponsesApiTool) -> serde_json::Value {
+    serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": function.name,
+            "description": function.description,
+            "parameters": function.parameters,
+            "strict": function.strict,
+        }
+    })
+}
+
 /// Returns raw JSON that can be embedded directly in a Responses API request.
 pub fn create_tools_raw_json_for_responses_api(
     tools: &[ToolSpec],
@@ -186,6 +252,65 @@ impl From<ConfigWebSearchUserLocation> for ResponsesApiWebSearchUserLocation {
             timezone: user_location.timezone,
         }
     }
+}
+
+/// Returns JSON values that are compatible with tool use in the Anthropic
+/// Messages API. Fork addition (goose-blueprint transport): function tools map
+/// to `{"name", "description", "input_schema"}` blocks; freeform tools wrap
+/// their payload into a single `input` string parameter.
+pub fn create_tools_json_for_anthropic(
+    tools: &[ToolSpec],
+) -> Result<Vec<Value>, serde_json::Error> {
+    let mut tools_json = Vec::new();
+
+    for tool in tools {
+        match tool {
+            ToolSpec::Function(function) => {
+                tools_json.push(anthropic_tool_json(function));
+            }
+            ToolSpec::Freeform(freeform) => {
+                // Same explicit degradation as the chat converter: function-shaped
+                // stand-ins would always fail at dispatch (freeform handlers only
+                // accept `ToolPayload::Custom`).
+                warn!(
+                    "anthropic wire cannot carry freeform tool '{}'; omitting it from the tool list",
+                    freeform.name
+                );
+            }
+            ToolSpec::Namespace(namespace) => {
+                // The Messages API has no namespace concept: expand the
+                // namespace into individually flattened tools.
+                for tool in &namespace.tools {
+                    match tool {
+                        crate::ResponsesApiNamespaceTool::Function(function) => {
+                            tools_json.push(anthropic_tool_json(function));
+                        }
+                        crate::ResponsesApiNamespaceTool::Custom(freeform) => {
+                            warn!(
+                                "anthropic wire cannot carry freeform tool '{}'; omitting it from the tool list",
+                                freeform.name
+                            );
+                        }
+                    }
+                }
+            }
+            ToolSpec::ToolSearch { .. } | ToolSpec::WebSearch { .. } => {
+                // The Messages API accepts function-shaped tools only; these
+                // responses-only tools have no function equivalent.
+                debug!("responses-only tool omitted from anthropic tool list");
+            }
+        }
+    }
+
+    Ok(tools_json)
+}
+
+fn anthropic_tool_json(function: &ResponsesApiTool) -> serde_json::Value {
+    serde_json::json!({
+        "name": function.name,
+        "description": function.description,
+        "input_schema": function.parameters,
+    })
 }
 
 #[cfg(test)]

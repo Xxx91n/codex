@@ -48,6 +48,7 @@ use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
+use test_case::test_case;
 use tokio::time::Duration;
 use tokio::time::Instant;
 use tokio::time::sleep;
@@ -114,6 +115,7 @@ async fn remote_models_get_model_info_uses_longest_matching_prefix() -> Result<(
     let specific = ModelInfo {
         display_name: "GPT 5.3 Codex".to_string(),
         model_messages: Some(ModelMessages {
+            persistent_instructions: None,
             instructions_template: Some("use specific prefix".to_string()),
             instructions_variables: None,
             approvals: None,
@@ -122,6 +124,7 @@ async fn remote_models_get_model_info_uses_longest_matching_prefix() -> Result<(
             permissions: None,
             multi_agent: None,
             token_budget: None,
+            confirmation_policies: None,
             guardian_v2: None,
         }),
         ..specific
@@ -129,6 +132,7 @@ async fn remote_models_get_model_info_uses_longest_matching_prefix() -> Result<(
     let generic = ModelInfo {
         display_name: "GPT 5.3".to_string(),
         model_messages: Some(ModelMessages {
+            persistent_instructions: None,
             instructions_template: Some("use generic prefix".to_string()),
             instructions_variables: None,
             approvals: None,
@@ -137,6 +141,7 @@ async fn remote_models_get_model_info_uses_longest_matching_prefix() -> Result<(
             permissions: None,
             multi_agent: None,
             token_budget: None,
+            confirmation_policies: None,
             guardian_v2: None,
         }),
         ..generic
@@ -154,6 +159,11 @@ async fn remote_models_get_model_info_uses_longest_matching_prefix() -> Result<(
 
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         base_url: Some(format!("{}/v1", server.uri())),
         ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
     };
@@ -365,33 +375,55 @@ async fn remote_models_use_context_window_when_config_override_is_absent() -> Re
     Ok(())
 }
 
+#[test_case(ReasoningEffort::Custom("future".to_string()), "future", Some("Catalog follow-up instructions."); "custom")]
+#[test_case(ReasoningEffort::Persistent, "disabled", None; "persistent")]
+#[test_case(ReasoningEffort::Persistent, "disabled", Some("Catalog follow-up instructions."); "persistent override")]
+#[test_case(ReasoningEffort::Persistent, "disabled", Some(""); "empty persistent override")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_models_long_model_slug_is_sent_with_custom_reasoning() -> Result<()> {
+async fn remote_models_long_model_slug_is_sent_with_supported_reasoning(
+    effort: ReasoningEffort,
+    expected_wire_effort: &str,
+    catalog_instructions: Option<&str>,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
 
     let server = MockServer::start().await;
     let requested_model = "gpt-5.3-codex-test";
     let prefix_model = "gpt-5.3-codex";
+    let base_instructions = "Keep the catalog base instructions.";
+    let developer_instructions = "Keep the configured developer instructions.";
     let mut remote_model = test_remote_model_with_policy(
         prefix_model,
         ModelVisibility::List,
         /*priority*/ 1_000,
         TruncationPolicyConfig::bytes(/*limit*/ 10_000),
     );
-    let custom_reasoning_effort = ReasoningEffort::Custom("future".to_string());
-    remote_model.default_reasoning_level = Some(custom_reasoning_effort.clone());
+    remote_model.default_reasoning_level = Some(effort.clone());
     remote_model.supported_reasoning_levels = vec![
         ReasoningEffortPreset {
             effort: ReasoningEffort::Medium,
             description: ReasoningEffort::Medium.to_string(),
         },
         ReasoningEffortPreset {
-            effort: custom_reasoning_effort.clone(),
-            description: custom_reasoning_effort.to_string(),
+            effort: effort.clone(),
+            description: effort.to_string(),
         },
     ];
     remote_model.default_reasoning_summary = ReasoningSummary::Detailed;
+    remote_model.model_messages = Some(ModelMessages {
+        persistent_instructions: catalog_instructions.map(str::to_string),
+        instructions_template: Some(base_instructions.to_string()),
+        instructions_variables: None,
+        approvals: None,
+        collaboration_modes: None,
+        auto_review: None,
+        permissions: None,
+        multi_agent: None,
+        token_budget: None,
+        guardian_v2: None,
+        confirmation_policies: None,
+    });
     mount_models_once(
         &server,
         ModelsResponse {
@@ -410,8 +442,9 @@ async fn remote_models_long_model_slug_is_sent_with_custom_reasoning() -> Result
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_config(|config| {
             config.model = Some(requested_model.to_string());
+            config.developer_instructions = Some(developer_instructions.to_string());
         })
-        .build(&server)
+        .build_with_auto_env(&server)
         .await?;
 
     codex
@@ -434,8 +467,36 @@ async fn remote_models_long_model_slug_is_sent_with_custom_reasoning() -> Result
         .and_then(|reasoning| reasoning.get("summary"))
         .and_then(|value| value.as_str());
     assert_eq!(body["model"].as_str(), Some(requested_model));
-    assert_eq!(reasoning_effort, Some("future"));
+    assert_eq!(reasoning_effort, Some(expected_wire_effort));
     assert_eq!(reasoning_summary, Some("detailed"));
+    assert_eq!(request.instructions_text(), base_instructions);
+    assert!(
+        request
+            .message_input_texts("developer")
+            .iter()
+            .any(|text| text.contains(developer_instructions))
+    );
+
+    let persistent_instructions = request
+        .message_input_texts("developer")
+        .into_iter()
+        .filter(|text| text.starts_with("<persistent_mode>"))
+        .collect::<Vec<_>>();
+    if effort != ReasoningEffort::Persistent || catalog_instructions == Some("") {
+        assert!(persistent_instructions.is_empty());
+    } else if let Some(instructions) = catalog_instructions {
+        assert_eq!(
+            persistent_instructions,
+            vec![format!(
+                "<persistent_mode>\n{instructions}\n</persistent_mode>"
+            )]
+        );
+    } else {
+        assert_eq!(persistent_instructions.len(), 1);
+        assert!(persistent_instructions[0].starts_with(
+            "<persistent_mode>\n## Proactivity\n\nAfter you've completed the user task and delivered the final answer,"
+        ));
+    }
 
     Ok(())
 }
@@ -518,6 +579,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
         model_specialty: None,
         tool_mode: None,
         multi_agent_version: None,
+        multi_agent_reasoning_effort: None,
         priority: 1,
         additional_speed_tiers: Vec::new(),
         service_tiers: Vec::new(),
@@ -786,12 +848,14 @@ async fn remote_models_apply_legacy_instructions() -> Result<()> {
         model_specialty: None,
         tool_mode: None,
         multi_agent_version: None,
+        multi_agent_reasoning_effort: None,
         priority: 1,
         additional_speed_tiers: Vec::new(),
         service_tiers: Vec::new(),
         default_service_tier: None,
         upgrade: None,
         model_messages: Some(ModelMessages {
+            persistent_instructions: None,
             instructions_template: Some(remote_instructions.to_string()),
             instructions_variables: None,
             approvals: None,
@@ -800,6 +864,7 @@ async fn remote_models_apply_legacy_instructions() -> Result<()> {
             permissions: None,
             multi_agent: None,
             token_budget: None,
+            confirmation_policies: None,
             guardian_v2: None,
         }),
         include_skills_usage_instructions: false,
@@ -961,6 +1026,11 @@ async fn remote_models_do_not_append_removed_builtin_presets() -> Result<()> {
 
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         base_url: Some(format!("{}/v1", server.uri())),
         ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
     };
@@ -1027,6 +1097,11 @@ async fn remote_models_merge_adds_new_high_priority_first() -> Result<()> {
 
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         base_url: Some(format!("{}/v1", server.uri())),
         ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
     };
@@ -1079,6 +1154,11 @@ async fn remote_models_merge_replaces_overlapping_model() -> Result<()> {
 
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         base_url: Some(format!("{}/v1", server.uri())),
         ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
     };
@@ -1128,6 +1208,11 @@ async fn remote_models_merge_preserves_bundled_models_on_empty_response() -> Res
 
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         base_url: Some(format!("{}/v1", server.uri())),
         ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
     };
@@ -1175,6 +1260,11 @@ async fn remote_models_request_times_out_after_5s() -> Result<()> {
 
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         base_url: Some(format!("{}/v1", server.uri())),
         ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
     };
@@ -1250,6 +1340,11 @@ async fn remote_models_hide_picker_only_models() -> Result<()> {
 
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         base_url: Some(format!("{}/v1", server.uri())),
         ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
     };
@@ -1368,6 +1463,7 @@ fn test_remote_model_with_policy(
         model_specialty: None,
         tool_mode: None,
         multi_agent_version: None,
+        multi_agent_reasoning_effort: None,
         priority,
         additional_speed_tiers: Vec::new(),
         service_tiers: Vec::new(),

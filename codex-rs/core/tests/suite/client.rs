@@ -1506,6 +1506,12 @@ async fn amazon_bedrock_proxy_uses_command_auth_and_custom_headers() {
 /// reaches `Completed` without surfacing an auth or transport error to the client.
 async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuthInfo) {
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
+
+        anthropic_prompt_caching: None,
         name: "corp".into(),
         base_url: Some(format!("{}/v1", server.uri())),
         env_key: None,
@@ -1761,6 +1767,12 @@ async fn prefers_apikey_when_config_prefers_apikey_even_with_chatgpt_tokens() {
         .await;
 
     let model_provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
+
+        anthropic_prompt_caching: None,
         base_url: Some(format!("{}/v1", server.uri())),
         supports_websockets: false,
         ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
@@ -2210,6 +2222,49 @@ async fn omits_environment_context_when_configured_off() {
         "did not expect environment context when include_environment_context = false, got {:?}",
         request.body_json()["input"]
     );
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn powershell_shell_version_is_model_visible_only_when_enabled() -> anyhow::Result<()> {
+    core_test_support::skip_if_remote!(Ok(()), "requires local Windows PowerShell execution");
+
+    let shell_path = codex_shell_command::powershell::try_find_powershell_executable_blocking()
+        .ok_or_else(|| anyhow::anyhow!("Windows PowerShell is unavailable"))?
+        .to_path_buf();
+    for enabled in [false, true] {
+        let server = MockServer::start().await;
+        let response = mount_sse_once(&server, sse(vec![ev_completed("done")])).await;
+        let user_shell = codex_shell_command::shell_detect::DetectedShell {
+            shell_type: codex_shell_command::shell_detect::ShellType::PowerShell,
+            shell_path: shell_path.clone(),
+        }
+        .into();
+        let mut builder = test_codex()
+            .with_user_shell(user_shell)
+            .with_config(move |config| {
+                config
+                    .features
+                    .set_enabled(Feature::PowerShellShellVersion, enabled)
+                    .expect("test config should allow PowerShell version feature updates");
+            });
+        let test = builder.build_with_auto_env(&server).await?;
+        test.submit_turn("report the selected shell").await?;
+
+        let request = response.single_request();
+        assert!(message_input_text_contains(
+            &request,
+            "user",
+            "<shell>powershell</shell>"
+        ));
+        assert_eq!(
+            message_input_text_contains(&request, "user", "<shell_version>5.1</shell_version>"),
+            enabled,
+            "PowerShell shell version must follow its feature flag"
+        );
+    }
+
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2996,6 +3051,12 @@ async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids(
     let resp_mock = mount_sse_once(&server, sse_body.to_string()).await;
 
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
+
+        anthropic_prompt_caching: None,
         name: "azure".into(),
         base_url: Some(format!("{}/openai", server.uri())),
         env_key: None,
@@ -3621,6 +3682,12 @@ async fn azure_overrides_assign_properties_used_for_responses_url() {
         .await;
 
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
+
+        anthropic_prompt_caching: None,
         name: "custom".to_string(),
         base_url: Some(format!("{}/openai", server.uri())),
         // Reuse the existing environment variable to avoid using unsafe code
@@ -3705,6 +3772,12 @@ async fn env_var_overrides_loaded_auth() {
         .await;
 
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
+
+        anthropic_prompt_caching: None,
         name: ModelProviderInfo::create_openai_provider(/*base_url*/ None).name,
         base_url: Some(format!("{}/openai", server.uri())),
         // Reuse the existing environment variable to avoid using unsafe code

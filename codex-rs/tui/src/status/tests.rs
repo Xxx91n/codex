@@ -786,6 +786,11 @@ async fn status_model_provider_uses_bedrock_runtime_base_url_and_gates_usage_lin
 
     config.model_provider_id = "openai-proxy".to_string();
     config.model_provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         name: "OpenAI Proxy".to_string(),
         base_url: Some("https://openai-proxy.example/v1".to_string()),
         requires_openai_auth: true,

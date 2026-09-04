@@ -99,7 +99,10 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
         true
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(self.handle_call(invocation))
     }
 }
@@ -161,13 +164,11 @@ impl ExecCommandHandler {
 
         // Remote executors enforce URI-native sandbox policy themselves. Only a host-local
         // sandbox needs a native cwd for resolving paths nested in the permissions config.
-        // TODO(anp): Reconcile this backend choice with TurnEnvironment::sandbox_context
-        // so the native-cwd requirement follows the selected environment's sandbox.
         let requires_host_native_cwd = !environment.is_remote()
             && SandboxManager::new().select_initial(
                 turn_environment.permission_profile(),
                 SandboxablePreference::Auto,
-                turn.windows_sandbox_level,
+                turn_environment.config().windows_sandbox_level,
                 turn.network.is_some(),
             ) != SandboxType::None;
         // `to_abs_path()` alone cannot identify foreign drive paths: `file:///C:/repo` is
@@ -278,17 +279,13 @@ impl ExecCommandHandler {
 
         // Sticky turn permissions have already been approved, so they should
         // continue through the normal exec approval flow for the command.
+        let approval_policy = context.step_context.settings.approval_policy();
         if effective_additional_permissions
             .sandbox_permissions
             .requests_sandbox_override()
             && !effective_additional_permissions.permissions_preapproved
-            && prompt_is_rejected_by_policy(
-                context.step_context.turn.approval_policy(),
-                /*prompt_is_rule*/ false,
-            )
-            .is_some()
+            && prompt_is_rejected_by_policy(approval_policy, /*prompt_is_rule*/ false).is_some()
         {
-            let approval_policy = context.step_context.turn.approval_policy();
             manager.release_process_id(process_id).await;
             return Err(FunctionCallError::RespondToModel(format!(
                 "approval policy is {approval_policy:?}; reject command — you cannot ask for escalated permissions if the approval policy is {approval_policy:?}"
@@ -304,7 +301,7 @@ impl ExecCommandHandler {
             || {
                 normalize_and_validate_additional_permissions(
                     additional_permissions_allowed,
-                    context.step_context.turn.approval_policy(),
+                    approval_policy,
                     effective_additional_permissions.sandbox_permissions,
                     effective_additional_permissions.additional_permissions,
                     effective_additional_permissions.permissions_preapproved,
@@ -345,7 +342,7 @@ impl ExecCommandHandler {
                 chunk_id: String::new(),
                 wall_time: std::time::Duration::ZERO,
                 raw_output: output.into_text().into_bytes(),
-                truncation_policy: turn.model_info.truncation_policy.into(),
+                truncation_policy: turn.model_info().truncation_policy.into(),
                 max_output_tokens,
                 process_id: None,
                 exit_code: None,
@@ -397,7 +394,7 @@ impl ExecCommandHandler {
                     chunk_id: generate_chunk_id(),
                     wall_time: output.duration,
                     raw_output: output_text.into_bytes(),
-                    truncation_policy: turn.model_info.truncation_policy.into(),
+                    truncation_policy: turn.model_info().truncation_policy.into(),
                     max_output_tokens,
                     // Sandbox denial is terminal, so there is no live
                     // process for write_stdin to resume.
