@@ -89,14 +89,19 @@ jobs:
       - name: Clippy (seam crates)
         shell: bash
         run: cargo clippy --locked --lib -p codex-api -p codex-core -p codex-model-provider-info -- -D warnings
-      # The wiremock suites (chat_wiremock / anthropic_wiremock / client)
-      # live in codex-core's single aggregated test binary — deliberately
-      # kept out of fork-cli-test-release.yml's latency-sensitive check job;
-      # this daily, non-PR-blocking job is their home. `just test` follows
-      # the repo nextest defaults.
+      # The fork seam suites, scoped with a nextest filter instead of running
+      # -p codex-core whole: the full codex-core integration suite has unrelated
+      # suite::* tests (agents_md/approvals/apply_patch_cli, fs sandbox) that
+      # SIGABRT under the debug profile in CI (fork-health runs 33946093566 /
+      # 33948129889), and the RUST_MIN_STACK=8388608 that `just` sets does not
+      # fix them — so per ticket 17 the daily watchdog converges to the
+      # wiremock trio (chat_wiremock / anthropic_wiremock / cross_wire), the
+      # codex-api SSE unit tests, and the reasoning_effort translation unit
+      # tests (WORKFLOW §6 ticket-10 lesson). `just test` passes the filterset
+      # through to nextest; the repo nextest defaults still apply.
       - name: Test fork seam suites
         shell: bash
-        run: just test -p codex-api -p codex-core
+        run: just test -E 'package(codex-api) or test(chat_wire) or test(anthropic_wire) or test(cross_wire) or test(reasoning_effort)'
       # Advisory drift probe (ADR-0001 weekly merge cadence): report how far
       # upstream main has moved and which seam-surface files it touched, so
       # the "what to read after a merge" list from the architecture review
