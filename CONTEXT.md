@@ -8,6 +8,24 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
 消费规则（per domain.md）：开工先读本文件；命名只用本表词汇，不造同义词；与 ADR 冲突时
 显式标注「Contradicts ADR-NNN — 理由」；新词随其 ADR 入表；锚点只写「文件:符号」不写行号。
 
+## 如何读本仓库（导航）
+
+按序读到能干活为止；层间只指路不复述（link, don't copy）：
+
+1. `README.md` — 人类入口：三 wire 用法与 fork 心智模型；其「Fork documentation
+   map」一节是本导航链的根。
+2. `AGENTS.md` — 代理约束总入口；「Fork delta: tri-wire-api」段是 fork 红线
+   （三注册点 / 构建 / 同步）。
+3. `docs/adr/` — append-only 决策记录（索引：`docs/adr/README.md`）：0001 基线与
+   同步、0002 merge rulings、0003 Gemini 裁决、0004 reasoning_content 透传、
+   0005 reasoning_effort 翻译；新裁决递增编号，新词随其 ADR 入本表。
+4. 嵌套 AGENTS 链（就近优先）：`codex-rs/AGENTS.md`（Rust workspace 纪律）→
+   `core/src/client/wire/AGENTS.md`（per-wire 协议红线）。
+5. `.github/workflows/fork-health.yml` — 每日 fork seam 看门狗（seam crates
+   clippy + wiremock 三件套 + drift probe）；构建/测试只跑 CI，本地零构建。
+6. 版本控制 = GitButler（每票一个 lane）；upstream 同步 merge 不 rebase
+   （ADR-0001）。
+
 ## 核心词汇
 
 ### 三注册点（WireApi / ModelProviderInfo / client.rs match）

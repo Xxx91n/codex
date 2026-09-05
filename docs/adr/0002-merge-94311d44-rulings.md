@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-09-02
+- Related: ADR-0001 (fork baseline and three-registration-point discipline; this ADR records that baseline's first merge rulings)
 
 ## Status
 

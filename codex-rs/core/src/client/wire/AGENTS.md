@@ -32,11 +32,11 @@ non-Responses wires on one internal representation (`ResponseItem`).
 - `chat.rs` — `stream_chat_completions`, `build_chat_request`,
   `build_chat_messages`, `map_chat_role`.
 - `anthropic.rs` — `stream_anthropic_messages`, `build_messages_request`,
+  `build_messages_messages`, `anthropic_tool_use_block`,
+  `push_anthropic_tool_result`, `content_items_to_image_blocks`.
 - `reasoning_effort.rs` — pure effort→wire-parameter translation:
   `chat_reasoning_effort`, `budget_tokens_for_effort`, `adaptive_effort_value`,
   `clamp_thinking_budget`, `anthropic_thinking_from_effort` (ticket 11).
-  `build_messages_messages`, `anthropic_tool_use_block`,
-  `push_anthropic_tool_result`, `content_items_to_image_blocks`.
 
 ## Red lines
 
@@ -99,7 +99,7 @@ non-Responses wires on one internal representation (`ResponseItem`).
 12. Treat finish conditions per wire (Anthropic `stop_reason`, Chat finish
     flags): an early stop is data, not a stream-end shortcut — let the
     protocol's own termination drive the loop.
-12. Effort translation (`reasoning_effort.rs`) is pure and deterministic:
+13. Effort translation (`reasoning_effort.rs`) is pure and deterministic:
     the same session effort must produce byte-identical `reasoning_effort`/
     `thinking`/`output_config` payloads — effort changes are prompt-cache-
     key material on Anthropic- and Kimi-family upstreams. Never thread

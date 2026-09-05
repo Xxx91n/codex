@@ -14,9 +14,12 @@ repo-root `AGENTS.md`.
   precedence. Keep this file to rules that hold for the whole Rust subtree.
   Per-module protocol red lines live in `core/src/client/wire/AGENTS.md`.
 - Fork-wide red lines live in the root AGENTS.md "Fork delta: tri-wire-api"
-  section (L324-393). This file restates the ones that bite inside codex-rs and
+  section (L324-400). This file restates the ones that bite inside codex-rs and
   points at the rest — it does not re-document them. Do not copy rules from the
   root here; fix the root instead (copied rules drift).
+- Fork vocabulary lives in [CONTEXT.md](../CONTEXT.md) (repo root, single
+  vocabulary authority) — read it before naming anything new; decision records
+  are indexed at `docs/adr/README.md`.
 
 ## Build & test (authoritative)
 

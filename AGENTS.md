@@ -328,6 +328,12 @@ internal representation (`ResponseItem`): **Responses** (upstream's only wire),
 **Chat Completions** (removed upstream Feb 2026, PR #10157; restored here), and
 **Anthropic Messages** (added here, goose-blueprint in-process transport).
 
+Fork vocabulary lives in [CONTEXT.md](CONTEXT.md) — the fork's single
+vocabulary authority; read it before naming anything new and use its terms
+(no synonyms). Decision records live in `docs/adr/` (index:
+`docs/adr/README.md`); upstream-merge rulings increment the counter there
+(see Sync below).
+
 ### Registration points (red line - do not move)
 
 Fork divergence is confined to three registration points. Never rename or
