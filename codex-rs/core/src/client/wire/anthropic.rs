@@ -234,13 +234,12 @@ impl ModelClientSession {
                 }
                 None => provider.anthropic_thinking_budget.and_then(|budget| {
                     let clamped = super::reasoning_effort::clamp_thinking_budget(budget, max_tokens);
-                    if clamped.is_none() {
+                    let Some(clamped) = clamped else {
                         debug!(
                             "anthropic thinking budget {budget} cannot fit under max_tokens {max_tokens}; omitting thinking",
                         );
                         return None;
-                    }
-                    let clamped = clamped.unwrap();
+                    };
                     if clamped != budget {
                         debug!("anthropic thinking budget {budget} out of range; clamped to {clamped}");
                     }
