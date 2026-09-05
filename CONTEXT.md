@@ -60,6 +60,22 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
 - 禁止用法：外挂翻译进程/独立翻译层（用户三前提否决）；单文件吞多 wire（Kilo Code 教训）。
 - 源：仓外 ADR-001 决策；ADR-0001 Context「goose-blueprint」；AGENTS.md。
 
+### 语义补丁队列（FORK_DIVERGENCE 清单）
+- 本仓用法：fork 对上游每条分歧的唯一台账（仓外 `.scratch/architecture-recovery/FORK_DIVERGENCE.md`），
+  每条必填「分类 + 上游锚点（merge-base 口径，禁 tag 口径）+ 红线指向 + 最后裁决」；每次上游
+  merge 按清单五步裁决（per ADR-0006 决策 3），新分歧先登记再实现。
+- 禁止用法：凭记忆裁决不查清单；adapt 条目重放后不刷新裁决日期；ignore 条目物理删除（必须
+  留痕 `Resolved:`）；把「语义补丁队列」说成自动合并工具（裁决永远是人工 + CI 验证）。
+- 源：ADR-0006；research/13-fork-divergence-patch-queue-20260905.md。
+
+### apply / adapt / ignore
+- 本仓用法：fork 差异三分类（per ADR-0006 决策 1）——apply=上游无对应路径原样保留（wire/ 四模块、
+  fork 常量）；adapt=与上游纠缠同一代码区每次 merge 重放（dispatch 分支、handle_unauthorized、
+  provider 旋钮）；ignore=已消解，留痕不删除。
+- 禁止用法：一条差异双分类；把 apply 用于与上游同区演进的条目（那是 adapt）；把 ignore 等同
+  于「没有发生过」（须留痕）。
+- 源：ADR-0006（DEP-3 / SUSE Patch-mainline / kernel -stable / llamafile triage 同源惯例）。
+
 ## 相关词汇
 
 - **三条 wire**：Responses / Chat Completions（上游 2026-02 移除 PR #10157 后本 fork 恢复）/
@@ -76,3 +92,4 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
 - 变更随其 ADR 入仓（ADR 先于本表）；新 wire/概念先登记再实现。
 - 票 09 fixture / 票 10 ReasoningPart 命名以本表为准。
 - 每次 upstream merge 后 grep 词条与 docs/adr/ 校验一致性。
+- 每次 upstream merge 后刷新 FORK_DIVERGENCE.md 清单（adapt 重放刷新日期、新分歧先登记），per ADR-0006 决策 3。
