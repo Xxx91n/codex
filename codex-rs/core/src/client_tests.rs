@@ -1713,6 +1713,7 @@ fn build_messages_request_session_effort_buckets_to_budget_tokens() {
 
     let mut provider =
         create_oss_provider_with_base_url("https://example.com/v1", WireApi::Anthropic);
+    provider.anthropic_max_tokens = Some(128_000);
     provider.anthropic_thinking_budget = Some(8_192);
     let client = ModelClient::new(
         None,
