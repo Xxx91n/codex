@@ -348,3 +348,308 @@ async fn emit_chat_completion_items_maps_length_finish_to_context_window_error()
 
     assert!(matches!(result, Err(ApiError::ContextWindowExceeded)));
 }
+
+/// Defect category A (tool-call index/state machine): a parallel two-tool
+/// stream where only the FIRST chunk of each tool carries `id`/`name`
+/// (later fragments carry index + arguments only — the exact LiteLLM
+/// #20711/#17246 hazard shape: `id: None` chunks must not be dropped, and
+/// neither tool may bleed arguments into the other). The aggregate must
+/// preserve BOTH calls with intact names and fully concatenated arguments.
+#[tokio::test]
+async fn chat_sse_two_parallel_tool_calls_survive_index_keyed_merge() {
+    let mut body = String::new();
+    // Tool 0: id+name on the first fragment only; later fragments are id-less.
+    body.push_str(&chunk(
+        serde_json::json!({
+            "tool_calls": [{
+                "index": 0,
+                "id": "call_a",
+                "type": "function",
+                "function": {"name": "exec_command", "arguments": "{\"cmd\":\""},
+            }]
+        }),
+        None,
+    ));
+    // Tool 1 interleaved BEFORE tool 0 finishes: deltas may interleave by
+    // index, so the merge must be keyed on index, not arrival order alone.
+    body.push_str(&chunk(
+        serde_json::json!({
+            "tool_calls": [{
+                "index": 1,
+                "id": "call_b",
+                "type": "function",
+                "function": {"name": "notify", "arguments": "{\"name\":\""},
+            }]
+        }),
+        None,
+    ));
+    body.push_str(&chunk(
+        serde_json::json!({
+            "tool_calls": [{
+                "index": 0,
+                "function": {"arguments": "echo a\"}"},
+            }]
+        }),
+        None,
+    ));
+    body.push_str(&chunk(
+        serde_json::json!({
+            "tool_calls": [{
+                "index": 1,
+                "function": {"arguments": "tone\"}"},
+            }]
+        }),
+        None,
+    ));
+    body.push_str(&chunk(serde_json::json!({}), Some("tool_calls")));
+    body.push_str("data: [DONE]\n\n");
+
+    let events = run_chat_sse(body).await;
+
+    let calls: Vec<(String, String, String)> = events
+        .iter()
+        .filter_map(|ev| match ev {
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
+                call_id,
+                name,
+                arguments,
+                ..
+            })) => Some((call_id.clone(), name.clone(), arguments.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        calls,
+        vec![
+            (
+                "call_a".to_string(),
+                "exec_command".to_string(),
+                "{\"cmd\":\"echo a\"}".to_string(),
+            ),
+            (
+                "call_b".to_string(),
+                "notify".to_string(),
+                "{\"name\":\"tone\"}".to_string(),
+            ),
+        ],
+        "both parallel tool calls must survive with intact names/arguments"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, Ok(ResponseEvent::Completed { .. }))),
+        "turn must still complete: {events:?}"
+    );
+}
+
+/// Comparable event signature shared by the framing differential below:
+/// keeps only fields with downstream semantics so two runs of the same
+/// stream can be compared for structural equality (≡ₛ at the event level).
+fn comparable_event_signatures(
+    events: &[Result<ResponseEvent, ApiError>],
+) -> Vec<(&'static str, String)> {
+    events
+        .iter()
+        .filter_map(|ev| match ev {
+            Ok(ResponseEvent::Created) => Some(("Created", String::new())),
+            Ok(ResponseEvent::OutputItemAdded(item)) => match item {
+                ResponseItem::Reasoning { .. } => Some(("ReasoningAdded", String::new())),
+                ResponseItem::Message { .. } => Some(("MessageAdded", String::new())),
+                _ => None,
+            },
+            Ok(ResponseEvent::ReasoningContentDelta { delta, .. }) => {
+                Some(("ReasoningDelta", delta.clone()))
+            }
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning {
+                content, ..
+            })) => {
+                let text = match &content.as_ref()?[0] {
+                    ReasoningItemContent::ReasoningText { text } => text.clone(),
+                    _ => String::new(),
+                };
+                Some(("ReasoningDone", text))
+            }
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
+                call_id,
+                name,
+                arguments,
+                ..
+            })) => Some((
+                "FunctionCallDone",
+                format!("{call_id}|{name}|{arguments}"),
+            )),
+            Ok(ResponseEvent::OutputTextDelta(text)) => Some(("TextDelta", text.clone())),
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { content, .. })) => {
+                let text = match &content[0] {
+                    ContentItem::OutputText { text } => text.clone(),
+                    _ => String::new(),
+                };
+                Some(("MessageDone", text))
+            }
+            Ok(ResponseEvent::Completed { response_id, .. }) => {
+                Some(("Completed", response_id.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Defect category E (SSE framing): transport chunk boundaries carry no
+/// semantics — the same stream re-chunked byte-by-byte (the adversarial
+/// chunking profile from llm-stream-tck, applied by hand) must aggregate to
+/// the exact same event signatures as the whole-stream read. A parser that
+/// assumes one transport chunk == one SSE frame silently corrupts frames
+/// split across TCP segments.
+#[tokio::test]
+async fn chat_sse_byte_by_byte_rechunking_yields_identical_items() {
+    let mut whole = String::new();
+    whole.push_str(&chunk(
+        serde_json::json!({"reasoning_content": "think"}),
+        None,
+    ));
+    whole.push_str(&chunk(
+        serde_json::json!({
+            "id": "chat_split",
+            "tool_calls": [{
+                "index": 0,
+                "id": "call_split",
+                "type": "function",
+                "function": {"name": "exec_command", "arguments": "{\"cmd\":\"pwd\"}"}
+            }]
+        }),
+        None,
+    ));
+    whole.push_str(&chunk(serde_json::json!({}), Some("tool_calls")));
+    whole.push_str("data: [DONE]\n\n");
+
+    // Whole-stream baseline.
+    let whole_events = run_chat_sse(whole.clone()).await;
+
+    // Byte-by-byte: feed the SAME bytes through the parser one byte at a
+    // time. Each transport item is a single byte; frame reassembly must be
+    // done entirely by the SSE layer.
+    let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent, ApiError>>(64);
+    let byte_items: Vec<Result<bytes::Bytes, TransportError>> = whole
+        .into_bytes()
+        .into_iter()
+        .map(|byte| Ok(bytes::Bytes::from(vec![byte])))
+        .collect();
+    let stream = futures::stream::iter(byte_items);
+    tokio::spawn(super::process_chat_sse(
+        Box::pin(stream),
+        tx,
+        std::time::Duration::from_secs(30),
+        /*telemetry*/ None,
+    ));
+    let mut split_events = Vec::new();
+    while let Some(ev) = rx.recv().await {
+        split_events.push(ev);
+    }
+
+    let whole_signatures = comparable_event_signatures(&whole_events);
+    assert!(
+        whole_signatures
+            .iter()
+            .any(|(kind, _)| *kind == "ReasoningDone")
+            && whole_signatures
+                .iter()
+                .any(|(kind, _)| *kind == "FunctionCallDone"),
+        "baseline must exercise reasoning + tool call: {whole_signatures:?}"
+    );
+    assert_eq!(
+        whole_signatures,
+        comparable_event_signatures(&split_events),
+        "byte-by-byte re-chunking must not change the aggregated items"
+    );
+}
+
+/// Defect category F (finish_reason mapping): a tool-call stream ending in
+/// finish_reason="tool_calls" must synthesize exactly one Completed with
+/// end_turn=Some(true) and usage_metadata=None (ADR-0002 Ruling 2), after
+/// the function-call item — the terminal reason is data the turn loop
+/// consumes, never a shortcut that skips the completion marker. Companion
+/// to the length-mapping test: the two chat finish reasons with distinct
+/// downstream semantics (tool_calls = the turn continues into a tool round;
+/// length = ContextWindowExceeded) each get an explicit wire-level
+/// assertion.
+#[tokio::test]
+async fn chat_sse_finish_reason_tool_calls_synthesizes_completed_with_end_turn() {
+    let mut body = String::new();
+    body.push_str(&chunk(
+        serde_json::json!({
+            "id": "chat_finish_marker",
+            "tool_calls": [{
+                "index": 0,
+                "id": "call_finish",
+                "type": "function",
+                "function": {"name": "notify", "arguments": "{}"}
+            }]
+        }),
+        None,
+    ));
+    body.push_str(&chunk(serde_json::json!({}), Some("tool_calls")));
+    body.push_str(&format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "id": "chat_finish_marker",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 3,
+                "completion_tokens": 1,
+                "total_tokens": 4,
+                "completion_tokens_details": {"reasoning_tokens": 0}
+            }
+        })
+    ));
+    body.push_str("data: [DONE]\n\n");
+
+    let events = run_chat_sse(body).await;
+
+    let mut tool_call_position = None;
+    let mut completed_position = None;
+    for (index, ev) in events.iter().enumerate() {
+        match ev {
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
+                call_id, ..
+            })) if call_id == "call_finish" => {
+                assert!(tool_call_position.is_none(), "exactly one function call");
+                tool_call_position = Some(index);
+            }
+            Ok(ResponseEvent::Completed { .. }) => {
+                assert!(completed_position.is_none(), "exactly one Completed");
+                completed_position = Some(index);
+            }
+            _ => {}
+        }
+    }
+    let (tool_at, completed_at) = match (tool_call_position, completed_position) {
+        (Some(tool_at), Some(completed_at)) => (tool_at, completed_at),
+        _ => panic!("missing function call or Completed: {events:?}"),
+    };
+    assert!(
+        tool_at < completed_at,
+        "Completed must follow the function-call item: {events:?}"
+    );
+    match &events[completed_at] {
+        Ok(ResponseEvent::Completed {
+            response_id,
+            end_turn,
+            token_usage,
+            usage_metadata,
+            ..
+        }) => {
+            assert_eq!(response_id, "chat_finish_marker");
+            assert_eq!(end_turn, Some(true));
+            assert!(
+                usage_metadata.is_none(),
+                "ADR-0002 Ruling 2: usage_metadata must be None"
+            );
+            assert_eq!(
+                token_usage.as_ref().map(|usage| usage.input_tokens),
+                Some(3),
+                "usage frame must be parsed"
+            );
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}

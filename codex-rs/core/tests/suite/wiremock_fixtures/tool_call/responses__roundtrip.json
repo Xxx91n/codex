@@ -5,7 +5,9 @@
     "scenario": "roundtrip",
     "call_id": "call_cross_resp_1",
     "verified_at": "2026-09-04",
-    "source": "codex-api/src/sse/responses.rs + tests/common/responses.rs ev_* dialect"
+    "source": "codex-api/src/sse/responses.rs + tests/common/responses.rs ev_* dialect",
+    "tool_name": "shell",
+    "tool_arguments": "{\"cmd\":\"echo cross-wire-fixture\"}"
   },
   "requests": [
     {

@@ -415,5 +415,72 @@
       ],
       "fixtures": []
     }
+  ],
+  "exception_declarations": [
+    {
+      "id": "usage_metadata_responses_only",
+      "semantic": "streaming_stop",
+      "field": "ResponseEvent::Completed.usage_metadata",
+      "native_wire": "responses",
+      "other_wires_behavior": {
+        "chat": "always None — usage travels as token_usage parsed from the usage frame (sse/chat_completions.rs emit_chat_completion_items; ADR-0002 Ruling 2)",
+        "anthropic": "always None — usage travels as token_usage mapped from message_start/message_delta usage (sse/messages.rs finish_messages_stream; ADR-0002 Ruling 2)"
+      },
+      "policy": "omission: the field is synthesized as None, never fabricated; asserted by chat_sse_finish_reason_tool_calls_synthesizes_completed_with_end_turn and messages_stop_reason_tool_use_synthesizes_completed_after_function_call"
+    },
+    {
+      "id": "thinking_signature_chat_absent",
+      "semantic": "thinking",
+      "field": "Reasoning.encrypted_content (thinking signature)",
+      "native_wire": "anthropic",
+      "other_wires_behavior": {
+        "chat": "no signature exists on the chat wire — replay passes reasoning_content text only; none is fabricated (wire/chat.rs build_chat_messages Reasoning arm)",
+        "responses": "reasoning items replay via the native summary/content fields; no signature synthesis"
+      },
+      "policy": "omission: no signature fabrication; the anthropic replay REQUIRES the verbatim signature and drops unsigned thinking blocks rather than sending an invalid one (wire/anthropic.rs Reasoning arm)"
+    },
+    {
+      "id": "unsigned_thinking_replay_dropped_anthropic",
+      "semantic": "thinking",
+      "field": "Reasoning with encrypted_content: None",
+      "native_wire": "responses",
+      "other_wires_behavior": {
+        "anthropic": "a reasoning item without a signature cannot satisfy the verbatim thinking replay contract, so the block is dropped instead of replayed as an invalid thinking block (server would 400 the turn)"
+      },
+      "policy": "omission-with-rationale: dropped silently in replay (server validation relaxed for non-tool turns), NOT translated; per wire/anthropic.rs Thinking replay comment"
+    },
+    {
+      "id": "finish_reason_length_chat",
+      "semantic": "streaming_stop",
+      "field": "finish_reason=\"length\" (chat)",
+      "native_wire": "chat",
+      "other_wires_behavior": {
+        "responses": "status/incomplete_details carries exhaustion; surfaced as ApiError::ContextWindowExceeded",
+        "anthropic": "stop_reason=\"max_tokens\" logs truncation; truncated tool_use input JSON fails loud"
+      },
+      "policy": "fail-loud: ContextWindowExceeded is raised instead of replaying a partial turn as if completed (sse/chat_completions.rs emit_chat_completion_items length guard)"
+    },
+    {
+      "id": "truncated_tool_use_input_json_anthropic",
+      "semantic": "tool_call",
+      "field": "tool_use partial_json that is not valid JSON",
+      "native_wire": "anthropic",
+      "other_wires_behavior": {
+        "chat": "split argument deltas reaggregate by index and emit the raw string; no JSON parse gate on the chat wire",
+        "responses": "output_item.done function_call item is authoritative; arguments delta fragments are not consumed verbatim"
+      },
+      "policy": "fail-loud: terminal Stream error 'tool_use input JSON truncated (stop_reason=...)' — never substitutes {} (finish_messages_stream_fails_loudly_on_truncated_tool_input)"
+    },
+    {
+      "id": "cache_control_no_ir_item",
+      "semantic": "cache_control",
+      "field": "cache_control request flags",
+      "native_wire": "anthropic",
+      "other_wires_behavior": {
+        "responses": "prompt caching is server-side implicit; no request field",
+        "chat": "no chat-native counterpart; provider flag anthropic_prompt_caching does not apply to the chat wire"
+      },
+      "policy": "omission: no first-class IR item; semantics lives in provider flags, so a cross-wire translation cannot carry it and must not invent a chat/responses encoding (semantics[cache_control].ir_mapping)"
+    }
   ]
 }

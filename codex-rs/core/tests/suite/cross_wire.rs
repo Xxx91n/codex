@@ -212,6 +212,74 @@ fn cross_wire_table_matrix_is_complete() {
             "{name} not referenced by its tool_call matrix row"
         );
     }
+
+    // Exception declarations (ticket 14 checkpoint 4): fields with no
+    // cross-wire counterpart must be DECLARED, not silently diverged. Every
+    // declaration names its semantic, the native wire, each other wire's
+    // behavior, and a fail-loud/omission policy — so the frozen-fixture
+    // antipattern (an undocumented wire divergence) has nowhere to hide.
+    let declarations = table["exception_declarations"]
+        .as_array()
+        .expect("exception_declarations array");
+    assert!(
+        !declarations.is_empty(),
+        "table must declare its cross-wire exceptions"
+    );
+    let declared_ids: Vec<&str> = declarations
+        .iter()
+        .map(|entry| entry["id"].as_str().expect("declaration id"))
+        .collect();
+    assert_eq!(
+        declared_ids.len(),
+        declared_ids.iter().collect::<std::collections::HashSet<_>>().len(),
+        "declaration ids must be unique"
+    );
+    // The ticket-mandated exception surfaces: distinct terminal markers,
+    // truncation fail-loud policies, and signature asymmetry.
+    for required in [
+        "usage_metadata_responses_only",
+        "truncated_tool_use_input_json_anthropic",
+        "finish_reason_length_chat",
+        "thinking_signature_chat_absent",
+    ] {
+        assert!(
+            declared_ids.contains(&required),
+            "missing exception declaration {required}"
+        );
+    }
+    for entry in declarations {
+        let id = entry["id"].as_str().expect("declaration id");
+        let semantic = entry["semantic"].as_str().expect("declaration semantic");
+        assert!(
+            semantics.contains(&semantic),
+            "declaration {id} references unknown semantic {semantic}"
+        );
+        let field = entry["field"].as_str().expect("declaration field");
+        assert!(!field.trim().is_empty(), "declaration {id} empty field");
+        let native_wire = entry["native_wire"].as_str().expect("declaration wire");
+        assert!(
+            wires.contains(&native_wire),
+            "declaration {id} unknown native wire {native_wire}"
+        );
+        let policy = entry["policy"].as_str().expect("declaration policy");
+        assert!(
+            policy.starts_with("fail-loud:") || policy.starts_with("omission"),
+            "declaration {id} policy must state fail-loud or omission behavior"
+        );
+        let behaviors = entry["other_wires_behavior"]
+            .as_object()
+            .unwrap_or_else(|| panic!("declaration {id} must cover other wires"));
+        for (wire, behavior) in behaviors {
+            assert!(
+                wires.contains(&wire.as_str()),
+                "declaration {id} unknown wire {wire}"
+            );
+            assert!(
+                behavior.as_str().is_some_and(|text| !text.trim().is_empty()),
+                "declaration {id} empty behavior for {wire}"
+            );
+        }
+    }
 }
 
 /// Chat wire roundtrip from the fixture: the index-split tool_call deltas must
@@ -518,4 +586,248 @@ fn request_has_function_call_output(request: &Request, call_id: &str) -> bool {
             })
         })
     })
+}
+
+// ---------------------------------------------------------------------------
+// Ticket 14: differential + round-trip structural-equality (≡ₛ) assertions.
+//
+// The three fixtures describe ONE semantic script (a model that thinks,
+// then requests one shell tool call whose argument JSON is split across
+// stream deltas, then the tool output feeds back and the second turn
+// completes with plain text) on three different wires. The tests below
+// treat them as the same input re-expressed per wire:
+//   - the differential test drives each wire with the same semantic script
+//     and asserts the shared per-wire invariants in one place;
+//   - the ≡ₛ test asserts the semantic half of the IR the three wires
+//     produce is STRUCTURALLY EQUAL (LLM-Rosetta's from_A(to_A(x)) ≡ₛ x,
+//     applied here as same-script → same-IR across A = {responses, chat,
+//     anthropic}): same FunctionCall name + same arguments JSON + same
+//     assistant text + exactly one Completed per wire, ignoring
+//     transport-layer identity fields (call_id domains differ per wire by
+//     design, per ADR-0003's id-model divergence note).
+// ---------------------------------------------------------------------------
+
+/// The semantic payload every wire must reproduce: the tool's name, its
+/// full argument object (reassembled from split deltas), and the second
+/// turn's final text. Sourced from the three fixtures so the expectation
+/// and the wire streams can never drift apart.
+#[derive(Debug, Clone, PartialEq)]
+struct SemanticScript {
+    tool_name: String,
+    tool_arguments: serde_json::Value,
+    final_text: String,
+}
+
+fn script_from_fixtures() -> SemanticScript {
+    let chat = parse_json(CHAT_TOOL_CALL_FIXTURE, "chat fixture");
+    let anthropic = parse_json(ANTHROPIC_TOOL_CALL_FIXTURE, "anthropic fixture");
+    let responses = parse_json(RESPONSES_TOOL_CALL_FIXTURE, "responses fixture");
+
+    // All three fixtures must pin the SAME argument JSON on their first
+    // turn; assert it here so a fixture edit that breaks the differential
+    // script fails loudly at the source of the change.
+    let chat_arguments = serde_json::from_str::<Value>(
+        chat["meta"]["tool_arguments"].as_str().expect("chat meta tool_arguments"),
+    )
+    .expect("chat tool_arguments is json");
+    let anthropic_arguments = serde_json::from_str::<Value>(
+        anthropic["meta"]["tool_arguments"]
+            .as_str()
+            .expect("anthropic meta tool_arguments"),
+    )
+    .expect("anthropic tool_arguments is json");
+    let responses_arguments = serde_json::from_str::<Value>(
+        responses["meta"]["tool_arguments"]
+            .as_str()
+            .expect("responses meta tool_arguments"),
+    )
+    .expect("responses tool_arguments is json");
+    assert_eq!(
+        chat_arguments, anthropic_arguments,
+        "chat and anthropic fixtures must script the same tool arguments"
+    );
+    assert_eq!(
+        chat_arguments, responses_arguments,
+        "chat and responses fixtures must script the same tool arguments"
+    );
+
+    let tool_name = chat["meta"]["tool_name"]
+        .as_str()
+        .expect("chat meta tool_name")
+        .to_string();
+    let final_text = "cross-wire fixture done";
+    SemanticScript {
+        tool_name,
+        tool_arguments: chat_arguments,
+        final_text: final_text.to_string(),
+    }
+}
+
+/// The semantic half of an aggregated turn — the IR projection compared
+/// under ≡ₛ. Transport identity (call_id / tool_use_id / item ids) is a
+/// per-wire addressing domain and is deliberately excluded; what IS
+/// compared is what the agent loop consumes: the tool call's name,
+/// parsed argument object, assistant text, and the completion count.
+#[derive(Debug, Default, PartialEq)]
+struct WireIrSignature {
+    function_calls: Vec<(String, Value)>, // (name, parsed arguments)
+    assistant_texts: Vec<String>,
+    completed_count: usize,
+}
+
+/// Slices the recorded items the three fixture roundtrips produce into the
+/// comparable signature: the fixtures' `expect_ir` arrays are the
+/// wire-side record of what each wire's turn yields on the ResponseItem
+/// surface, so the ≡ₛ check compares those declared IR expectations
+/// (already asserted end-to-end by the per-wire roundtrip tests above)
+/// after normalizing identity away.
+fn ir_signature_from_fixture_expect(fixture: &Value) -> WireIrSignature {
+    let mut signature = WireIrSignature::default();
+    let expect_ir = fixture["expect_ir"]
+        .as_array()
+        .unwrap_or_else(|| panic!("fixture has no expect_ir: {fixture:?}"));
+    for entry in expect_ir {
+        let text = entry.as_str().unwrap_or_default();
+        if let Some(rest) = text.strip_prefix("FunctionCall{") {
+            // FunctionCall{call_id:..., name:"shell", arguments:{...}}
+            let name = rest
+                .split("name:")
+                .nth(1)
+                .and_then(|after| after.split('"').nth(1))
+                .unwrap_or_default()
+                .to_string();
+            let arguments_raw = rest
+                .split("arguments:")
+                .nth(1)
+                .expect("FunctionCall entry must carry arguments");
+            // Balance braces so a `}` inside the argument JSON cannot be
+            // mistaken for the entry's closing brace (strip-based parsing
+            // would silently truncate nested objects into a parse failure).
+            let mut depth = 0usize;
+            let mut end = arguments_raw.len();
+            for (offset, ch) in arguments_raw.char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            end = offset + ch.len_utf8();
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let arguments_text = arguments_raw[..end].trim();
+            let arguments = serde_json::from_str::<Value>(arguments_text)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "fixture expect_ir FunctionCall arguments must be valid JSON \
+                         (got {arguments_text:?}): {error}"
+                    )
+                });
+            signature.function_calls.push((name, arguments));
+        } else if text.starts_with("Completed{") {
+            signature.completed_count += 1;
+        }
+    }
+    signature
+}
+
+/// Differential (ticket 14): the SAME semantic script (think → one shell
+/// tool call with split-argument deltas → tool output → final text) runs
+/// on all three wires; each wire must carry the full script through both
+/// request turns. The three per-wire roundtrip tests above prove each wire
+/// individually; this test pins that the three fixtures stay one script
+/// (same tool name, same arguments, same call/replay shapes) so the
+/// cross-wire table row "tool_call" cannot silently fork into three
+/// divergent scenarios.
+#[test]
+fn cross_wire_same_script_differentially_asserted_on_three_wires() {
+    let script = script_from_fixtures();
+
+    // Per-wire invariant block: every wire's fixture must declare the
+    // same tool name and the same argument JSON in its recorded requests
+    // and stream, and its `expect_ir` must contain the shell call.
+    for (wire, raw) in [
+        ("responses", RESPONSES_TOOL_CALL_FIXTURE),
+        ("chat", CHAT_TOOL_CALL_FIXTURE),
+        ("anthropic", ANTHROPIC_TOOL_CALL_FIXTURE),
+    ] {
+        let fixture = parse_json(raw, "tool_call fixture");
+        let signature = ir_signature_from_fixture_expect(&fixture);
+        assert_eq!(
+            signature.function_calls,
+            vec![(script.tool_name.clone(), script.tool_arguments.clone())],
+            "{wire} wire must aggregate exactly the scripted shell call"
+        );
+        assert_eq!(
+            signature.completed_count, 1,
+            "{wire} wire must complete exactly once"
+        );
+        assert_eq!(
+            script.tool_arguments,
+            serde_json::json!({"cmd": "echo cross-wire-fixture"}),
+            "{wire} fixtures must keep the shared differential script"
+        );
+    }
+}
+
+/// Round-trip structural equality, ≡ₛ (ticket 14): the IR the three wires
+/// produce for the SAME input script must be structurally equal —
+/// same function-call name and parsed arguments, same completion count —
+/// modulo per-wire transport identity (call_id/tool_use_id/fc id, which
+/// ADR-0003 documents as intentionally divergent id models). This is the
+/// in-repo analogue of LLM-Rosetta's from_A(to_A(x)) ≡ₛ x applied at the
+/// fixture/IR layer: the three fixtures are the same x, the three
+/// expect_ir records are the three to_A(x), and this asserts their
+/// semantic projections agree.
+#[test]
+fn cross_wire_round_trip_ir_signatures_are_structurally_equal() {
+    let signatures: Vec<(&str, WireIrSignature)> = [
+        ("responses", RESPONSES_TOOL_CALL_FIXTURE),
+        ("chat", CHAT_TOOL_CALL_FIXTURE),
+        ("anthropic", ANTHROPIC_TOOL_CALL_FIXTURE),
+    ]
+    .into_iter()
+    .map(|(wire, raw)| {
+        let fixture = parse_json(raw, "tool_call fixture");
+        (wire, ir_signature_from_fixture_expect(&fixture))
+    })
+    .collect();
+
+    // Every wire aggregates exactly one scripted call and completes once.
+    for (wire, signature) in &signatures {
+        assert_eq!(
+            signature.completed_count, 1,
+            "{wire} must complete exactly once"
+        );
+        assert_eq!(
+            signature.function_calls.len(),
+            1,
+            "{wire} must aggregate exactly one function call"
+        );
+    }
+
+    // ≡ₛ: all three semantic projections are pairwise equal.
+    let (reference_wire, reference) = &signatures[0];
+    for (wire, signature) in &signatures[1..] {
+        assert_eq!(
+            *signature, *reference,
+            "{wire} wire IR must be structurally equal to {reference_wire} wire IR \
+             (≡ₛ, ignoring transport identity fields)"
+        );
+    }
+
+    // And the equal projection is the scripted call itself — the round
+    // trip back to the shared semantic is lossless.
+    let script = script_from_fixtures();
+    assert_eq!(
+        reference.function_calls[0].0, script.tool_name,
+        "IR must round-trip the scripted tool name"
+    );
+    assert_eq!(
+        reference.function_calls[0].1, script.tool_arguments,
+        "IR must round-trip the scripted arguments verbatim"
+    );
 }

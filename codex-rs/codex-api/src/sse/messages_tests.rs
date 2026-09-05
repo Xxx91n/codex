@@ -351,3 +351,181 @@ async fn truncated_stream_never_double_adds_active_thinking_block() {
         "stream should still complete after flush: {events:?}"
     );
 }
+
+/// Defect category C (termination invariants): the chat wire's terminator
+/// is the explicit `data: [DONE]` frame — a stream whose bytes END before
+/// [DONE] arrives was truncated upstream, and must surface as a terminal
+/// Stream error with NO Completed event (a silent stop would replay a
+/// partial turn as if it finished; the "opened but silent" stream is a
+/// failure, not a normal end — dev.to/robinzzz four-state model, OmniRoute
+/// #7699 semantics).
+#[tokio::test]
+async fn chat_sse_stream_closed_before_done_marker_is_terminal_error_not_completion() {
+    let mut body = String::new();
+    body.push_str(&chunk(
+        serde_json::json!({"content": "partial answer that never got fin"}),
+        None,
+    ));
+    // finish_reason and usage frame arrive, then the connection closes
+    // WITHOUT the `data: [DONE]` sentinel.
+    body.push_str(&chunk(serde_json::json!({}), Some("stop")));
+    // No `data: [DONE]`; body ends here.
+
+    let events = run_chat_sse(body).await;
+
+    let terminal_error = events.iter().find(|ev| ev.is_err());
+    assert!(
+        matches!(terminal_error, Some(Err(ApiError::Stream(message))) if message
+            .contains("stream closed")),
+        "stream closed before [DONE] must be a terminal Stream error: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|ev| matches!(ev, Ok(ResponseEvent::Completed { .. }))),
+        "no Completed may be synthesized for a truncated stream: {events:?}"
+    );
+}
+
+/// Defect category C (termination invariants): the Messages wire's
+/// terminator is `message_stop`; a stream whose bytes END before it arrives
+/// must surface as a terminal Stream error with NO Completed event — the
+/// idle/EOF path is a failure, never a silent normal end (Anthropic
+/// contract: streams terminate at message_stop or an error frame;
+/// anything else is a truncation).
+#[tokio::test]
+async fn messages_sse_stream_closed_before_message_stop_is_terminal_error_not_completion() {
+    let mut body = String::new();
+    body.push_str(&format!(
+        "event: message_start\ndata: {}\n\n",
+        serde_json::json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_trunc_c",
+                "model": "claude-mock-1",
+                "usage": {"input_tokens": 9, "output_tokens": 1}
+            }
+        })
+    ));
+    body.push_str(&format!(
+        "event: content_block_delta\ndata: {}\n\n",
+        serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "partial text"}
+        })
+    ));
+    // message_delta arrives but the connection closes BEFORE message_stop.
+    body.push_str(&format!(
+        "event: message_delta\ndata: {}\n\n",
+        serde_json::json!({
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 2}
+        })
+    ));
+    // No message_stop; body ends here.
+
+    let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent, ApiError>>(16);
+    let stream = ReaderStream::new(std::io::Cursor::new(body))
+        .map_err(|err| TransportError::Network(err.to_string()));
+    tokio::spawn(super::process_messages_sse(
+        Box::pin(stream),
+        tx,
+        std::time::Duration::from_secs(30),
+        /*telemetry*/ None,
+    ));
+    let mut events = Vec::new();
+    while let Some(ev) = rx.recv().await {
+        events.push(ev);
+    }
+
+    let terminal_error = events.iter().find(|ev| ev.is_err());
+    assert!(
+        matches!(terminal_error, Some(Err(ApiError::Stream(message))) if message
+            .contains("stream closed")),
+        "stream closed before message_stop must be a terminal Stream error: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|ev| matches!(ev, Ok(ResponseEvent::Completed { .. }))),
+        "no Completed may be synthesized for a truncated stream: {events:?}"
+    );
+}
+
+/// Defect category F (terminal stop_reason mapping, anthropic side): a
+/// tool_use turn — the wire's `message_delta` carries `stop_reason:
+/// "tool_use"` — must synthesize exactly one Completed with end_turn=true
+/// and usage_metadata=None (ADR-0002 Ruling 2), AFTER the FunctionCall item.
+/// The terminal reason is data the turn loop consumes, never a shortcut
+/// that skips the completion marker. Dual of the chat-side F test
+/// (`finish_reason="tool_calls"` → Completed): the two wires carry
+/// distinct native terminal markers but the same terminal contract.
+#[tokio::test]
+async fn messages_stop_reason_tool_use_synthesizes_completed_after_function_call() {
+    let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent, ApiError>>(8);
+    let mut tool_uses: BTreeMap<usize, AggregatedToolUse> = BTreeMap::new();
+    tool_uses.insert(
+        0,
+        AggregatedToolUse {
+            id: "toolu_finish".to_string(),
+            name: "shell".to_string(),
+            partial_json: "{\"cmd\":\"echo f\"}".to_string(),
+        },
+    );
+
+    finish_messages_stream(
+        &tx,
+        "",
+        &tool_uses,
+        &BTreeMap::new(),
+        "msg_finish".to_string(),
+        Some(TokenUsage {
+            input_tokens: 7,
+            cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            output_tokens: 2,
+            reasoning_output_tokens: 0,
+            total_tokens: 9,
+            codex_rollout_budget_units: None,
+        }),
+        Some("tool_use"),
+    )
+    .await;
+
+    let first = rx.recv().await.expect("event").expect("ok event");
+    match &first {
+        ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
+            name, call_id, ..
+        }) => {
+            assert_eq!(name, "shell");
+            assert_eq!(call_id, "toolu_finish");
+        }
+        other => panic!("function call must precede Completed: {other:?}"),
+    }
+    let second = rx.recv().await.expect("event").expect("ok event");
+    match &second {
+        ResponseEvent::Completed {
+            response_id,
+            end_turn,
+            token_usage,
+            usage_metadata,
+            ..
+        } => {
+            assert_eq!(response_id, "msg_finish");
+            assert_eq!(*end_turn, Some(true));
+            assert!(
+                usage_metadata.is_none(),
+                "ADR-0002 Ruling 2: usage_metadata must be None"
+            );
+            assert_eq!(token_usage.as_ref().map(|usage| usage.input_tokens), Some(7));
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+    // Exactly two events: no synthesized trailing items beyond the script.
+    assert!(
+        rx.try_recv().is_err(),
+        "tool_use turn must emit exactly one FunctionCall then one Completed"
+    );
+}

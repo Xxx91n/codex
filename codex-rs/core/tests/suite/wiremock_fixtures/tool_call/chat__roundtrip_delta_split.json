@@ -5,7 +5,9 @@
     "scenario": "roundtrip_delta_split",
     "call_id": "call_cross_chat_1",
     "verified_at": "2026-09-04",
-    "source": "core/src/client/wire/chat.rs + codex-api/src/sse/chat_completions.rs + tests/suite/chat_wiremock.rs"
+    "source": "core/src/client/wire/chat.rs + codex-api/src/sse/chat_completions.rs + tests/suite/chat_wiremock.rs",
+    "tool_name": "shell",
+    "tool_arguments": "{\"cmd\":\"echo cross-wire-fixture\"}"
   },
   "requests": [
     {

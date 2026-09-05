@@ -6,7 +6,9 @@
     "call_id": "toolu_cross_1",
     "signature": "sig-cross-wire-fixture-0",
     "verified_at": "2026-09-04",
-    "source": "core/src/client/wire/anthropic.rs + codex-api/src/sse/messages.rs + tests/suite/anthropic_wiremock.rs"
+    "source": "core/src/client/wire/anthropic.rs + codex-api/src/sse/messages.rs + tests/suite/anthropic_wiremock.rs",
+    "tool_name": "shell",
+    "tool_arguments": "{\"cmd\":\"echo cross-wire-fixture\"}"
   },
   "requests": [
     {
@@ -110,7 +112,7 @@
   ],
   "expect_ir": [
     "Reasoning{encrypted_content:sig-cross-wire-fixture-0}",
-    "FunctionCall{call_id:toolu_cross_1, name:\"shell\"}",
+    "FunctionCall{call_id:toolu_cross_1, name:\"shell\", arguments:{\"cmd\":\"echo cross-wire-fixture\"}}",
     "Completed{usage_metadata:None}"
   ]
 }
