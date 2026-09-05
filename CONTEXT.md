@@ -117,6 +117,18 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
   于「没有发生过」（须留痕）。
 - 源：ADR-0006（DEP-3 / SUSE Patch-mainline / kernel -stable / llamafile triage 同源惯例）。
 
+### major 升级预案（1.0 全量验证闸）
+- 本仓用法：上游发布首个 ≥1.0 stable 即触发唯一强制全量验证闸（ADR-0007）——冻结基线
+  （merge-base + FORK_DIVERGENCE 快照）→ 逐条三注册点影响分析（消费 ADR-0006 清单）→
+  受控全量 CI 窗口（fork-health dispatch 输入开启、豁免带 issue 号、预算 ≤2 周、kill
+  switch 关闭即回常态）→ 契约面退役四步（公告→release notes 警告→分级禁用→major 一次性
+  删除）。0.x 期间预案不触发。
+- 禁止用法：0.x 期间跑全量验证（常态只走 ADR-0001 节奏 + ADR-0006 五步）；照搬
+  ADR-0007 破坏面预判表不校准（预判表是检视清单非结论，触发时先独立 diff 检测）；移动/
+  重命名三注册点（须重开 ADR-0001 显式裁决）；跳级升级（只承诺相邻 major 路径）；把
+  1.0 过渡兼容措施当长期契约（是升级的桥不是策略）。
+- 源：ADR-0007；research/16-major-upgrade-playbook-20260905.md。
+
 ## 相关词汇
 
 - **三条 wire**：Responses / Chat Completions（上游 2026-02 移除 PR #10157 后本 fork 恢复）/
