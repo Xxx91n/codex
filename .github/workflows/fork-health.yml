@@ -4,7 +4,7 @@
 # workflow_dispatch. Verifies the fork seam — the three registration points
 # (WireApi / ModelProviderInfo.wire_api / client.rs dispatch) and the per-wire
 # modules — with fmt, clippy over all three seam crates, and the full wiremock
-# suites; reports upstream drift on the high-frequency seam surface; opens or
+# suites; runs the ticket-12 sync watchdog (ff-only trial + ahead/behind + release listen) on the high-frequency seam surface; opens or
 # refreshes a `fork-health` issue on failure. It never builds release binaries
 # and never publishes — that stays in fork-cli-test-release.yml.
 name: fork-health
@@ -29,6 +29,11 @@ on:
         type: boolean
         required: false
         default: false
+      upstream_url:
+        description: Override upstream repo URL (artificial-divergence drill for the ff-only trial, ticket 12)
+        type: string
+        required: false
+        default: ''
 
 concurrency:
   group: fork-health-${{ github.ref }}
@@ -104,30 +109,81 @@ jobs:
       - name: Test fork seam suites
         shell: bash
         run: just test -p codex-api -p codex-core -E 'package(codex-api) or test(chat_wire) or test(anthropic_wire) or test(cross_wire) or test(reasoning_effort)'
-      # Advisory drift probe (ADR-0001 weekly merge cadence): report how far
-      # upstream main has moved and which seam-surface files it touched, so
-      # the "what to read after a merge" list from the architecture review
-      # (section 4.4) is generated automatically, in the style of VSCodium's
-      # check job. Never gates the job — a fetch failure is not a seam failure.
-      - name: Drift probe vs upstream/main (advisory)
-        continue-on-error: true
+      # Sync watchdog (ticket 12): the advisory drift probe turned into a
+      # gating measure + ff-only trial. Semantics per ADR-0006 decision 3①
+      # (merge-base 口径; tag 口径 banned — upstream squash-merge makes tags
+      # unreliable for anchoring) and the ruling in
+      # .scratch/architecture-recovery/research/12-upstream-sync-automation-20260905.md:
+      #  1. Measure ahead/behind vs upstream/main (merge-base 口径) plus the
+      #     upstream latest release tag into the run summary — drift must be
+      #     loud; the sync cadence is weekly or per release (ADR-0001).
+      #  2. ff-only trial FROM THE RECORDED SYNC ANCHOR: the anchor must stay
+      #     an ancestor of upstream/main (upstream did not rewrite the history
+      #     the fork tracks) AND of HEAD (the fork was not rebased off its
+      #     sync point — merge-never-rebase, ADR-0001). A literal
+      #     git merge --ff-only upstream/main can never succeed on this branch
+      #     by design (the fork keeps divergent commits), so the trial is
+      #     expressed as the anchor-ancestry invariant it guards. Anchor break
+      #     = the FORK_DIVERGENCE.md merge-base 锚点 is invalid → red light
+      #     (exit 1); the alert issue points at the adjudication checklist.
+      #     Normal drift (behind > 0) stays green: release-train lag is
+      #     measured, not gated (issue 12 evidence plan: 正常 run 绿).
+      #  3. Release listen (监听或 dispatch 路径 per issue 12): the latest
+      #     upstream stable tag is surfaced every run and never gates — tag
+      #     口径 is advisory only. Sync when it moves or weekly, per ADR-0001.
+      #  Never merges, never pushes, never mutates git state: the five-step
+      #  adjudication (ADR-0006 decision 3) stays human.
+      - name: Sync watchdog vs upstream/main (ff-only trial + drift metrics + release listen)
         shell: bash
+        env:
+          # The fork's recorded sync anchor (merge-base 口径; FORK_DIVERGENCE.md
+          # header). Refresh to the new merge-base in the same adjudication
+          # round as the FORK_DIVERGENCE.md refresh after EVERY five-step merge.
+          SYNC_ANCHOR: '6be2a6ca952a'
+          # Dispatch override for the artificial-divergence drill (issue 12
+          # red-path evidence): point it at a scratch repo whose main was
+          # force-rewritten past the anchor, dispatch, expect the red light.
+          UPSTREAM_URL: ${{ inputs.upstream_url || 'https://github.com/openai/codex.git' }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          git remote get-url upstream >/dev/null 2>&1 || git remote add upstream https://github.com/openai/codex.git
+          set -euo pipefail
+          git remote get-url upstream >/dev/null 2>&1 || git remote add upstream "$UPSTREAM_URL"
           git fetch upstream main --filter=blob:none
+          UPSTREAM_REPO=$(sed -E "s#https://github\\.com/##; s#\\.git\$##" <<<"$UPSTREAM_URL")
+          read -r AHEAD BEHIND < <(git rev-list --left-right --count HEAD...upstream/main)
+          LATEST_TAG=$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$UPSTREAM_REPO/releases/latest" \
+            | jq -r '.tag_name // empty' 2>/dev/null || true)
           {
-            echo "## Upstream drift (advisory)"
+            echo "## Upstream sync watchdog (merge-base 口径)"
             echo "upstream/main: $(git rev-parse --short upstream/main)"
-            echo "behind by $(git rev-list --count HEAD..upstream/main) commit(s)"
+            echo "sync anchor (last five-step merge point): $SYNC_ANCHOR"
+            echo "ahead by $AHEAD commit(s) — fork-only commits, expected > 0 (managed divergence per ADR-0006)"
+            echo "behind by $BEHIND commit(s) — awaiting the ADR-0006 five-step merge"
+            echo "upstream latest release: ${LATEST_TAG:-unknown} — cadence per ADR-0001 (weekly or per release, whichever first)"
             echo
             echo "### Upstream touched on the seam surface"
-            git diff --name-only HEAD...upstream/main -- \
-              codex-rs/codex-api/src/sse/responses.rs \
-              codex-rs/codex-api/src/endpoint/responses_websocket.rs \
-              codex-rs/codex-api/src/endpoint/responses.rs \
-              codex-rs/core/src/client.rs \
-              codex-rs/model-provider-info/src/lib.rs
+            if git merge-base HEAD upstream/main >/dev/null 2>&1; then
+              git diff --name-only HEAD...upstream/main -- \
+                codex-rs/codex-api/src/sse/responses.rs \
+                codex-rs/codex-api/src/endpoint/responses_websocket.rs \
+                codex-rs/codex-api/src/endpoint/responses.rs \
+                codex-rs/core/src/client.rs \
+                codex-rs/model-provider-info/src/lib.rs
+            else
+              echo "(no common ancestor with upstream/main)"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
+          # ff-only trial from the recorded sync anchor (see the step comment
+          # for why this is the fork-shaped form of git merge --ff-only).
+          if ! git merge-base --is-ancestor "$SYNC_ANCHOR" upstream/main; then
+            echo "::error::ff-only trial FAILED (upstream side): upstream/main no longer contains sync anchor $SYNC_ANCHOR — upstream rewrote history the fork tracks; the FORK_DIVERGENCE.md merge-base 锚点 is invalid. Follow the ADR-0006 five-step adjudication with .scratch/architecture-recovery/FORK_DIVERGENCE.md (merge-base 口径, 禁 tag 口径)."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$SYNC_ANCHOR" HEAD; then
+            echo "::error::ff-only trial FAILED (fork side): HEAD no longer contains sync anchor $SYNC_ANCHOR — the fork branch was rebased off its sync point (merge-never-rebase violation, ADR-0001). Follow the ADR-0006 five-step adjudication with .scratch/architecture-recovery/FORK_DIVERGENCE.md."
+            exit 1
+          fi
 
   alert:
     # Only when seam-check actually failed (skipped or cancelled never alerts).
@@ -154,8 +210,19 @@ jobs:
               '',
               `- Run: ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
               `- Branch: ${context.ref}`,
-              '- Fix path: open the run log; the "Drift probe" step summary lists',
-              '  upstream files that moved on the seam surface since the last sync.',
+              '- Fix path: open the run log; the "Sync watchdog" step summary lists',
+              '  ahead/behind (merge-base 口径), the seam-surface files upstream touched,',
+              '  and the upstream latest release tag.',
+              '- If the failed step is "Sync watchdog vs upstream/main": the ff-only trial',
+              '  failed — upstream and/or this branch no longer contains the recorded sync',
+              '  anchor (history rewritten or rebased). Adjudicate with the',
+              '  FORK_DIVERGENCE.md ruling list',
+              '  (.scratch/architecture-recovery/FORK_DIVERGENCE.md) per the ADR-0006',
+              '  five-step flow: fetch + merge-base 口径 metrics → merge (never rebase) →',
+              '  per-entry replay on the list → new ADR if rulings change → CI green',
+              '  before push. Release tag moves are report-only (tag 口径 stays out of',
+              '  anchoring; sync cadence per ADR-0001: weekly or per release, whichever',
+              '  first).',
               '',
               '_Auto-opened by fork-health.yml. Resolve and close; the next daily run re-checks._',
             ].join('\n');
