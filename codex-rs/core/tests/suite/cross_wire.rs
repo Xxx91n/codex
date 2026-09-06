@@ -231,7 +231,10 @@ fn cross_wire_table_matrix_is_complete() {
         .collect();
     assert_eq!(
         declared_ids.len(),
-        declared_ids.iter().collect::<std::collections::HashSet<_>>().len(),
+        declared_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
         "declaration ids must be unique"
     );
     // The ticket-mandated exception surfaces: distinct terminal markers,
@@ -275,7 +278,9 @@ fn cross_wire_table_matrix_is_complete() {
                 "declaration {id} unknown wire {wire}"
             );
             assert!(
-                behavior.as_str().is_some_and(|text| !text.trim().is_empty()),
+                behavior
+                    .as_str()
+                    .is_some_and(|text| !text.trim().is_empty()),
                 "declaration {id} empty behavior for {wire}"
             );
         }
@@ -627,7 +632,9 @@ fn script_from_fixtures() -> SemanticScript {
     // turn; assert it here so a fixture edit that breaks the differential
     // script fails loudly at the source of the change.
     let chat_arguments = serde_json::from_str::<Value>(
-        chat["meta"]["tool_arguments"].as_str().expect("chat meta tool_arguments"),
+        chat["meta"]["tool_arguments"]
+            .as_str()
+            .expect("chat meta tool_arguments"),
     )
     .expect("chat tool_arguments is json");
     let anthropic_arguments = serde_json::from_str::<Value>(
@@ -719,13 +726,12 @@ fn ir_signature_from_fixture_expect(fixture: &Value) -> WireIrSignature {
                 }
             }
             let arguments_text = arguments_raw[..end].trim();
-            let arguments = serde_json::from_str::<Value>(arguments_text)
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "fixture expect_ir FunctionCall arguments must be valid JSON \
-                         (got {arguments_text:?}): {error}"
-                    )
-                });
+            let arguments = serde_json::from_str::<Value>(arguments_text).unwrap_or_else(|error| {
+                panic!(
+                    "fixture expect_ir FunctionCall arguments must be valid JSON \
+                     (got {arguments_text:?}): {error}"
+                )
+            });
             signature.function_calls.push((name, arguments));
         } else if text.starts_with("Completed{") {
             signature.completed_count += 1;

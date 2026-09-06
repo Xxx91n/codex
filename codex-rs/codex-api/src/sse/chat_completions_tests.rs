@@ -460,9 +460,7 @@ fn comparable_event_signatures(
             Ok(ResponseEvent::ReasoningContentDelta { delta, .. }) => {
                 Some(("ReasoningDelta", delta.clone()))
             }
-            Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning {
-                content, ..
-            })) => {
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning { content, .. })) => {
                 let text = match &content.as_ref()?[0] {
                     ReasoningItemContent::ReasoningText { text } => text.clone(),
                     _ => String::new(),
@@ -474,10 +472,7 @@ fn comparable_event_signatures(
                 name,
                 arguments,
                 ..
-            })) => Some((
-                "FunctionCallDone",
-                format!("{call_id}|{name}|{arguments}"),
-            )),
+            })) => Some(("FunctionCallDone", format!("{call_id}|{name}|{arguments}"))),
             Ok(ResponseEvent::OutputTextDelta(text)) => Some(("TextDelta", text.clone())),
             Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { content, .. })) => {
                 let text = match &content[0] {
@@ -609,9 +604,9 @@ async fn chat_sse_finish_reason_tool_calls_synthesizes_completed_with_end_turn()
     let mut completed_position = None;
     for (index, ev) in events.iter().enumerate() {
         match ev {
-            Ok(ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
-                call_id, ..
-            })) if call_id == "call_finish" => {
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::FunctionCall { call_id, .. }))
+                if call_id == "call_finish" =>
+            {
                 assert!(tool_call_position.is_none(), "exactly one function call");
                 tool_call_position = Some(index);
             }

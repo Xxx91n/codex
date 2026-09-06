@@ -496,9 +496,7 @@ async fn messages_stop_reason_tool_use_synthesizes_completed_after_function_call
 
     let first = rx.recv().await.expect("event").expect("ok event");
     match &first {
-        ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
-            name, call_id, ..
-        }) => {
+        ResponseEvent::OutputItemDone(ResponseItem::FunctionCall { name, call_id, .. }) => {
             assert_eq!(name, "shell");
             assert_eq!(call_id, "toolu_finish");
         }
@@ -519,7 +517,10 @@ async fn messages_stop_reason_tool_use_synthesizes_completed_after_function_call
                 usage_metadata.is_none(),
                 "ADR-0002 Ruling 2: usage_metadata must be None"
             );
-            assert_eq!(token_usage.as_ref().map(|usage| usage.input_tokens), Some(7));
+            assert_eq!(
+                token_usage.as_ref().map(|usage| usage.input_tokens),
+                Some(7)
+            );
         }
         other => panic!("expected Completed, got {other:?}"),
     }
