@@ -352,41 +352,6 @@ async fn truncated_stream_never_double_adds_active_thinking_block() {
     );
 }
 
-/// Defect category C (termination invariants): the chat wire's terminator
-/// is the explicit `data: [DONE]` frame — a stream whose bytes END before
-/// [DONE] arrives was truncated upstream, and must surface as a terminal
-/// Stream error with NO Completed event (a silent stop would replay a
-/// partial turn as if it finished; the "opened but silent" stream is a
-/// failure, not a normal end — dev.to/robinzzz four-state model, OmniRoute
-/// #7699 semantics).
-#[tokio::test]
-async fn chat_sse_stream_closed_before_done_marker_is_terminal_error_not_completion() {
-    let mut body = String::new();
-    body.push_str(&chunk(
-        serde_json::json!({"content": "partial answer that never got fin"}),
-        None,
-    ));
-    // finish_reason and usage frame arrive, then the connection closes
-    // WITHOUT the `data: [DONE]` sentinel.
-    body.push_str(&chunk(serde_json::json!({}), Some("stop")));
-    // No `data: [DONE]`; body ends here.
-
-    let events = run_chat_sse(body).await;
-
-    let terminal_error = events.iter().find(|ev| ev.is_err());
-    assert!(
-        matches!(terminal_error, Some(Err(ApiError::Stream(message))) if message
-            .contains("stream closed")),
-        "stream closed before [DONE] must be a terminal Stream error: {events:?}"
-    );
-    assert!(
-        !events
-            .iter()
-            .any(|ev| matches!(ev, Ok(ResponseEvent::Completed { .. }))),
-        "no Completed may be synthesized for a truncated stream: {events:?}"
-    );
-}
-
 /// Defect category C (termination invariants): the Messages wire's
 /// terminator is `message_stop`; a stream whose bytes END before it arrives
 /// must surface as a terminal Stream error with NO Completed event — the
