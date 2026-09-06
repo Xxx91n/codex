@@ -12,6 +12,7 @@ that supersedes and links the old one, incrementing the `NNNN` counter.
 | [0003](0003-gemini-wire-verdict.md) | Accepted | No native Gemini wire (OpenAI-compatible endpoint covers it); reopen triggers R1–R3 |
 | [0004](0004-chat-reasoning-content-passthrough.md) | Accepted | Chat `reasoning_content` passthrough reusing `ResponseItem::Reasoning` (no new IR variant) |
 | [0005](0005-reasoning-effort-translation.md) | Accepted | `reasoning_effort` → chat top-level field / Anthropic adaptive-vs-manual thinking translation (pure, deterministic) |
+| [0006](0006-fork-divergence-patch-queue.md) | Accepted | Fork divergence patch queue: apply/adapt/ignore ledger with upstream anchors (FORK_DIVERGENCE runbook) + upstream-merge ruling flow |
 | [0007](0007-major-upgrade-playbook.md) | Accepted (contingency playbook) | Upstream 1.0 major-upgrade playbook: break-surface preview, registration-point impact template, controlled full-CI verification window, frozen baseline & EOL clauses |
 
 Term definitions for vocabulary used across ADRs live in the repo-root

@@ -32,7 +32,7 @@ Upstream is tracked as `upstream/main`. This fork's local agent docs (`docs/agen
 Where to read what (link, don't copy — each layer stays the single source for its content):
 
 1. **[CONTEXT.md](CONTEXT.md)** — the fork's vocabulary authority: tri-wire terms, usage/prohibited-usage pairs, sources. Read it before naming anything new.
-2. **[docs/adr/](docs/adr/)** — decision records, append-only ([index](docs/adr/README.md)): 0001 fork baseline & sync, 0002 merge rulings, 0003 Gemini verdict, 0004 reasoning_content passthrough, 0005 reasoning_effort translation.
+2. **[docs/adr/](docs/adr/)** — decision records, append-only ([index](docs/adr/README.md)): 0001 fork baseline & sync, 0002 merge rulings, 0003 Gemini verdict, 0004 reasoning_content passthrough, 0005 reasoning_effort translation, 0006 fork divergence patch queue.
 3. **[AGENTS.md](AGENTS.md)** — agent-facing rules; the "Fork delta: tri-wire-api" section holds the fork red lines. Nested chain (nearest file wins): [codex-rs/AGENTS.md](codex-rs/AGENTS.md) → [core/src/client/wire/AGENTS.md](codex-rs/core/src/client/wire/AGENTS.md) for the per-wire protocol red lines.
 4. **CI**: `.github/workflows/fork-health.yml` is the daily fork-seam watchdog (seam-crate clippy + wiremock suites + drift probe); `fork-cli-test-release.yml` runs the three-platform check + release build. Heavy builds run in CI only.
 5. **Version control**: maintained with [GitButler](https://gitbutler.com) (virtual branches, one lane per ticket); upstream sync merges `upstream/main` and never rebases (ADR-0001).

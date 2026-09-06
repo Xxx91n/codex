@@ -18,7 +18,7 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
    （三注册点 / 构建 / 同步）。
 3. `docs/adr/` — append-only 决策记录（索引：`docs/adr/README.md`）：0001 基线与
    同步、0002 merge rulings、0003 Gemini 裁决、0004 reasoning_content 透传、
-   0005 reasoning_effort 翻译；新裁决递增编号，新词随其 ADR 入本表。
+   0005 reasoning_effort 翻译、0006 语义补丁队列；新裁决递增编号，新词随其 ADR 入本表。
 4. 嵌套 AGENTS 链（就近优先）：`codex-rs/AGENTS.md`（Rust workspace 纪律）→
    `core/src/client/wire/AGENTS.md`（per-wire 协议红线）。
 5. `.github/workflows/fork-health.yml` — 每日 fork seam 看门狗（seam crates
