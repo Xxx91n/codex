@@ -139,7 +139,7 @@ jobs:
           # The fork's recorded sync anchor (merge-base 口径; FORK_DIVERGENCE.md
           # header). Refresh to the new merge-base in the same adjudication
           # round as the FORK_DIVERGENCE.md refresh after EVERY five-step merge.
-          SYNC_ANCHOR: '6be2a6ca952a'
+          SYNC_ANCHOR: 'd52478c52e'
           # Dispatch override for the artificial-divergence drill (issue 12
           # red-path evidence): point it at a scratch repo whose main was
           # force-rewritten past the anchor, dispatch, expect the red light.
