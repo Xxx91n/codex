@@ -217,12 +217,22 @@ impl ModelClientSession {
 /// array: strict OpenAI-compatible servers reject a replay that splits
 /// parallel calls across multiple assistant messages (HTTP 400, "must be
 /// followed by tool messages"), per the official function-calling guide.
+///
+/// A `tool` result must also directly follow its `tool_calls` message.
+/// Messages (including per-turn developer context) and reasoning items that
+/// land between a tool call and its output in the Responses input are
+/// deferred until the next flush so the adjacency holds — NVIDIA NIM
+/// hard-500s a separated result ("Failed to generate completions").
 pub(crate) fn build_chat_messages(
     instructions: &str,
     input: Vec<ResponseItem>,
 ) -> Vec<serde_json::Value> {
     let mut messages = Vec::new();
     let mut pending_tool_calls: Vec<serde_json::Value> = Vec::new();
+    // Messages that arrive while a tool call awaits its output item. They are
+    // held here and flushed just before the assistant(tool_calls) message so
+    // the tool results stay directly adjacent to the call that produced them.
+    let mut deferred_messages: Vec<serde_json::Value> = Vec::new();
 
     if !instructions.trim().is_empty() {
         messages.push(json!({
@@ -233,6 +243,7 @@ pub(crate) fn build_chat_messages(
 
     macro_rules! flush_tool_calls {
         () => {
+            messages.append(&mut deferred_messages);
             if !pending_tool_calls.is_empty() {
                 messages.push(json!({
                     "role": "assistant",
@@ -246,12 +257,22 @@ pub(crate) fn build_chat_messages(
     for item in input {
         match item {
             ResponseItem::Message { role, content, .. } => {
-                flush_tool_calls!();
                 if let Some(text) = content_items_to_text(&content) {
-                    messages.push(json!({
+                    let message = json!({
                         "role": map_chat_role(&role),
                         "content": text,
-                    }));
+                    });
+                    if pending_tool_calls.is_empty() {
+                        messages.push(message);
+                    } else {
+                        // A message landed between a tool call and its output:
+                        // emit it ahead of the eventual assistant(tool_calls)
+                        // message instead of splitting the pair. Strict
+                        // OpenAI-compatible backends (NVIDIA NIM: kimi,
+                        // minimax) 500 a tool result that does not directly
+                        // follow its tool_calls.
+                        deferred_messages.push(message);
+                    }
                 }
             }
             ResponseItem::Reasoning { content, .. } => {
@@ -271,11 +292,15 @@ pub(crate) fn build_chat_messages(
                     .collect::<Vec<_>>()
                     .join("");
                 if !reasoning.is_empty() {
-                    flush_tool_calls!();
-                    messages.push(json!({
+                    let message = json!({
                         "role": "assistant",
                         "reasoning_content": reasoning,
-                    }));
+                    });
+                    if pending_tool_calls.is_empty() {
+                        messages.push(message);
+                    } else {
+                        deferred_messages.push(message);
+                    }
                 }
             }
             ResponseItem::FunctionCall {

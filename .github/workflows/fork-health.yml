@@ -105,10 +105,12 @@ jobs:
       # ticket 17 the daily watchdog runs the wiremock trio (chat_wiremock /
       # anthropic_wiremock / cross_wire), the codex-api SSE unit tests, and
       # the reasoning_effort translation unit tests (WORKFLOW §6 ticket-10
-      # lesson).
+      # lesson); ticket 19 r2 adds the chat-wire tool-adjacency regression
+      # test (build_chat_messages_keeps_tool_results_adjacent_to_tool_calls,
+      # codex-core lib via client.rs #[path]) so the NIM-500 fix keeps a guard.
       - name: Test fork seam suites
         shell: bash
-        run: just test -p codex-api -p codex-core -E 'package(codex-api) or test(chat_wire) or test(anthropic_wire) or test(cross_wire) or test(reasoning_effort)'
+        run: just test -p codex-api -p codex-core -E 'package(codex-api) or test(chat_wire) or test(anthropic_wire) or test(cross_wire) or test(reasoning_effort) or test(build_chat_messages_keeps_tool_results_adjacent_to_tool_calls)'
       # Sync watchdog (ticket 12): the advisory drift probe turned into a
       # gating measure + ff-only trial. Semantics per ADR-0006 decision 3①
       # (merge-base 口径; tag 口径 banned — upstream squash-merge makes tags
