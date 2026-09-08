@@ -1867,3 +1867,88 @@ fn build_chat_messages_serializes_tool_roundtrip_items() {
         ]
     );
 }
+
+#[test]
+fn build_chat_messages_keeps_tool_results_adjacent_to_tool_calls() {
+    // Regression (fork): a Message or Reasoning item landing between a
+    // FunctionCall and its FunctionCallOutput must not split the eventual
+    // assistant(tool_calls) message from its tool results. NVIDIA NIM
+    // (kimi/minimax) hard-500s a replay whose tool result does not directly
+    // follow its tool_calls ("Failed to generate completions").
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::FunctionCallOutputPayload;
+    use codex_protocol::models::ResponseItem;
+    use serde_json::json;
+
+    let input = vec![
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "hi".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: "{}".to_string(),
+            encrypted_function_args: None,
+            call_id: "call_1".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "let me check".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "<environment_context/>".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("call_1".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("ok".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+
+    let messages = super::build_chat_messages("be helpful", input);
+    assert_eq!(
+        messages,
+        vec![
+            json!({"role":"system","content":"be helpful"}),
+            json!({"role":"user","content":"hi"}),
+            // Deferred: emitted ahead of the tool_calls message so the pair
+            // assistant(tool_calls) -> tool stays adjacent.
+            json!({"role":"assistant","content":"let me check"}),
+            json!({"role":"system","content":"<environment_context/>"}),
+            json!({
+                "role":"assistant",
+                "content":"",
+                "tool_calls":[
+                    {
+                        "id":"call_1",
+                        "type":"function",
+                        "function":{"name":"exec_command","arguments":"{}"}
+                    }
+                ]
+            }),
+            json!({"role":"tool","tool_call_id":"call_1","content":"ok"}),
+        ]
+    );
+}
