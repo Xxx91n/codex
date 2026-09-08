@@ -95,6 +95,46 @@ Behaviour notes:
 
 **Local machines only keep lightweight development — every heavy build, check, and release runs in GitHub Actions.** Locally you only need the Rust toolchain (pinned to `1.95.0` by `codex-rs/rust-toolchain.toml`) and `just` for quick `fmt`/`clippy`/`test` runs. The `fork-cli-test-release` workflow (triggered manually with `workflow_dispatch`) runs the `check` job (fmt + clippy + fork-scoped tests) and the release `build` job across Windows, macOS, and Linux, then publishes the rolling prerelease — so a local `codex-rs/target/` is just a disposable on-disk cache: delete it to reclaim ~110G of disk.
 
+## Why this fork exists
+
+On 2026-08-04 OpenAI pulled its Responses-only models from the `/v1/chat/completions` endpoint. LiteLLM Proxy’s bridge router kept a wildcard route that still mapped those models to the removed endpoint, and for roughly 4 hours every request through it came back 404 — 1,700+ failed requests before the hotfix (LiteLLM issue #35879). Nothing was wrong with the models or the clients: the outage lived inside a *server-side protocol bridge* that a third party operated and that clients passively depended on.
+
+A chat-wire client can avoid that entire failure class by refusing to delegate protocol translation to somebody else’s router. This fork builds all three wires — Responses, Chat Completions, Anthropic Messages — natively into the client itself, selected by one local config key (`wire_api`). There is no bridge to break, no wildcard to misroute, and no upstream hotfix to wait for: the translation lives in the binary you run, guarded end-to-end by the fork-seam CI.
+
+## When to use this fork vs upstream
+
+| Your situation | Use |
+|---|---|
+| You only ever speak OpenAI Responses (`/v1/responses`) with the Codex app | **upstream `openai/codex`** — this fork adds nothing you need |
+| You need any combination of Responses / Chat Completions / Anthropic Messages (gateways that don’t implement `/v1/responses`: LM Studio, Ollama pre-responses, DeepSeek-style chat endpoints) | **this fork** — one binary, one config, three protocols |
+| Non-Codex clients that need many providers behind one endpoint | **LiteLLM Proxy / Portkey** — a standalone gateway is the right shape there; this fork is an in-process wire layer, not a proxy |
+| Anthropic Messages direct, including the extended-thinking chain (verbatim signature replay, `budget_tokens`, `cache_control`) | **this fork** — goose-blueprint SSE state machine, real-gateway verified |
+
+## Architecture at a glance
+
+The fork is hub-and-spoke, not pairwise: one single typed internal representation (IR), `ResponseItem`, sits in the middle, and every wire is one spoke — a request builder plus an inbound SSE state machine. Adding a protocol therefore costs O(N), not the O(N²) of pairwise translation. The divergence from upstream is contained to exactly three registration points (`WireApi`, `ModelProviderInfo.wire_api`, and the dispatch match in `client.rs`).
+
+```mermaid
+graph TD
+    IR["ResponseItem — the single typed IR (hub)"]
+    R["WireApi::Responses<br/>upstream standard"]
+    C["WireApi::Chat<br/>restored by this fork"]
+    A["WireApi::Anthropic<br/>added by this fork"]
+    IR -->|"builder + SSE state machine"| R
+    IR -->|"builder + SSE state machine"| C
+    IR -->|"builder + SSE state machine"| A
+```
+
+## How to add a 4th wire
+
+A new outbound protocol (say Gemini) follows the same blueprint that produced Chat and Anthropic. The binding rules are red lines 1–2 of [wire/AGENTS.md](codex-rs/core/src/client/wire/AGENTS.md) — a new protocol means a new module file plus registration at all three points, and it must follow the `chat.rs` shape (builder + streaming loop in the module, dispatch only in `client.rs`). Concretely, in five steps:
+
+1. **Add the module pair.** Outbound request builder + streaming loop in `codex-rs/core/src/client/wire/<new>.rs`; inbound SSE state machine in `codex-api/src/sse/<new>.rs`.
+2. **Update the three registration points together.** The `WireApi` variant and its `wire_api` config surface in `model-provider-info/src/lib.rs`, plus the dispatch branch in `ModelClientSession::stream` (`core/src/client.rs`).
+3. **Add wiremock fixtures.** Replay fixtures + round-trip tests for the new spoke in the seam suites, and register it in the cross-wire table, so `fork-health.yml` guards it from day one.
+4. **Add the vocabulary.** New terms go into [CONTEXT.md](CONTEXT.md) — the fork’s vocabulary authority — with usage and prohibited-usage pairs, before the code merges.
+5. **Record the decision.** An ADR under [docs/adr/](docs/adr/), plus an entry in the semantic patch queue (FORK_DIVERGENCE) with its classification and merge-base anchor, per [ADR-0006](docs/adr/0006-fork-divergence-patch-queue.md).
+
 ---
 
 ## Quickstart
