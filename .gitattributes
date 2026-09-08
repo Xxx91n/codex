@@ -1,2 +1,76 @@
+# .gitattributes — repo-root line-ending + binary policy
+#
+# Source of truth: crlf_lf_repository_policy (global AGENTS.md).
+#
+# Rules (in order of precedence — later rules override earlier):
+# 1. Default: every text file is LF in repo, LF in working tree.
+# 2. Windows-native scripts (.bat/.ps1/.cmd) keep CRLF in repo and on disk.
+# 3. apply-patch test fixtures that intentionally preserve CRLF stay CRLF (do NOT normalize).
+# 4. Binary files are marked binary — no newline normalization, no diffing.
+# 5. Already-linguist-generated schemas keep that marker.
+
+# --- 1. Default: text files → LF in repo and on disk ---
+* text=auto eol=lf
+
+# --- 2. Windows-native scripts → CRLF on disk ---
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# --- 3. Intentional-CRLF test fixtures (apply-patch preserves-CRLF scenarios) ---
+codex-rs/apply-patch/tests/fixtures/scenarios/023_preserves_crlf_line_endings/** text eol=crlf
+
+# --- 4. Binary allowlist (must precede the binary marker on each line) ---
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.exe binary
+*.dll binary
+*.pdb binary
+*.msi binary
+*.so binary
+*.dylib binary
+*.bin binary
+*.zip binary
+*.gz binary
+*.tar binary
+*.7z binary
+*.wasm binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.mp3 binary
+*.mp4 binary
+*.ogg binary
+*.wav binary
+*.flac binary
+*.avi binary
+*.mkv binary
+*.mov binary
+*.pdf binary
+*.class binary
+*.jar binary
+*.war binary
+*.ear binary
+*.deb binary
+*.rpm binary
+*.dmg binary
+*.pkg binary
+*.apk binary
+*.ipa binary
+*.appx binary
+*.msix binary
+*.vsix binary
+*.crx binary
+*.xpi binary
+*.bpf binary
+*.zst binary
+
+# --- 5. Pre-existing linguist-generated markers (kept verbatim) ---
 codex-rs/app-server-protocol/schema/** linguist-generated
 codex-rs/hooks/schema/generated/** linguist-generated
