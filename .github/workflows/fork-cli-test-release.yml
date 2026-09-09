@@ -2,29 +2,42 @@
 # publish one public rolling prerelease with per-OS assets. NOT upstream-shipped.
 name: fork-cli-test-release
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Platforms to build: comma list (windows,ubuntu,macos) or all. check+release run only on all.'
+        required: false
+        default: 'all'
 
 permissions:
   contents: write
 
 jobs:
+  # Resolve the build matrix from the platforms input so a single-platform
+  # dispatch (e.g. windows-only test build) skips the other runners' minutes
+  # instead of burning the full 3-OS matrix (quota: windows 2x, macos 10x).
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.sel.outputs.build }}
+    steps:
+      - id: sel
+        shell: bash
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          ALL='[{"os":"windows-latest","platform":"windows","target":"x86_64-pc-windows-msvc","asset":"codex-win-x86_64-pc-windows-msvc.zip","bin":"codex.exe"},{"os":"ubuntu-latest","platform":"ubuntu","target":"x86_64-unknown-linux-gnu","asset":"codex-linux-x86_64-unknown-linux-gnu.tar.gz","bin":"codex"},{"os":"macos-latest","platform":"macos","target":"aarch64-apple-darwin","asset":"codex-mac-aarch64-apple-darwin.tar.gz","bin":"codex"}]'
+          if [[ -z "$PLATFORMS" || "$PLATFORMS" == "all" ]]; then
+            echo "build=$ALL" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=$(echo "$ALL" | jq -c --arg p ",${PLATFORMS}," 'map(select(( $p | contains("," + .platform + ",")) ))')" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: matrix
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            asset: codex-win-x86_64-pc-windows-msvc.zip
-            bin: codex.exe
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            asset: codex-linux-x86_64-unknown-linux-gnu.tar.gz
-            bin: codex
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            asset: codex-mac-aarch64-apple-darwin.tar.gz
-            bin: codex
+      matrix: ${{ fromJSON(needs.matrix.outputs.build) }}
     runs-on: ${{ matrix.os }}
     defaults:
       run:
