@@ -25,12 +25,26 @@ jobs:
         shell: bash
         env:
           PLATFORMS: ${{ inputs.platforms }}
+        # Pure-bash selection (no jq: two jq syntax bugs already bit runs
+        # 34376975626/34378510877; this logic is byte-tested locally).
         run: |
-          ALL='[{"os":"windows-latest","platform":"windows","target":"x86_64-pc-windows-msvc","asset":"codex-win-x86_64-pc-windows-msvc.zip","bin":"codex.exe"},{"os":"ubuntu-latest","platform":"ubuntu","target":"x86_64-unknown-linux-gnu","asset":"codex-linux-x86_64-unknown-linux-gnu.tar.gz","bin":"codex"},{"os":"macos-latest","platform":"macos","target":"aarch64-apple-darwin","asset":"codex-mac-aarch64-apple-darwin.tar.gz","bin":"codex"}]'
+          W='{"os":"windows-latest","platform":"windows","target":"x86_64-pc-windows-msvc","asset":"codex-win-x86_64-pc-windows-msvc.zip","bin":"codex.exe"}'
+          U='{"os":"ubuntu-latest","platform":"ubuntu","target":"x86_64-unknown-linux-gnu","asset":"codex-linux-x86_64-unknown-linux-gnu.tar.gz","bin":"codex"}'
+          M='{"os":"macos-latest","platform":"macos","target":"aarch64-apple-darwin","asset":"codex-mac-aarch64-apple-darwin.tar.gz","bin":"codex"}'
+          p=",${PLATFORMS},"
           if [[ -z "$PLATFORMS" || "$PLATFORMS" == "all" ]]; then
-            echo "build=$ALL" >> "$GITHUB_OUTPUT"
+            echo "build=[$W,$U,$M]" >> "$GITHUB_OUTPUT"
           else
-            echo "build=$(echo "$ALL" | jq -c --arg p ",${PLATFORMS}," 'map(.platform as $x | select($p | contains("," + $x + ","))))')" >> "$GITHUB_OUTPUT"
+            parts=()
+            [[ "$p" == *",windows,"* ]] && parts+=("$W")
+            [[ "$p" == *",ubuntu,"*  ]] && parts+=("$U")
+            [[ "$p" == *",macos,"*   ]] && parts+=("$M")
+            if [[ ${#parts[@]} -eq 0 ]]; then
+              echo "::error::no valid platform in '$PLATFORMS' (use comma list: windows,ubuntu,macos or all)"
+              exit 1
+            fi
+            IFS=,
+            echo "build=[${parts[*]}]" >> "$GITHUB_OUTPUT"
           fi
 
   build:
