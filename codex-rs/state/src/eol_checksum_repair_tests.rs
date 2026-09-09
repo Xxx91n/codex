@@ -1,11 +1,11 @@
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
-use sqlx::migrate::MigrateError;
-use sqlx::migrate::Migration;
-use sqlx::migrate::Migrator;
 use sqlx::AssertSqlSafe;
 use sqlx::Row;
 use sqlx::SqlSafeStr;
+use sqlx::migrate::MigrateError;
+use sqlx::migrate::Migration;
+use sqlx::migrate::Migrator;
 
 use super::ObjectKind;
 use super::SchemaReplay;
@@ -216,7 +216,11 @@ async fn repair_eol_checksum_family_rejects_non_eol_checksum() {
     let heal_error = repair_eol_checksum_family(&pool, &runtime_state_migrator())
         .await
         .expect_err("checksums outside both line-ending families must hard-fail");
-    assert!(heal_error.to_string().contains("not an EOL-only difference"));
+    assert!(
+        heal_error
+            .to_string()
+            .contains("not an EOL-only difference")
+    );
 
     // Nothing was rewritten: version 1 stays corrupted and the rest of the
     // history keeps the embedded family.
@@ -364,10 +368,7 @@ async fn repair_eol_checksum_family_schema_replay_covers_all_runtime_databases()
             .open_read_write_pool(path)
             .await
             .expect("runtime database should open");
-        migrator
-            .run(&pool)
-            .await
-            .expect("migrations should apply");
+        migrator.run(&pool).await.expect("migrations should apply");
 
         // The DDL replay must reproduce the exact catalog of a database the
         // migrator itself built, for every runtime migration set: the gate in
@@ -376,7 +377,9 @@ async fn repair_eol_checksum_family_schema_replay_covers_all_runtime_databases()
         for migration in migrator.migrations.iter() {
             replay.apply_migration(migration.sql.as_str());
         }
-        replay.objects.insert("_sqlx_migrations".to_string(), ObjectKind::Table);
+        replay
+            .objects
+            .insert("_sqlx_migrations".to_string(), ObjectKind::Table);
         let actual = actual_schema_inventory(&pool)
             .await
             .expect("catalog inventory should load");

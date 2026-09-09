@@ -87,8 +87,8 @@ pub(crate) async fn repair_eol_checksum_family(
             effective.push(migration);
             continue;
         }
-        let stored_matches_crlf = crlf_checksum(migration)
-            .is_some_and(|image| stored.as_slice() == image.as_slice());
+        let stored_matches_crlf =
+            crlf_checksum(migration).is_some_and(|image| stored.as_slice() == image.as_slice());
         if stored_matches_crlf {
             updates.push((*version, migration.checksum.to_vec()));
             effective.push(migration);
@@ -133,7 +133,9 @@ pub(crate) async fn repair_eol_checksum_family(
     for migration in &effective {
         replay.apply_migration(migration.sql.as_str());
     }
-    replay.objects.insert("_sqlx_migrations".to_string(), ObjectKind::Table);
+    replay
+        .objects
+        .insert("_sqlx_migrations".to_string(), ObjectKind::Table);
     let actual = actual_schema_inventory(pool).await?;
     verify_schema_matches(&replay.objects, &actual)?;
 
@@ -202,7 +204,12 @@ fn verify_schema_matches(
 
 fn preview(names: &[String]) -> String {
     const LIMIT: usize = 8;
-    let shown = names.iter().take(LIMIT).cloned().collect::<Vec<_>>().join(", ");
+    let shown = names
+        .iter()
+        .take(LIMIT)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
     if names.len() <= LIMIT {
         shown
     } else {
@@ -279,11 +286,11 @@ impl SchemaReplay {
         for effect in scan_effects(&lowered) {
             match effect {
                 Effect::CreateTable(name) => {
-                    self.objects.insert(name, ObjectKind::Table);
+                    self.objects.insert(name.clone(), ObjectKind::Table);
                     self.children.entry(name).or_default();
                 }
                 Effect::CreateChild { name, table, kind } => {
-                    self.objects.insert(name, kind);
+                    self.objects.insert(name.clone(), kind);
                     if let Some(children) = self.children.get_mut(&table) {
                         children.insert(name);
                     }
@@ -320,11 +327,18 @@ impl SchemaReplay {
 
 enum Effect {
     CreateTable(String),
-    CreateChild { name: String, table: String, kind: ObjectKind },
+    CreateChild {
+        name: String,
+        table: String,
+        kind: ObjectKind,
+    },
     CreateView(String),
     DropTable(String),
     DropObject(String),
-    RenameTable { from: String, to: String },
+    RenameTable {
+        from: String,
+        to: String,
+    },
 }
 
 fn scan_effects(lowered: &str) -> Vec<Effect> {
@@ -356,10 +370,14 @@ fn scan_effects(lowered: &str) -> Vec<Effect> {
 
 fn parse_create(lowered: &str, start: usize, effects: &mut Vec<Effect>) {
     let mut i = skip_ws(lowered, start + "create".len());
-    let Some((mut kind, mut end)) = read_word(lowered, i) else { return; };
+    let Some((mut kind, mut end)) = read_word(lowered, i) else {
+        return;
+    };
     if kind == "unique" {
         i = skip_ws(lowered, end);
-        let Some((next, next_end)) = read_word(lowered, i) else { return; };
+        let Some((next, next_end)) = read_word(lowered, i) else {
+            return;
+        };
         kind = next;
         end = next_end;
     }
@@ -370,17 +388,33 @@ fn parse_create(lowered: &str, start: usize, effects: &mut Vec<Effect>) {
     }
     match kind {
         "table" => {
-            let Some((name, _)) = parse_name(lowered, end) else { return; };
+            let Some((name, _)) = parse_name(lowered, end) else {
+                return;
+            };
             effects.push(Effect::CreateTable(name));
         }
         "index" | "trigger" => {
-            let Some((name, after_name)) = parse_name(lowered, end) else { return; };
-            let Some(table) = parse_on_target(lowered, after_name) else { return; };
-            let object_kind = if kind == "index" { ObjectKind::Index } else { ObjectKind::Trigger };
-            effects.push(Effect::CreateChild { name, table, kind: object_kind });
+            let Some((name, after_name)) = parse_name(lowered, end) else {
+                return;
+            };
+            let Some(table) = parse_on_target(lowered, after_name) else {
+                return;
+            };
+            let object_kind = if kind == "index" {
+                ObjectKind::Index
+            } else {
+                ObjectKind::Trigger
+            };
+            effects.push(Effect::CreateChild {
+                name,
+                table,
+                kind: object_kind,
+            });
         }
         "view" => {
-            let Some((name, _)) = parse_name(lowered, end) else { return; };
+            let Some((name, _)) = parse_name(lowered, end) else {
+                return;
+            };
             effects.push(Effect::CreateView(name));
         }
         _ => {}
@@ -389,11 +423,15 @@ fn parse_create(lowered: &str, start: usize, effects: &mut Vec<Effect>) {
 
 fn parse_drop(lowered: &str, start: usize, effects: &mut Vec<Effect>) {
     let after_drop = skip_ws(lowered, start + "drop".len());
-    let Some((kind, end)) = read_word(lowered, after_drop) else { return; };
+    let Some((kind, end)) = read_word(lowered, after_drop) else {
+        return;
+    };
     if !matches!(kind, "table" | "index" | "trigger") {
         return;
     }
-    let Some((name, _)) = parse_name(lowered, end) else { return; };
+    let Some((name, _)) = parse_name(lowered, end) else {
+        return;
+    };
     if kind == "table" {
         effects.push(Effect::DropTable(name));
     } else {
@@ -403,19 +441,27 @@ fn parse_drop(lowered: &str, start: usize, effects: &mut Vec<Effect>) {
 
 fn parse_alter(lowered: &str, start: usize, effects: &mut Vec<Effect>) {
     let after_alter = skip_ws(lowered, start + "alter".len());
-    let Some((table_word, end)) = read_word(lowered, after_alter) else { return; };
+    let Some((table_word, end)) = read_word(lowered, after_alter) else {
+        return;
+    };
     if table_word != "table" {
         return;
     }
     let after_name = skip_ws(lowered, end);
-    let Some((from, from_end)) = read_word(lowered, after_name) else { return; };
+    let Some((from, from_end)) = read_word(lowered, after_name) else {
+        return;
+    };
     let after_from = skip_ws(lowered, from_end);
-    let Some((next, next_end)) = read_word(lowered, after_from) else { return; };
+    let Some((next, next_end)) = read_word(lowered, after_from) else {
+        return;
+    };
     if next != "rename" {
         return;
     }
     let after_rename = skip_ws(lowered, next_end);
-    let Some((to_keyword, to_keyword_end)) = read_word(lowered, after_rename) else { return; };
+    let Some((to_keyword, to_keyword_end)) = read_word(lowered, after_rename) else {
+        return;
+    };
     if to_keyword == "column" {
         // Column renames never change the object inventory.
         return;
@@ -424,8 +470,13 @@ fn parse_alter(lowered: &str, start: usize, effects: &mut Vec<Effect>) {
         return;
     }
     let after_to = skip_ws(lowered, to_keyword_end);
-    let Some((to, _)) = read_word(lowered, after_to) else { return; };
-    effects.push(Effect::RenameTable { from: from.to_string(), to: to.to_string() });
+    let Some((to, _)) = read_word(lowered, after_to) else {
+        return;
+    };
+    effects.push(Effect::RenameTable {
+        from: from.to_string(),
+        to: to.to_string(),
+    });
 }
 
 /// Skip `IF [NOT] EXISTS` after a CREATE/DROP keyword and return the object
@@ -535,7 +586,10 @@ fn is_word_byte(byte: u8) -> bool {
 }
 
 fn is_word_byte_at(lowered: &str, i: usize) -> bool {
-    lowered.as_bytes().get(i).is_some_and(|byte| is_word_byte(*byte))
+    lowered
+        .as_bytes()
+        .get(i)
+        .is_some_and(|byte| is_word_byte(*byte))
 }
 
 fn starts_at_word_boundary(lowered: &str, position: usize) -> bool {
