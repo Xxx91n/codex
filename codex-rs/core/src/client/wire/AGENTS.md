@@ -105,6 +105,82 @@ non-Responses wires on one internal representation (`ResponseItem`).
     key material on Anthropic- and Kimi-family upstreams. Never thread
     timestamps, randomness, or per-request state through it.
 
+## How to add a wire (4th-wire recipe)
+
+Agent-executable checklist for adding a 4th wire (e.g. Gemini) on this seam.
+The human-facing narrative and the why live in
+[README.md — How to add a 4th wire](../../../../../README.md#how-to-add-a-4th-wire);
+this section only adds what an agent must DO and VERIFY inside this directory.
+
+**Preflight (ADR-0006 decision 3 ③, 清单先于实现).** Before the first commit,
+open the three FORK_DIVERGENCE entries for the new wire (per ADR-0006 decision 4
+— seam attribution) and draft its CONTEXT.md vocabulary entry (usage +
+prohibited-usage pairs). Implementation does not start until the queue entries
+and vocabulary exist.
+
+1. **Build the module pair from the existing spokes.** Copy the
+   `anthropic.rs` / `chat.rs` shape into `wire/<new>.rs` (request builder +
+   streaming loop) and the inbound state machine into
+   `codex-api/src/sse/<new>.rs`; extend the File map and the `mod.rs`
+   module doc to declare the new spoke. Verify: the new module compiles in
+   isolation; README step 1 has the blueprint and link stays unbroken.
+   → Red line 2 — shape: builder + streaming loop live in the module,
+     dispatch stays in `client.rs`.
+
+2. **Register at the three seam anchors — in their homes, not here.** Add the
+   `WireApi` variant, the `wire_api` field mapping, and the dispatch
+   branch (in `model-provider-info/src/lib.rs` and `core/src/client.rs`).
+   This directory stays untouched by registration (see Boundary above).
+   Verify: `grep -nE 'WireApi::|wire_api:|wire_api =>' <three files>` returns
+   exactly one hit per file; no wire-specific logic landed in `client.rs`.
+   → Red line 1 — a match arm alone is NOT a wire; all three points change
+     together.
+
+3. **Prove the spoke on the internal IR.** Add wiremock replay fixtures and a
+   round-trip test for the new spoke to the seam suite, register it in the
+   cross-wire table, and assert on captured outbound request bodies (see
+   Testing & verification below). Verify: new-wire events synthesize on
+   `ResponseItem`; `Completed` carries `usage_metadata: None` unless the
+   protocol actually delivers usage.
+   → Red line 9 — streams are parsed per-wire; events are synthesized on
+     the internal surface, never raw SSE bytes (+ Red line 10 for the
+     `usage_metadata` contract).
+
+4. **Declare the vocabulary and the degrade surface.** Add CONTEXT.md entries
+   (usage + prohibited-usage pairs) for the new wire and list explicitly what
+   it does NOT support. No silent pretending a capability exists on this
+   wire; auto-compact and other cross-wire features are localized per wire.
+   Verify: every wire-specific term is in CONTEXT.md before any code that
+   uses it lands.
+   → Red line 11 — degrade or localize explicitly; never silently pretend
+     a capability exists on this wire.
+
+5. **Land the decision and close the sync loop.** Write the Nygard ADR
+   (increments the `NNNN-` counter from ADR-0001), refresh FORK_DIVERGENCE
+   (three new entries per ADR-0006 decision 4, with merge-base anchor), and
+   wait for fork-health (wiremock trio + check job) to go green. Verify: the
+   new loop terminates on the protocol's own stop condition, not on a
+   stream-end shortcut.
+   → Red line 12 — an early stop is data, not a stream-end shortcut (+ Red
+     line 13 if the wire touches `reasoning_effort` translation).
+
+**Does NOT carry over.** Red lines 3–8 are wire-specific invariants
+(Anthropic thinking signature, Anthropic-only `cache_control`, base64-only
+images, Anthropic tool-use replay). Do NOT transplant them onto a new wire —
+write only the CONTEXT.md vocabulary and red lines the new protocol
+actually needs.
+
+### Stable cross-references (link, don't copy)
+
+| What | Lives in | Cite as |
+|---|---|---|
+| Three registration points (seam anchors) | `Boundary` above + `## Red lines` §1 | boundary + Red line 1 |
+| Five-step blueprint narrative & why | [README.md](../../../../../README.md#how-to-add-a-4th-wire) | README §How to add a 4th wire |
+| Per-wire vocabulary (ResponseItem, three registration points, apply-adapt-ignore) | [CONTEXT.md](../../../../../CONTEXT.md) | CONTEXT.md → core vocabulary |
+| Fork baseline + merge strategy | [ADR-0001](../../../../../docs/adr/0001-fork-baseline-and-sync.md) | ADR-0001 §Decision |
+| Seam attribution + queue entries | [ADR-0006](../../../../../docs/adr/0006-fork-divergence-patch-queue.md) | ADR-0006 §4 (seam anchors) |
+| Inbound SSE state machine pair | `codex-api/src/sse/<new>.rs` + Testing & verification below | Testing & verification |
+
 ## Module discipline
 
 - Root AGENTS.md Rust rules apply (500/800 LoC targets, exhaustive matches, no
