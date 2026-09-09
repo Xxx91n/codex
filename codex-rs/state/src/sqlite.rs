@@ -6,6 +6,7 @@
 )]
 
 use crate::DbTelemetry;
+use crate::eol_checksum_repair::repair_eol_checksum_family;
 use crate::migrations::repair_legacy_recency_migration_version;
 use crate::runtime::RuntimeDbInitError;
 use crate::telemetry;
@@ -15,6 +16,7 @@ use log::LevelFilter;
 use sqlx::ConnectOptions;
 use sqlx::Error;
 use sqlx::SqlitePool;
+use sqlx::migrate::MigrateError;
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::SqliteAutoVacuum;
 use sqlx::sqlite::SqliteConnectOptions;
@@ -255,7 +257,26 @@ impl SqliteConfig {
             if matches!(spec.kind, DbKind::State) {
                 repair_legacy_recency_migration_version(&pool, migrator).await?;
             }
-            migrator.run(&pool).await.map_err(anyhow::Error::from)
+            if let Err(error) = migrator.run(&pool).await.map_err(anyhow::Error::from) {
+                let version_mismatch = matches!(
+                    error.downcast_ref::<MigrateError>(),
+                    Some(MigrateError::VersionMismatch(_))
+                );
+                if !version_mismatch {
+                    return Err(error);
+                }
+                // Ticket 25: ticket 18's `* text=auto eol=lf` flipped the
+                // checksum family sqlx::migrate! embeds on Windows checkouts,
+                // so databases written by pre-normalization binaries fail
+                // validation with VersionMismatch. When (and only when) every
+                // applied checksum is the CRLF image of the embedded SQL and
+                // the schema still matches, rewrite the stored checksums in a
+                // transaction and retry once; anything else keeps failing
+                // loudly.
+                repair_eol_checksum_family(&pool, migrator).await?;
+                migrator.run(&pool).await.map_err(anyhow::Error::from)?;
+            }
+            Ok(())
         }
         .await;
         telemetry::record_init_result(

@@ -74,3 +74,17 @@ codex-rs/apply-patch/tests/fixtures/scenarios/023_preserves_crlf_line_endings/**
 # --- 5. Pre-existing linguist-generated markers (kept verbatim) ---
 codex-rs/app-server-protocol/schema/** linguist-generated
 codex-rs/hooks/schema/generated/** linguist-generated
+
+# --- 6. sqlx migration sources: byte-stable LF (ticket 25) ---
+# sqlx::migrate! embeds these .sql bytes and their SHA-384 checksums into the
+# binary at compile time, so a CRLF checkout flips the whole embedded checksum
+# family and locks out every database written by the other family. Lock the
+# six migration directories explicitly (later rules override earlier ones) so
+# the embedded bytes stay identical across platforms and checkout configs,
+# independent of any later change to the section-1 default.
+codex-rs/state/migrations/*.sql text eol=lf
+codex-rs/state/logs_migrations/*.sql text eol=lf
+codex-rs/state/goals_migrations/*.sql text eol=lf
+codex-rs/state/memory_migrations/*.sql text eol=lf
+codex-rs/state/queue_migrations/*.sql text eol=lf
+codex-rs/state/thread_history_migrations/*.sql text eol=lf

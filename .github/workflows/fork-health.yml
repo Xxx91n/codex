@@ -94,6 +94,34 @@ jobs:
       - name: Clippy (seam crates)
         shell: bash
         run: cargo clippy --locked --lib -p codex-api -p codex-core -p codex-model-provider-info -- -D warnings
+      # Ticket 25: sqlx::migrate! embeds the migration .sql bytes and their
+      # SHA-384 checksums at compile time, so a CRLF checkout silently flips
+      # the whole embedded checksum family and locks out every database
+      # written by the other family (the round-4 Windows packaging outage).
+      # .gitattributes pins the six migration directories to LF; this scan
+      # fails loudly if any migration source ever ships a CR byte again.
+      - name: Migration SQL line-ending scan (LF-only, fail-loud)
+        shell: bash
+        # Pin to the repo root: the job default working-directory is
+        # codex-rs, and git pathspecs are relative to the cwd.
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          crlf_files=$(git grep -Il $'\r' -- \
+            'codex-rs/state/migrations/*.sql' \
+            'codex-rs/state/logs_migrations/*.sql' \
+            'codex-rs/state/goals_migrations/*.sql' \
+            'codex-rs/state/memory_migrations/*.sql' \
+            'codex-rs/state/queue_migrations/*.sql' \
+            'codex-rs/state/thread_history_migrations/*.sql' || true)
+          if [ -n "$crlf_files" ]; then
+            echo "::error::migration SQL sources contain CR bytes (would flip the sqlx::migrate! embedded checksum family):"
+            printf '%s\n' "$crlf_files" | sed 's/^/::error::  /'
+            exit 1
+          fi
+          file_count=$(git ls-files -- 'codex-rs/state/*_migrations/*.sql' | wc -l)
+          echo "migration SQL EOL scan: $file_count migration sources, all LF-only"
+
       # The fork seam suites: -p keeps the BUILD surface at the seam crates
       # (without it nextest builds every workspace test binary, pulling
       # rusty_v8 whose linux-gnu ptrcomp prebuilt 404s — run 33964746502);
@@ -108,9 +136,12 @@ jobs:
       # lesson); ticket 19 r2 adds the chat-wire tool-adjacency regression
       # test (build_chat_messages_keeps_tool_results_adjacent_to_tool_calls,
       # codex-core lib via client.rs #[path]) so the NIM-500 fix keeps a guard.
+      # Ticket 25 adds -p codex-state for the EOL checksum self-heal unit
+      # tests (repair_eol_checksum_family_*) — they validate the startup
+      # heal that rewrites line-ending-flipped _sqlx_migrations checksums.
       - name: Test fork seam suites
         shell: bash
-        run: just test -p codex-api -p codex-core -E 'package(codex-api) or test(chat_wire) or test(anthropic_wire) or test(cross_wire) or test(reasoning_effort) or test(build_chat_messages_keeps_tool_results_adjacent_to_tool_calls)'
+        run: just test -p codex-api -p codex-core -p codex-state -E 'package(codex-api) or test(chat_wire) or test(anthropic_wire) or test(cross_wire) or test(reasoning_effort) or test(build_chat_messages_keeps_tool_results_adjacent_to_tool_calls) or test(repair_eol_checksum_family)'
       # Sync watchdog (ticket 12): the advisory drift probe turned into a
       # gating measure + ff-only trial. Semantics per ADR-0006 decision 3①
       # (merge-base 口径; tag 口径 banned — upstream squash-merge makes tags
