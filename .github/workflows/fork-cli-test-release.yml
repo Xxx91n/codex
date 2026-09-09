@@ -44,7 +44,7 @@ jobs:
               exit 1
             fi
             IFS=,
-            echo "build=[${parts[*]}]" >> "$GITHUB_OUTPUT"
+            echo "build={\"include\":[${parts[*]}]}" >> "$GITHUB_OUTPUT"
           fi
 
   build:
@@ -91,6 +91,9 @@ jobs:
   check:
     # fmt + clippy + fork-scoped tests on the same three platforms as `build`.
     # Independent of the release path and never touches its artifacts.
+    # Skipped on single-platform test builds (fork-health carries the
+    # test evidence there); runs the full 3-OS matrix only on `all`.
+    if: inputs.platforms == 'all'
     name: check (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -128,6 +131,9 @@ jobs:
         run: cargo test --locked --lib -p codex-api -p codex-model-provider-info
 
   release:
+    # Publish only the full 3-OS run; single-platform test builds deliver via
+    # build artifacts (the rolling tag race bit run 34317047952 already).
+    if: inputs.platforms == 'all'
     needs: build
     runs-on: ubuntu-latest
     steps:
