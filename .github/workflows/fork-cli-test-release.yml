@@ -33,7 +33,7 @@ jobs:
           M='{"os":"macos-latest","platform":"macos","target":"aarch64-apple-darwin","asset":"codex-mac-aarch64-apple-darwin.tar.gz","bin":"codex"}'
           p=",${PLATFORMS},"
           if [[ -z "$PLATFORMS" || "$PLATFORMS" == "all" ]]; then
-            echo "build=[$W,$U,$M]" >> "$GITHUB_OUTPUT"
+            echo "build={\"include\":[$W,$U,$M]}" >> "$GITHUB_OUTPUT"
           else
             parts=()
             [[ "$p" == *",windows,"* ]] && parts+=("$W")
