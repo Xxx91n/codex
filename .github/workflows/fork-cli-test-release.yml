@@ -30,7 +30,7 @@ jobs:
           if [[ -z "$PLATFORMS" || "$PLATFORMS" == "all" ]]; then
             echo "build=$ALL" >> "$GITHUB_OUTPUT"
           else
-            echo "build=$(echo "$ALL" | jq -c --arg p ",${PLATFORMS}," 'map(select(( $p | contains("," + .platform + ",")) ))')" >> "$GITHUB_OUTPUT"
+            echo "build=$(echo "$ALL" | jq -c --arg p ",${PLATFORMS}," 'map(.platform as $x | select($p | contains("," + $x + ","))))')" >> "$GITHUB_OUTPUT"
           fi
 
   build:
