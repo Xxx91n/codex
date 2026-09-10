@@ -13,6 +13,7 @@ use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
+use codex_model_provider_info::create_oss_provider;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::WebSearchMode;
@@ -3291,16 +3292,12 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
 }
 
 fn use_chat_wire_provider(turn: &mut TurnContext) {
-    let provider_info =
-        ModelProviderInfo::create_oss_provider(/*default_provider_port*/ 0, WireApi::Chat);
+    let provider_info = create_oss_provider(/*default_provider_port*/ 0, WireApi::Chat);
     turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
 }
 
 fn use_anthropic_wire_provider(turn: &mut TurnContext) {
-    let provider_info = ModelProviderInfo::create_oss_provider(
-        /*default_provider_port*/ 0,
-        WireApi::Anthropic,
-    );
+    let provider_info = create_oss_provider(/*default_provider_port*/ 0, WireApi::Anthropic);
     turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
 }
 
