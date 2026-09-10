@@ -610,7 +610,7 @@ fn chat_completions_omits_freeform_tools_inside_namespaces() {
             format: FreeformToolFormat {
                 r#type: "grammar".to_string(),
                 syntax: "lark".to_string(),
-                definition: "start: /.+/",
+                definition: "start: /.+/".to_string(),
             },
         })],
     })];
