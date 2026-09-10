@@ -483,20 +483,16 @@ fn parse_alter(lowered: &str, start: usize, effects: &mut Vec<Effect>) {
 /// name plus the offset just past it.
 fn parse_name(lowered: &str, start: usize) -> Option<(String, usize)> {
     let mut i = skip_ws(lowered, start);
-    if let Some((word, end)) = read_word(lowered, i) {
-        if word == "if" {
-            i = skip_ws(lowered, end);
-            if let Some((maybe_not, end_not)) = read_word(lowered, i) {
-                if maybe_not == "not" {
-                    i = skip_ws(lowered, end_not);
-                }
-            }
-            let (exists, exists_end) = read_word(lowered, i)?;
-            if exists != "exists" {
-                return None;
-            }
-            i = skip_ws(lowered, exists_end);
+    if let Some((word, end)) = read_word(lowered, i) && word == "if" {
+        i = skip_ws(lowered, end);
+        if let Some((maybe_not, end_not)) = read_word(lowered, i) && maybe_not == "not" {
+            i = skip_ws(lowered, end_not);
         }
+        let (exists, exists_end) = read_word(lowered, i)?;
+        if exists != "exists" {
+            return None;
+        }
+        i = skip_ws(lowered, exists_end);
     }
     let (name, end) = read_word(lowered, i)?;
     Some((name.to_string(), end))
