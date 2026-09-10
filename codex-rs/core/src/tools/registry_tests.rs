@@ -744,3 +744,79 @@ fn test_invocation(
         },
     }
 }
+
+#[test]
+fn resolve_qualified_fallback_matches_known_namespaces_longest_prefix() {
+    let registry = ToolRegistry::from_tools([
+        Arc::new(TestHandler {
+            tool_name: ToolName::namespaced("mcp__1mcp", "tool_invoke"),
+        }) as Arc<dyn CoreToolRuntime>,
+        Arc::new(TestHandler {
+            tool_name: ToolName::namespaced("mcp__echo__", "query_with_delay"),
+        }) as Arc<dyn CoreToolRuntime>,
+        Arc::new(TestHandler {
+            tool_name: ToolName::plain("load_workspace_dependencies"),
+        }) as Arc<dyn CoreToolRuntime>,
+    ]);
+
+    // Multi-`__` qualified names resolve against the longest known
+    // namespace, never a naive split at the first delimiter run.
+    assert_eq!(
+        registry.resolve_qualified_fallback(&ToolName::plain("mcp__1mcp__tool_invoke")),
+        Some(ToolName::namespaced("mcp__1mcp", "tool_invoke"))
+    );
+
+    // Namespace identities that already end with the delimiter still match.
+    assert_eq!(
+        registry.resolve_qualified_fallback(&ToolName::plain("mcp__echo__query_with_delay")),
+        Some(ToolName::namespaced("mcp__echo__", "query_with_delay"))
+    );
+
+    // Default-namespace and plain tools resolve through exact lookup only.
+    assert_eq!(
+        registry.resolve_qualified_fallback(&ToolName::plain("load_workspace_dependencies")),
+        None
+    );
+
+    // Unknown prefixes never produce a hit.
+    assert_eq!(
+        registry.resolve_qualified_fallback(&ToolName::plain("mcp__missing__tool")),
+        None
+    );
+}
+#[tokio::test]
+async fn dispatch_resolves_chat_wire_qualified_names_to_namespaced_handlers() -> anyhow::Result<()>
+{
+    let (session, turn) = crate::session::tests::make_session_and_context().await;
+    // Chat wire round-trip (ticket 26 Fix B inbound): the tool was advertised
+    // flat as `mcp__1mcp__tool_invoke` and the model calls it back with
+    // `namespace: None`; dispatch must reach the namespaced handler instead
+    // of reporting `unsupported call`.
+    let namespaced = ToolName::namespaced("mcp__1mcp", "tool_invoke");
+    let registry = ToolRegistry::from_tools([Arc::new(TestHandler {
+        tool_name: namespaced.clone(),
+    }) as Arc<dyn CoreToolRuntime>]);
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let result = registry
+        .dispatch_any_with_terminal_outcome(
+            test_invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "qualified-call",
+                ToolName::plain("mcp__1mcp__tool_invoke"),
+            ),
+            /*terminal_outcome_reached*/ None,
+        )
+        .await?;
+    let response = result.into_response();
+    match response {
+        ResponseInputItem::FunctionCallOutput { call_id, output } => {
+            assert_eq!(call_id, "qualified-call");
+        }
+        other => panic!("expected function call output, got {other:?}"),
+    }
+
+    Ok(())
+}

@@ -12,6 +12,7 @@ use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::WireApi;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::WebSearchMode;
@@ -3287,4 +3288,86 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
     .await;
     bedrock_with_standalone_web_search.assert_visible_contains(&["web_search"]);
     bedrock_with_standalone_web_search.assert_visible_lacks(&["web"]);
+}
+
+fn use_chat_wire_provider(turn: &mut TurnContext) {
+    let provider_info =
+        ModelProviderInfo::create_oss_provider(/*default_provider_port*/ 0, WireApi::Chat);
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+}
+
+fn use_anthropic_wire_provider(turn: &mut TurnContext) {
+    let provider_info = ModelProviderInfo::create_oss_provider(
+        /*default_provider_port*/ 0,
+        WireApi::Anthropic,
+    );
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+}
+
+#[tokio::test]
+async fn search_tool_enabled_requires_responses_wire() {
+    let (_session, mut turn) = make_session_and_context().await;
+    update_turn_settings_for_test(&mut turn, |settings| {
+        Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
+    });
+    let model_info = turn.model_info().clone();
+
+    // Responses wire (default test provider): availability still follows the
+    // model capability and provider namespace support.
+    assert!(crate::tools::spec_plan::search_tool_enabled(
+        &turn,
+        &model_info
+    ));
+
+    // Chat wire: deferred loading has no protocol surface there.
+    use_chat_wire_provider(&mut turn);
+    assert!(!crate::tools::spec_plan::search_tool_enabled(
+        &turn,
+        &model_info
+    ));
+
+    // Anthropic wire: same degradation.
+    use_anthropic_wire_provider(&mut turn);
+    assert!(!crate::tools::spec_plan::search_tool_enabled(
+        &turn,
+        &model_info
+    ));
+}
+
+#[tokio::test]
+async fn chat_wire_downgrades_deferred_mcp_plan_to_direct_without_tool_search() {
+    let deferred_mcp = || ToolPlanInputs {
+        tool_runtimes: vec![mcp_runtime(
+            "searchable",
+            "mcp__searchable",
+            "lookup",
+            ToolExposure::Deferred,
+        )],
+        ..ToolPlanInputs::default()
+    };
+    let enable_search = |turn: &mut TurnContext| {
+        update_turn_settings_for_test(turn, |settings| {
+            Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
+        });
+    };
+
+    // Chat wire: model advertises search support, but the wire gate must keep
+    // tool_search off the tool list (Responses-only tool type would be dropped
+    // by the chat serializer, leaving deferred tools permanently unloadable).
+    let chat = probe_with(
+        |turn| {
+            enable_search(turn);
+            use_chat_wire_provider(turn);
+        },
+        deferred_mcp(),
+    )
+    .await;
+    chat.assert_visible_lacks(&["tool_search"]);
+    chat.assert_registered_contains(&[
+        &ToolName::namespaced("mcp__searchable", "lookup").to_string()
+    ]);
+
+    // Responses wire: behavior unchanged, tool_search still advertised.
+    let responses = probe_with(enable_search, deferred_mcp()).await;
+    responses.assert_visible_contains(&["tool_search"]);
 }

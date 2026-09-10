@@ -550,3 +550,109 @@ fn anthropic_omits_freeform_tool() {
     let anthropic_json = create_tools_json_for_anthropic(&tools).unwrap();
     assert!(anthropic_json.is_empty());
 }
+
+#[test]
+fn chat_completions_qualifies_non_default_namespace_tool_names() {
+    // Chat Completions has no namespace surface: non-default namespace tools
+    // must advertise fully qualified `<namespace>__<name>` names so calls
+    // round-trip back to the namespaced handler (ticket 26 Fix B).
+    let tools = vec![ToolSpec::Namespace(ResponsesApiNamespace {
+        name: "mcp__demo".to_string(),
+        description: "Demo tools".to_string(),
+        tools: vec![ResponsesApiNamespaceTool::Function(
+            responses_lite_function("lookup_order"),
+        )],
+    })];
+
+    let chat_json = create_tools_json_for_chat_completions(&tools).unwrap();
+    assert_eq!(
+        chat_json,
+        vec![json!({
+            "type": "function",
+            "function": {
+                "name": "mcp__demo__lookup_order",
+                "description": "lookup_order tool",
+                "strict": false,
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+        })]
+    );
+}
+
+#[test]
+fn chat_completions_keeps_default_namespace_tool_names_bare() {
+    // The default namespace merges with top-level functions on the Responses
+    // wire (see responses_lite), so chat must keep bare names for it.
+    let tools = vec![ToolSpec::Namespace(ResponsesApiNamespace {
+        name: "functions".to_string(),
+        description: "Default tools".to_string(),
+        tools: vec![ResponsesApiNamespaceTool::Function(
+            responses_lite_function("lookup_order"),
+        )],
+    })];
+
+    let chat_json = create_tools_json_for_chat_completions(&tools).unwrap();
+    assert_eq!(chat_json[0]["function"]["name"], "lookup_order");
+}
+
+#[test]
+fn chat_completions_omits_freeform_tools_inside_namespaces() {
+    let tools = vec![ToolSpec::Namespace(ResponsesApiNamespace {
+        name: "mcp__demo".to_string(),
+        description: "Demo tools".to_string(),
+        tools: vec![ResponsesApiNamespaceTool::Custom(FreeformTool {
+            name: "apply_patch".to_string(),
+            description: "Apply a patch".to_string(),
+            defer_loading: None,
+            format: FreeformToolFormat {
+                r#type: "grammar".to_string(),
+                syntax: "lark".to_string(),
+                definition: "start: /.+/",
+            },
+        })],
+    })];
+
+    let chat_json = create_tools_json_for_chat_completions(&tools).unwrap();
+    assert!(chat_json.is_empty());
+}
+
+#[test]
+fn anthropic_qualifies_non_default_namespace_tool_names() {
+    let tools = vec![ToolSpec::Namespace(ResponsesApiNamespace {
+        name: "mcp__demo".to_string(),
+        description: "Demo tools".to_string(),
+        tools: vec![ResponsesApiNamespaceTool::Function(
+            responses_lite_function("lookup_order"),
+        )],
+    })];
+
+    let anthropic_json = create_tools_json_for_anthropic(&tools).unwrap();
+    assert_eq!(
+        anthropic_json,
+        vec![json!({
+            "name": "mcp__demo__lookup_order",
+            "description": "lookup_order tool",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+            },
+        })]
+    );
+}
+
+#[test]
+fn anthropic_keeps_default_namespace_tool_names_bare() {
+    let tools = vec![ToolSpec::Namespace(ResponsesApiNamespace {
+        name: "functions".to_string(),
+        description: "Default tools".to_string(),
+        tools: vec![ResponsesApiNamespaceTool::Function(
+            responses_lite_function("lookup_order"),
+        )],
+    })];
+
+    let anthropic_json = create_tools_json_for_anthropic(&tools).unwrap();
+    assert_eq!(anthropic_json[0]["name"], "lookup_order");
+}

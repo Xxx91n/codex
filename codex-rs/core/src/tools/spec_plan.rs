@@ -64,6 +64,7 @@ use codex_extension_api::ExtensionData;
 use codex_features::Feature;
 use codex_features::SleepToolMode;
 use codex_login::AuthManager;
+use codex_model_provider_info::WireApi;
 use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
 use codex_protocol::account::PlanType;
 use codex_protocol::config_types::WebSearchMode;
@@ -633,7 +634,12 @@ fn hosted_model_tool_specs(
 }
 
 pub(crate) fn search_tool_enabled(turn_context: &TurnContext, model_info: &ModelInfo) -> bool {
-    model_info.supports_search_tool && namespace_tools_enabled(turn_context)
+    // Deferred tool loading (tool_search) is only available on the Responses wire.
+    // On Chat / Anthropic wires, MCP tools must be exposed as Direct flat-listed
+    // functions because the wire has no lazy-loading protocol surface.
+    turn_context.provider.info().wire_api == WireApi::Responses
+        && model_info.supports_search_tool
+        && namespace_tools_enabled(turn_context)
 }
 
 pub(crate) fn tool_suggest_enabled(turn_context: &TurnContext) -> bool {

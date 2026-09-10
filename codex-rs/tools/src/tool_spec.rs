@@ -169,11 +169,22 @@ pub fn create_tools_json_for_chat_completions(
             }
             ToolSpec::Namespace(namespace) => {
                 // Chat Completions has no namespace concept: expand the namespace
-                // into individually flattened function tools.
+                // into individually flattened function tools. Non-default namespaces
+                // advertise fully qualified `<namespace>__<name>` tool names so the
+                // model's calls round-trip back to the namespaced handler; the
+                // default namespace keeps bare names (matches responses_lite merge).
+                let qualified = namespace.name != DEFAULT_FUNCTION_NAMESPACE;
                 for tool in &namespace.tools {
                     match tool {
                         crate::ResponsesApiNamespaceTool::Function(function) => {
-                            tools_json.push(chat_completions_function_tool_json(function));
+                            let name = if qualified {
+                                format!("{}__{}", namespace.name, function.name)
+                            } else {
+                                function.name.clone()
+                            };
+                            tools_json.push(chat_completions_function_tool_json_with_name(
+                                &name, function,
+                            ));
                         }
                         crate::ResponsesApiNamespaceTool::Custom(freeform) => {
                             warn!(
@@ -196,10 +207,17 @@ pub fn create_tools_json_for_chat_completions(
 }
 
 fn chat_completions_function_tool_json(function: &ResponsesApiTool) -> serde_json::Value {
+    chat_completions_function_tool_json_with_name(&function.name, function)
+}
+
+fn chat_completions_function_tool_json_with_name(
+    name: &str,
+    function: &ResponsesApiTool,
+) -> serde_json::Value {
     serde_json::json!({
         "type": "function",
         "function": {
-            "name": function.name,
+            "name": name,
             "description": function.description,
             "parameters": function.parameters,
             "strict": function.strict,
@@ -279,11 +297,20 @@ pub fn create_tools_json_for_anthropic(
             }
             ToolSpec::Namespace(namespace) => {
                 // The Messages API has no namespace concept: expand the
-                // namespace into individually flattened tools.
+                // namespace into individually flattened tools. Non-default
+                // namespaces advertise fully qualified `<namespace>__<name>`
+                // tool names so the model's calls round-trip back to the
+                // namespaced handler; the default namespace keeps bare names.
+                let qualified = namespace.name != DEFAULT_FUNCTION_NAMESPACE;
                 for tool in &namespace.tools {
                     match tool {
                         crate::ResponsesApiNamespaceTool::Function(function) => {
-                            tools_json.push(anthropic_tool_json(function));
+                            let name = if qualified {
+                                format!("{}__{}", namespace.name, function.name)
+                            } else {
+                                function.name.clone()
+                            };
+                            tools_json.push(anthropic_tool_json_with_name(&name, function));
                         }
                         crate::ResponsesApiNamespaceTool::Custom(freeform) => {
                             warn!(
@@ -306,8 +333,12 @@ pub fn create_tools_json_for_anthropic(
 }
 
 fn anthropic_tool_json(function: &ResponsesApiTool) -> serde_json::Value {
+    anthropic_tool_json_with_name(&function.name, function)
+}
+
+fn anthropic_tool_json_with_name(name: &str, function: &ResponsesApiTool) -> serde_json::Value {
     serde_json::json!({
-        "name": function.name,
+        "name": name,
         "description": function.description,
         "input_schema": function.parameters,
     })
