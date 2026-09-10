@@ -61,9 +61,10 @@ fn migrator_through(migrator: &Migrator, max_version: i64) -> Migrator {
     )
 }
 
-fn stored_history(pool: &sqlx::SqlitePool) -> Vec<(i64, Vec<u8>)> {
+async fn stored_history(pool: &sqlx::SqlitePool) -> Vec<(i64, Vec<u8>)> {
     sqlx::query("SELECT version, checksum FROM _sqlx_migrations ORDER BY version")
         .fetch_all(pool)
+        .await
         .expect("migration history should load")
         .into_iter()
         .map(|row| {
@@ -125,7 +126,7 @@ async fn repair_eol_checksum_family_heals_eol_only_checksums() {
         .await
         .expect("EOL-only checksum flip should be healed");
 
-    assert_eq!(stored_history(&pool), embedded_history(&STATE_MIGRATOR));
+    assert_eq!(stored_history(&pool).await, embedded_history(&STATE_MIGRATOR));
 
     // The heal is only complete when sqlx itself accepts the database again.
     STATE_MIGRATOR
@@ -340,7 +341,7 @@ async fn repair_eol_checksum_family_is_noop_without_mismatches() {
         .await
         .expect("a matching history should not error the heal");
 
-    assert_eq!(stored_history(&pool), embedded_history(&STATE_MIGRATOR));
+    assert_eq!(stored_history(&pool).await, embedded_history(&STATE_MIGRATOR));
 
     pool.close().await;
 }
