@@ -99,7 +99,7 @@ codex -p gw-msg  -m claude-…             "…"   # thinking chain streams nati
 
 ## 本 fork 为何存在
 
-2026-08-04，OpenAI 把 Responses-only 模型从 `/v1/chat/completions` 端点撤下。LiteLLM Proxy 的 bridge 路由里残留一条通配（wildcard）路由，仍把这些模型指向已移除的端点，于是约 4 小时内经它转发的每个请求都返回 404——热修复上线前累计 1,700+ 失败请求（LiteLLM issue #35879）。模型没有错，客户端也没有错：故障发生在一个由第三方运维、客户端被动依赖的*服务端协议桥（protocol bridge）*里。
+Codex 模型家族自发布起就被官方文档标注为 Responses-only，例外在数波退役中清零：`codex-mini-latest` 于 2026-02-12 从 API 移除，其余 Codex API 模型（`gpt-5-codex` 至 `gpt-5.2-codex`）于 2026-07-23 关停，2026-08-04 最后一个被过渡期接受在 `/v1/chat/completions` 端点的 `gpt-5.3-codex` 也被从该端点撤下。LiteLLM Proxy 的 bridge 路由里残留一条通配（wildcard）路由，仍把该模型指向已移除的端点，于是约 4 小时内经它转发的每个请求都返回 404——热修复上线前累计 1,700+ 失败请求（LiteLLM issue #35879；02-12 与 07-23 两波见 OpenAI Deprecations 页）。模型没有错，客户端也没有错：故障发生在一个由第三方运维、客户端被动依赖的*服务端协议桥（protocol bridge）*里。
 
 一个 chat-wire 客户端只要拒绝把协议翻译外包给别人的路由器，就能绕开这一整类故障。本 fork 把全部三条 wire——Responses、Chat Completions、Anthropic Messages——原生内置进客户端本身，由一个本地配置键（`wire_api`）选定。没有可断的桥、没有会错路的通配、没有要等上游的热修：翻译就活在你运行的二进制里，由 fork 接缝 CI 端到端看护。
 
@@ -200,6 +200,19 @@ brew install --cask codex
 运行 `codex` 并选择 **Sign in with ChatGPT**。我们推荐登录 ChatGPT 账号，把 Codex 作为你 Plus、Pro、Business、Edu 或 Enterprise 订阅的一部分来使用。[了解你的 ChatGPT 订阅包含哪些权益](https://help.openai.com/en/articles/11369540-codex-in-chatgpt)。
 
 你也可以用 API key 使用 Codex，但这需要[额外配置](https://developers.openai.com/codex/auth#sign-in-with-an-api-key)。
+
+### 让 Codex Desktop app 使用本 fork 的内核（Windows）
+
+Codex Desktop app 支持通过 `CODEX_CLI_PATH` 用户环境变量指定不同的 CLI 引擎——
+这就是把 app 内核换成 fork 构建产物的官方机制，无需改动 app 安装：
+
+```powershell
+setx CODEX_CLI_PATH "D:\path\to\codex.exe"
+```
+
+设置后需完整重启 app（变量在引擎拉起时读取）。回滚：删除该变量（`reg delete
+"HKCU\Environment" /v CODEX_CLI_PATH /f`，或系统属性 → 环境变量）并再次重启 app。
+本 fork 的发行包正是为这条工作流构建的——见 Releases 页。
 
 ## 文档
 

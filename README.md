@@ -99,7 +99,7 @@ Behaviour notes:
 
 ## Why this fork exists
 
-On 2026-08-04 OpenAI pulled its Responses-only models from the `/v1/chat/completions` endpoint. LiteLLM Proxy’s bridge router kept a wildcard route that still mapped those models to the removed endpoint, and for roughly 4 hours every request through it came back 404 — 1,700+ failed requests before the hotfix (LiteLLM issue #35879). Nothing was wrong with the models or the clients: the outage lived inside a *server-side protocol bridge* that a third party operated and that clients passively depended on.
+The Codex model family was documented as Responses-only from the start, and OpenAI retired the exceptions in waves: `codex-mini-latest` left the API on 2026-02-12, the remaining Codex API models (`gpt-5-codex` through `gpt-5.2-codex`) were shut down on 2026-07-23, and on 2026-08-04 `gpt-5.3-codex` — the last model OpenAI had still transitionally accepted on the `/v1/chat/completions` endpoint — was pulled from it too. LiteLLM Proxy’s bridge router kept a wildcard route that still mapped that model to the removed endpoint, and for roughly 4 hours every request through it came back 404 — 1,700+ failed requests before the hotfix (LiteLLM issue #35879; OpenAI Deprecations page for the 02-12 and 07-23 waves). Nothing was wrong with the models or the clients: the outage lived inside a *server-side protocol bridge* that a third party operated and that clients passively depended on.
 
 A chat-wire client can avoid that entire failure class by refusing to delegate protocol translation to somebody else’s router. This fork builds all three wires — Responses, Chat Completions, Anthropic Messages — natively into the client itself, selected by one local config key (`wire_api`). There is no bridge to break, no wildcard to misroute, and no upstream hotfix to wait for: the translation lives in the binary you run, guarded end-to-end by the fork-seam CI.
 
@@ -200,6 +200,21 @@ Each archive contains a single entry with the platform baked into the name (e.g.
 Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Business, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
 
 You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
+
+### Pointing the Codex Desktop app at this fork’s binary (Windows)
+
+The Codex Desktop app can run a different CLI engine through the `CODEX_CLI_PATH`
+user environment variable — this is how you swap the app’s kernel for a fork build
+without touching the app install:
+
+```powershell
+setx CODEX_CLI_PATH "D:\path\to\codex.exe"
+```
+
+Fully restart the app afterwards (the variable is read at engine spawn time).
+To roll back, clear the variable (`reg delete "HKCU\Environment" /v CODEX_CLI_PATH /f`
+or System Properties → Environment Variables) and restart the app again. This fork’s
+release packages are built for exactly this workflow — see the Releases page.
 
 ## Docs
 
