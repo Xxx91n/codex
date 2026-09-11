@@ -159,6 +159,7 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
 - **PONYTAIL**：刻意取舍台账（ADR-0002 记 max_tokens）；禁当普通 TODO。
 - **翻译有损面**：thinking、cache_control、store/previous_response_id、compact 降级面。
 - **thoughtSignature**：Gemini 术语，仅存于 ADR-0003 重开预案；禁用于 anthropic signature。
+- **EOL checksum 家族**：_sqlx_migrations 校验和字节稳定靠六迁移目录 LF 锁 + 启动自愈
 
 ## 维护
 
