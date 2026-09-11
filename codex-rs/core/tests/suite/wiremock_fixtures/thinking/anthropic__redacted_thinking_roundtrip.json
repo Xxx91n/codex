@@ -1,0 +1,85 @@
+{
+  "meta": {
+    "semantic": "thinking",
+    "wire": "anthropic",
+    "scenario": "redacted_thinking_roundtrip",
+    "call_id": "toolu_red_1",
+    "verified_at": "2026-09-11",
+    "source": "codex-api/src/sse/messages.rs + core/src/client/wire/anthropic.rs (ticket 27 def-①)",
+    "signature": "sig-redacted-fixture-1",
+    "payload": "enc-redacted-fixture-1"
+  },
+  "requests": [
+    {
+      "phase": "turn-1",
+      "expect": {
+        "message": "redacted block (data) + signature"
+      }
+    },
+    {
+      "phase": "turn-2",
+      "expect": {
+        "assistant_blocks": [
+          {
+            "type": "redacted_thinking",
+            "data": "enc-redacted-fixture-1",
+            "signature": "sig-redacted-fixture-1"
+          }
+        ]
+      }
+    }
+  ],
+  "stream_body_events": [
+    {
+      "type": "message_start",
+      "message": {
+        "id": "msg_red_fix",
+        "model": "claude-mock-1",
+        "usage": {
+          "input_tokens": 3,
+          "output_tokens": 0
+        }
+      }
+    },
+    {
+      "type": "content_block_start",
+      "index": 0,
+      "content_block": {
+        "type": "redacted_thinking",
+        "data": "enc-redacted-fixture-1"
+      }
+    },
+    {
+      "type": "content_block_delta",
+      "index": 0,
+      "delta": {
+        "type": "signature_delta",
+        "signature": "sig-redacted-fixture-1"
+      }
+    },
+    {
+      "type": "content_block_stop",
+      "index": 0
+    },
+    {
+      "type": "message_delta",
+      "delta": {
+        "stop_reason": "end_turn"
+      },
+      "usage": {
+        "output_tokens": 1
+      }
+    },
+    {
+      "type": "message_stop"
+    }
+  ],
+  "replay_constraints": [
+    "redacted block must round-trip as {type:redacted_thinking, data, signature} verbatim",
+    "no thinking/text folding (type whitelist forbidden)"
+  ],
+  "expect_ir": [
+    "Reasoning{encrypted_content:enc-redacted-fixture-1, content:Some([Text(\"sig-redacted-fixture-1\")])}",
+    "Completed{usage_metadata:None}"
+  ]
+}

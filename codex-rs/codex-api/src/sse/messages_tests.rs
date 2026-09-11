@@ -42,6 +42,7 @@ async fn finish_messages_stream_emits_tool_message_and_completed() {
         "done",
         &tool_uses,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeMap::new(),
         "msg_1".to_string(),
         None,
         Some("end_turn"),
@@ -111,6 +112,7 @@ async fn finish_messages_stream_serializes_no_argument_tool_use_as_empty_object(
         "",
         &tool_uses,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeMap::new(),
         "msg_2".to_string(),
         None,
         None,
@@ -145,6 +147,7 @@ async fn finish_messages_stream_fails_loudly_on_truncated_tool_input() {
         &tx,
         "",
         &tool_uses,
+        &std::collections::BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         "msg_3".to_string(),
         None,
@@ -221,6 +224,7 @@ async fn finish_messages_stream_flushes_thinking_block_as_done_without_added() {
         "",
         &tool_uses,
         &thinking,
+        &std::collections::BTreeMap::new(),
         "msg_t".to_string(),
         None,
         Some("end_turn"),
@@ -445,6 +449,7 @@ async fn messages_stop_reason_tool_use_synthesizes_completed_after_function_call
         "",
         &tool_uses,
         &BTreeMap::new(),
+        &std::collections::BTreeMap::new(),
         "msg_finish".to_string(),
         Some(TokenUsage {
             input_tokens: 7,
@@ -494,4 +499,142 @@ async fn messages_stop_reason_tool_use_synthesizes_completed_after_function_call
         rx.try_recv().is_err(),
         "tool_use turn must emit exactly one FunctionCall then one Completed"
     );
+}
+
+/// Defect ② (ticket 27 / A-004): MessageUsage must parse Anthropic's cache
+/// fields into TokenUsage — cache_read_input_tokens -> cached_input_tokens,
+/// cache_creation_input_tokens -> cache_write_input_tokens, and the total
+/// aligned to the sum of all three input-side components plus output (the
+/// cross-wire totals the way openai prompt_tokens already includes cache).
+#[test]
+fn message_usage_parses_cache_input_tokens_into_token_usage() {
+    let prior = 10;
+    let usage = MessageUsage {
+        input_tokens: 50,
+        output_tokens: 7,
+        cache_read_input_tokens: 30,
+        cache_creation_input_tokens: 20,
+    };
+    let token_usage = usage.into_token_usage(prior);
+    assert_eq!(token_usage.input_tokens, 50);
+    assert_eq!(token_usage.cached_input_tokens, 30);
+    assert_eq!(token_usage.cache_write_input_tokens, 20);
+    assert_eq!(token_usage.output_tokens, 7);
+    assert_eq!(token_usage.total_tokens, 50 + 30 + 20 + 7);
+    let usage_missing_input = MessageUsage {
+        input_tokens: 0, output_tokens: 2,
+        cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+    };
+    let fallback = usage_missing_input.into_token_usage(123);
+    assert_eq!(fallback.input_tokens, 123);
+    assert_eq!(fallback.total_tokens, 123 + 2);
+}
+
+/// Defect ② deserialization: cache fields are optional (serde default), so
+/// a usage frame that omits them still parses and maps to zero cache.
+#[test]
+fn message_usage_deserializes_without_cache_fields() {
+    let usage: MessageUsage = serde_json::from_str(
+        r#"{"input_tokens": 4, "output_tokens": 1}"#,
+    ).expect("usage parses without cache fields");
+    assert_eq!(usage.cache_read_input_tokens, 0);
+    assert_eq!(usage.cache_creation_input_tokens, 0);
+}
+
+/// Defect ④ (ticket 27 / A-006): a plain-text turn whose terminal reason is
+/// max_tokens (no tool_use, no thinking, no redacted block) must surface as
+/// ContextWindowExceeded so core auto-compacts, instead of synthesizing a
+/// legal empty completion from a truncation.
+#[tokio::test]
+async fn plain_text_max_tokens_maps_to_context_window_exceeded() {
+    let mut body = String::new();
+    body.push_str(&format!("event: message_start\ndata: {}\n\n", serde_json::json!({
+        "type":"message_start",
+        "message":{"id":"msg_trunc_d","model":"claude-x","usage":{"input_tokens":5,"output_tokens":0}}
+    })));
+    body.push_str(&format!("event: content_block_delta\ndata: {}\n\n", serde_json::json!({
+        "type":"content_block_delta","index":0,
+        "delta":{"type":"text_delta","text":"partial"}
+    })));
+    body.push_str(&format!("event: message_delta\ndata: {}\n\n", serde_json::json!({
+        "type":"message_delta",
+        "delta":{"stop_reason":"max_tokens"},
+        "usage":{"output_tokens":3}
+    })));
+    body.push_str(&format!("event: message_stop\ndata: {}\n\n", serde_json::json!({"type":"message_stop"})));
+
+    let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent, ApiError>>(16);
+    let stream = ReaderStream::new(std::io::Cursor::new(body)).map_err(|err| TransportError::Network(err.to_string()));
+    tokio::spawn(super::process_messages_sse(Box::pin(stream), tx, std::time::Duration::from_secs(30), None));
+    let mut events = Vec::new();
+    while let Some(ev) = rx.recv().await { events.push(ev); }
+    assert!(events.iter().any(|ev| matches!(ev, Err(ApiError::ContextWindowExceeded))), "plain-text max_tokens must surface ContextWindowExceeded: {events:?}");
+    assert!(!events.iter().any(|ev| matches!(ev, Ok(ResponseEvent::Completed{..}))), "no fake Completed may be synthesized: {events:?}");
+}
+
+/// Defect ① (ticket 27 / A-002): a redacted_thinking block must be preserved
+/// and emitted as its IR form (encrypted payload + signature), never silently
+/// dropped by the unknown-type trace arm.
+#[tokio::test]
+async fn redacted_thinking_block_is_preserved_and_emitted() {
+    let mut body = String::new();
+    body.push_str(&format!("event: message_start\ndata: {}\n\n", serde_json::json!({
+        "type":"message_start",
+        "message":{"id":"msg_red","model":"claude-x","usage":{"input_tokens":3,"output_tokens":0}}
+    })));
+    body.push_str(&format!("event: content_block_start\ndata: {}\n\n", serde_json::json!({
+        "type":"content_block_start","index":0,
+        "content_block":{"type":"redacted_thinking","data":"enc-payload-red-1"}
+    })));
+    body.push_str(&format!("event: content_block_delta\ndata: {}\n\n", serde_json::json!({
+        "type":"content_block_delta","index":0,
+        "delta":{"type":"signature_delta","signature":"sig-red-1"}
+    })));
+    body.push_str(&format!("event: content_block_stop\ndata: {}\n\n", serde_json::json!({"type":"content_block_stop","index":0})));
+    body.push_str(&format!("event: message_delta\ndata: {}\n\n", serde_json::json!({
+        "type":"message_delta",
+        "delta":{"stop_reason":"end_turn"},
+        "usage":{"output_tokens":1}
+    })));
+    body.push_str(&format!("event: message_stop\ndata: {}\n\n", serde_json::json!({"type":"message_stop"})));
+
+    let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent, ApiError>>(16);
+    let stream = ReaderStream::new(std::io::Cursor::new(body)).map_err(|err| TransportError::Network(err.to_string()));
+    tokio::spawn(super::process_messages_sse(Box::pin(stream), tx, std::time::Duration::from_secs(30), None));
+    let mut events = Vec::new();
+    while let Some(ev) = rx.recv().await { events.push(ev); }
+
+    let reasoning = events.iter().find_map(|ev| match ev {
+        Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning { encrypted_content, content, .. })) => Some((encrypted_content.clone(), content.clone())),
+        _ => None,
+    });
+    let (encrypted, content) = reasoning.expect("redacted reasoning item must be emitted");
+    assert_eq!(encrypted.as_deref(), Some("enc-payload-red-1\0sig-red-1"));
+    // Redacted block carries no plaintext: content must be None, the
+    // opaque payload + signature combined in encrypted_content (see
+    // messages.rs comments for why this encoding survives
+    // `should_serialize_reasoning_content` and `event_mapping`).
+    assert!(content.is_none(), "redacted block must have content: None, got {content:?}");
+    assert!(events.iter().any(|ev| matches!(ev, Ok(ResponseEvent::Completed{..}))), "stream should complete after the preserved block: {events:?}");
+    assert!(!events.iter().any(|ev| matches!(ev, Ok(ResponseEvent::OutputItemDone(ResponseItem::Message{..})))), "redacted payload must not become a message: {events:?}");
+}
+
+/// Defect ① flush path: a redacted_thinking block that never reached
+/// content_block_stop still gets flushed at finish_messages_stream.
+#[tokio::test]
+async fn redacted_thinking_flushes_from_finish_without_added() {
+    let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent, ApiError>>(8);
+    let mut redacted: BTreeMap<usize, AggregatedRedactedThinking> = BTreeMap::new();
+    redacted.insert(0, AggregatedRedactedThinking { data: Some("enc-payload-red-2".to_string()), signature: Some("sig-red-2".to_string()) });
+    finish_messages_stream(&tx, "", &BTreeMap::new(), &BTreeMap::new(), &redacted, "msg_red2".to_string(), None, Some("max_tokens")).await;
+    let mut events = Vec::new();
+    drop(tx);
+    while let Some(ev) = rx.recv().await { events.push(ev); }
+    let reasoning = events.iter().find_map(|ev| match ev {
+        Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning { encrypted_content, content, .. })) => Some((encrypted_content.clone(), content.clone())),
+        _ => None,
+    });
+    let (encrypted, content) = reasoning.expect("flushed redacted item expected");
+    assert_eq!(encrypted.as_deref(), Some("enc-payload-red-2\0sig-red-2"));
+    assert!(content.is_none(), "redacted block must have content: None, got {content:?}");
 }

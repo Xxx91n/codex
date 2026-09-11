@@ -319,6 +319,35 @@ pub(crate) fn build_messages_messages(input: Vec<ResponseItem>) -> Vec<serde_jso
                     }));
                 }
             }
+            // Defect ① (ticket 27 / A-002): a redacted_thinking block
+            // round-trips through the IR as `content: None,
+            // encrypted_content: Some("data\0sig")` (fork-internal
+            // delimiter; the wire contract is unchanged: outbound
+            // splits to emit the native {type:redacted_thinking,
+            // data, signature} block). The `content: None` shape is
+            // the structural discriminator vs. signed thinking (which
+            // always carries `content: Some([ReasoningText{..}])` from
+            // the SSE), and survives `should_serialize_reasoning_content`
+            // (None is never skipped) and `event_mapping` (None surfaces
+            // as empty raw_content, so the opaque bytes never leak into
+            // the UI). This arm must come before the general signed-
+            // thinking arm below.
+            ResponseItem::Reasoning {
+                content: None,
+                encrypted_content: Some(combined),
+                ..
+            } if combined.contains('\0') =>
+            {
+                let (data, signature) = match combined.split_once('\0') {
+                    Some((d, s)) => (d.to_string(), s.to_string()),
+                    None => (combined.clone(), String::new()),
+                };
+                pending_assistant_blocks.push(json!({
+                    "type": "redacted_thinking",
+                    "data": data,
+                    "signature": signature,
+                }));
+            }
             ResponseItem::Reasoning {
                 content,
                 encrypted_content: Some(signature),

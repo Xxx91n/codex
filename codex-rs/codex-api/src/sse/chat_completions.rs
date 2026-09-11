@@ -83,8 +83,11 @@ struct ChatFunctionDelta {
 
 #[derive(Debug, Deserialize)]
 struct ChatUsage {
+    #[serde(default)]
     prompt_tokens: i64,
+    #[serde(default)]
     completion_tokens: i64,
+    #[serde(default)]
     total_tokens: i64,
     #[serde(default)]
     completion_tokens_details: Option<ChatCompletionTokensDetails>,

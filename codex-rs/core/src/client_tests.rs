@@ -1952,3 +1952,54 @@ fn build_chat_messages_keeps_tool_results_adjacent_to_tool_calls() {
         ]
     );
 }
+
+/// Defect ① outbound (ticket 27 / A-002): a `redacted_thinking` block
+/// must round-trip as its own wire block (data + signature), never as a
+/// thinking block (which would 400 on the server). The IR shape from
+/// the Messages SSE state machine is content: None + encrypted_content
+/// combining payload and signature as "data\0sig" (fork-internal
+/// delimiter); the dedicated arm reconstructs the
+/// redacted_thinking block before the general signed-thinking arm sees it.
+#[test]
+fn build_messages_messages_emits_redacted_thinking_block_verbatim() {
+    use codex_protocol::models::ResponseItem;
+    let input = vec![
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![codex_protocol::models::ContentItem::InputText { text: "ask".to_string() }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::Reasoning {
+            id: None,
+            summary: vec![],
+            // Fork-internal redacted_thinking IR encoding (ticket 27 def-①):
+            // payload+sig combined as "data\0sig" in encrypted_content,
+            // content is None (the structural discriminator vs. signed
+            // thinking, which always carries content: Some([ReasoningText])).
+            content: None,
+            encrypted_content: Some("data-r-out-1\0sig-r-out-1".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![codex_protocol::models::ContentItem::OutputText { text: "answer".to_string() }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+    let messages = super::build_messages_messages(input);
+    // The user message is preserved.
+    assert_eq!(messages[0]["role"], "user");
+    // The assistant turn opens with the redacted_thinking block (verbatim
+    // payload + signature), followed by the text block.
+    let assistant = messages.iter().find(|m| m["role"] == "assistant").expect("assistant turn");
+    let content = assistant["content"].as_array().expect("assistant content array");
+    assert_eq!(content[0]["type"], "redacted_thinking", "first block must be redacted_thinking, not thinking");
+    assert_eq!(content[0]["data"], "data-r-out-1", "encrypted payload must round-trip verbatim");
+    assert_eq!(content[0]["signature"], "sig-r-out-1", "signature must round-trip verbatim");
+    assert_eq!(content[1]["type"], "text");
+    assert_eq!(content[1]["text"], "answer");
+}

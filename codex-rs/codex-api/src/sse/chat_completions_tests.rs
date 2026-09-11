@@ -683,3 +683,54 @@ async fn chat_sse_stream_closed_before_done_marker_is_terminal_error_not_complet
         "no Completed may be synthesized for a truncated stream: {events:?}"
     );
 }
+
+/// Defect ③ (ticket 27 / A-005): ChatUsage's three required fields now
+/// carry #[serde(default)], so a usage frame missing one or more of them
+/// still deserializes (and therefore its enclosing chunk is no longer
+/// dropped, which previously corrupted entire turns from gateways that
+/// trim standard fields). The success path is unchanged because the
+/// defaults only fire when a key is absent.
+#[test]
+fn chat_usage_deserializes_with_missing_optional_fields() {
+    let usage: ChatUsage = serde_json::from_str(r#"{"prompt_tokens":7}"#)
+        .expect("usage parses with only prompt_tokens");
+    assert_eq!(usage.prompt_tokens, 7);
+    assert_eq!(usage.completion_tokens, 0);
+    assert_eq!(usage.total_tokens, 0);
+    let empty: ChatUsage = serde_json::from_str(r#"{}"#)
+        .expect("empty usage parses with all defaults");
+    assert_eq!(empty.prompt_tokens, 0);
+    assert_eq!(empty.completion_tokens, 0);
+    assert_eq!(empty.total_tokens, 0);
+    let full: ChatUsage = serde_json::from_str(
+        r#"{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7,"completion_tokens_details":{"reasoning_tokens":1}}"#,
+    ).expect("full usage parses");
+    assert_eq!(full.prompt_tokens, 3);
+    assert_eq!(full.completion_tokens, 4);
+    assert_eq!(full.total_tokens, 7);
+}
+
+/// Defect ③ end-to-end: a chat chunk whose usage omits standard fields
+/// no longer poisons the whole chunk (choices survive).
+#[tokio::test]
+async fn chat_chunk_with_partial_usage_still_emits_choices() {
+    let mut body = String::new();
+    body.push_str(&format!("data: {}\n\n", serde_json::json!({
+        "choices":[{"index":0,"delta":{"content":"hello"}}],
+        "usage":{"prompt_tokens":2}
+    })));
+    body.push_str(&format!("data: {}\n\n", serde_json::json!({"choices":[],"usage":{"prompt_tokens":2}})));
+    body.push_str("data: [DONE]\n\n");
+    let events = run_chat_sse(body).await;
+    let mut saw_text = false;
+    let mut saw_completed = false;
+    for ev in &events {
+        if let Ok(ResponseEvent::OutputTextDelta(t)) = ev { if t == "hello" { saw_text = true; } }
+        if let Ok(ResponseEvent::Completed { token_usage, .. }) = ev {
+            if let Some(u) = token_usage { assert_eq!(u.input_tokens, 2); }
+            saw_completed = true;
+        }
+    }
+    assert!(saw_text, "text delta from partial-usage chunk must survive: {events:?}");
+    assert!(saw_completed, "stream should complete: {events:?}");
+}
