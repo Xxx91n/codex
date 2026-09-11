@@ -131,6 +131,26 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
 
 ## 相关词汇
 
+### namespace 限定名回环（chat/anthropic wire）
+- 本仓用法：出站 tool_spec.rs 把非默认 namespace 的 Namespace 工具展开为全限定
+  `<namespace>__<name>` 函数名（默认 namespace 保裸名，对齐 responses_lite 合并语义）；
+  入站 FunctionCall（namespace 经 with_default_namespace 规整）精确 miss 时由
+  registry.rs resolve_qualified_fallback 按 registry 已知 namespace 集合最长前缀回解，
+  回解结果必须 contains_key 才采纳。三段配对契约（含 spec_plan wire 判据）见 ADR-0008。
+- 禁止用法：出站展开与入站回解两端单独改动（配对契约必须同改）；对调用名朴素 split
+  （mcp__1mcp__tool_invoke 多段 __）；回归测试用 ToolName::plain 伪造入站形状
+  （真实形状 = Some(DEFAULT_FUNCTION_NAMESPACE)，r5 教训）。
+- 源：ADR-0008；票 26（research/26 + reports/26 r1-r5d）。
+
+### tool_search wire 判据
+- 本仓用法：deferred 工具惰性加载仅 Responses wire 可用（search_tool_enabled =
+  wire_api == Responses 且 supports_search_tool 且 namespace_tools capability）；
+  chat/anthropic wire 上 MCP 工具强制 Direct 平铺暴露、不追加 tool_search 执行器
+  （chat completions wire 无原生惰性加载，行业共识）。
+- 禁止用法：在非 Responses wire 上期待 tool_search 出现；给 chat wire 加 Responses-only
+  spec 类型（ToolSearch/WebSearch/Freeform 在 chat 序列化面均弃用）。
+- 源：ADR-0008；票 26 research/26（atomcode 22 来源调研）。
+
 - **三条 wire**：Responses / Chat Completions（上游 2026-02 移除 PR #10157 后本 fork 恢复）/
   Anthropic Messages（本 fork 新增）。
 - **usage_metadata: None**：非 Responses wire 合成 Completed 必带 None（ADR-0002 Ruling 2）。
