@@ -458,7 +458,12 @@ impl ToolRegistry {
     /// this registry actually knows, longest prefix first, and only accept a
     /// candidate whose remainder resolves to a registered tool.
     fn resolve_qualified_fallback(&self, name: &ToolName) -> Option<ToolName> {
-        if name.namespace.is_some() {
+        // Chat wire ingests `FunctionCall { namespace: None }` through
+        // `build_tool_call`, which applies the default namespace — real
+        // misses therefore arrive as `Some(DEFAULT_FUNCTION_NAMESPACE)`, not
+        // `None`. Treat both shapes as "no explicit namespace"; an explicit
+        // non-default namespace that missed exact lookup stays unsupported.
+        if name.namespace.is_some_and(|namespace| namespace != DEFAULT_FUNCTION_NAMESPACE) {
             return None;
         }
         let mut namespaces = self

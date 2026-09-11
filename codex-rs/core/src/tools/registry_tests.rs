@@ -778,6 +778,18 @@ fn resolve_qualified_fallback_matches_known_namespaces_longest_prefix() {
         None
     );
 
+    // Real chat-wire shape (ticket 26 r5): `build_tool_call` applies the
+    // default namespace, so real misses arrive as
+    // `Some(DEFAULT_FUNCTION_NAMESPACE)` — the fallback must accept this
+    // shape too, not only `None`.
+    assert_eq!(
+        registry.resolve_qualified_fallback(&ToolName::new(
+            Some(codex_protocol::DEFAULT_FUNCTION_NAMESPACE),
+            "mcp__1mcp__tool_invoke",
+        )),
+        Some(ToolName::namespaced("mcp__1mcp", "tool_invoke"))
+    );
+
     // Unknown prefixes never produce a hit.
     assert_eq!(
         registry.resolve_qualified_fallback(&ToolName::plain("mcp__missing__tool")),
@@ -805,7 +817,11 @@ async fn dispatch_resolves_chat_wire_qualified_names_to_namespaced_handlers() ->
                 Arc::clone(&session),
                 Arc::clone(&turn),
                 "qualified-call",
-                ToolName::plain("mcp__1mcp__tool_invoke"),
+                // Real shape: build_tool_call applies the default namespace.
+                ToolName::new(
+                    Some(codex_protocol::DEFAULT_FUNCTION_NAMESPACE),
+                    "mcp__1mcp__tool_invoke",
+                ),
             ),
             /*terminal_outcome_reached*/ None,
         )
