@@ -6,6 +6,7 @@
 )]
 
 use crate::DbTelemetry;
+use crate::eol_checksum_repair::ChecksumFamily;
 use crate::eol_checksum_repair::repair_eol_checksum_family;
 use crate::migrations::repair_legacy_recency_migration_version;
 use crate::runtime::RuntimeDbInitError;
@@ -117,15 +118,41 @@ pub struct RuntimeDbPath {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SqliteConfig {
     sqlite_home: AbsolutePathBuf,
+    /// When `Some(ChecksumFamily::Crlf)`, the runtime keeps every database in
+    /// the CRLF family across startups: each migration that the LF-embedded
+    /// migrator stamps is rewritten to the CRLF image in the same transaction
+    /// after a successful run, so an official CLI of the same commit can open
+    /// the database without its own self-heal. `None` (and `Some(Lf)`) keep
+    /// the historical behavior: the LF family is the target of the in-process
+    /// self-heal, and the official Windows CLI of the same commit can reopen
+    /// the database without ceremony. The user-facing knob is
+    /// `[state] migration_checksum_family` in `config.toml` (see the docs).
+    maintained_checksum_family: Option<ChecksumFamily>,
 }
 
 impl SqliteConfig {
     pub fn from_sqlite_home(sqlite_home: AbsolutePathBuf) -> Self {
-        Self { sqlite_home }
+        Self {
+            sqlite_home,
+            maintained_checksum_family: None,
+        }
     }
 
     pub fn new_for_testing(sqlite_home: AbsolutePathBuf) -> Self {
         Self::from_sqlite_home(sqlite_home)
+    }
+
+    /// Set the maintained checksum family (see the field doc). `None` is the
+    /// historical default; `Some(ChecksumFamily::Crlf)` is the fork's
+    /// escape hatch for the official Windows CLI (per D-015).
+    pub fn with_maintained_checksum_family(mut self, family: Option<ChecksumFamily>) -> Self {
+        self.maintained_checksum_family = family;
+        self
+    }
+
+    /// The checksum family the runtime maintains across startups.
+    pub fn maintained_checksum_family(&self) -> Option<ChecksumFamily> {
+        self.maintained_checksum_family
     }
 
     pub fn home(&self) -> &Path {
@@ -273,7 +300,7 @@ impl SqliteConfig {
                 // the schema still matches, rewrite the stored checksums in a
                 // transaction and retry once; anything else keeps failing
                 // loudly.
-                repair_eol_checksum_family(&pool, migrator).await?;
+                repair_eol_checksum_family(&pool, migrator, ChecksumFamily::Lf).await?;
                 migrator.run(&pool).await.map_err(anyhow::Error::from)?;
             }
             Ok(())
@@ -291,6 +318,28 @@ impl SqliteConfig {
             return Err(
                 RuntimeDbInitError::new(spec.label, "migrate", path.as_path(), source).into(),
             );
+        }
+        // Maintain the CRLF family at steady state when the user opted in via
+        // `[state] migration_checksum_family = "crlf"`. The LF-embedded
+        // migrator just stamped the new rows, so every row now needs to be
+        // rewritten to the CRLF image: the same gates as the offline
+        // `codex state fix-checksums` subcommand apply, but at steady state
+        // the database is always in the LF family and the schema matches by
+        // construction. The transaction is atomic; the next startup will
+        // see VersionMismatch and run the LF self-heal again before flipping
+        // back to CRLF, which is the documented maintenance loop.
+        if matches!(self.maintained_checksum_family, Some(ChecksumFamily::Crlf))
+            && let Err(source) =
+                repair_eol_checksum_family(&pool, migrator, ChecksumFamily::Crlf).await
+        {
+            pool.close().await;
+            return Err(RuntimeDbInitError::new(
+                spec.label,
+                "maintain_crlf_checksum_family",
+                path.as_path(),
+                source,
+            )
+            .into());
         }
         Ok(pool)
     }

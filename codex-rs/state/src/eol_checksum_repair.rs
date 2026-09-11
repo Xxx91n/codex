@@ -33,15 +33,71 @@ use sqlx::SqlitePool;
 use sqlx::migrate::Migration;
 use sqlx::migrate::Migrator;
 
+/// The line-ending family sqlx's embedded checksums are stamped in. The
+/// runtime ships with the LF family (ticket 18 locked the SQL files to LF
+/// via `.gitattributes`); the CRLF family is the byte image every
+/// pre-ticket-18 Windows build fed to `sqlx::migrate!`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChecksumFamily {
+    /// The embedded (LF) family: checksums `sqlx::migrate!` embeds from
+    /// the on-disk SQL bytes.
+    Lf,
+    /// The CRLF image family: checksums a checkout with `core.autocrlf=true`
+    /// would have produced before ticket 18 normalized the sources.
+    Crlf,
+}
+
+impl ChecksumFamily {
+    /// Stable lowercase spelling used in config, CLI flags, and JSON reports.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lf => "lf",
+            Self::Crlf => "crlf",
+        }
+    }
+}
+
+/// Identify which line-ending family a stored row's checksum belongs to.
+/// Returns `None` when the stored value matches neither the embedded (LF)
+/// checksum nor the CRLF image of the embedded SQL: the row is not a pure
+/// EOL difference and the self-heal must refuse to rewrite it.
+pub(crate) fn checksum_family(migration: &Migration, stored: &[u8]) -> Option<ChecksumFamily> {
+    if stored == migration.checksum.as_ref() {
+        Some(ChecksumFamily::Lf)
+    } else if crlf_checksum(migration).is_some_and(|image| stored == image.as_slice()) {
+        Some(ChecksumFamily::Crlf)
+    } else {
+        None
+    }
+}
+
+/// The checksum bytes a row must carry for the target family. `None` when
+/// the target family has no representable checksum for this migration (the
+/// CRLF image is uncomputable for any migration whose SQL already contains
+/// a CR byte).
+pub(crate) fn target_checksum(family: ChecksumFamily, migration: &Migration) -> Option<Vec<u8>> {
+    match family {
+        ChecksumFamily::Lf => Some(migration.checksum.to_vec()),
+        ChecksumFamily::Crlf => crlf_checksum(migration),
+    }
+}
+
 const LEGACY_RECENCY_APPLIED_VERSION: i64 = 38;
 const RECENCY_VERSION: i64 = 39;
 
-/// Heal a line-ending-only sqlx migration checksum family flip; the caller
-/// retries `Migrator::run` against the repaired history afterwards.
+/// Heal a line-ending-only sqlx migration checksum family flip into the
+/// requested target family; the caller retries `Migrator::run` against the
+/// repaired history afterwards. `target` = `ChecksumFamily::Lf` rewrites
+/// rows that carry the CRLF image back to the embedded (LF) checksum;
+/// `target` = `ChecksumFamily::Crlf` rewrites LF-stamped rows to the
+/// CRLF image so an official CLI of the same commit can open the database
+/// without its own self-heal. Returns the list of migration versions the
+/// transaction rewrote (empty when the history already matches the target).
 pub(crate) async fn repair_eol_checksum_family(
     pool: &SqlitePool,
     migrator: &Migrator,
-) -> anyhow::Result<()> {
+    target: ChecksumFamily,
+) -> anyhow::Result<Vec<i64>> {
     let migrations_table_exists = sqlx::query_scalar::<_, i64>(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
     )
@@ -83,50 +139,63 @@ pub(crate) async fn repair_eol_checksum_family(
                  refusing the EOL-only checksum rewrite"
             );
         };
-        if stored.as_slice() == migration.checksum.as_ref() {
-            effective.push(migration);
-            continue;
+        match checksum_family(migration, stored.as_slice()) {
+            Some(family) if family == target => {
+                // Row is already in the target family; nothing to rewrite.
+                effective.push(migration);
+            }
+            Some(_) => {
+                // Row is in the other line-ending family: rewrite it to the
+                // target family in the same transaction.
+                let Some(new) = target_checksum(target, migration) else {
+                    anyhow::bail!(
+                        "EOL checksum self-heal: target family has no representable \
+                         checksum for migration {version}; refusing the rewrite"
+                    );
+                };
+                updates.push((*version, new));
+                effective.push(migration);
+            }
+            None => {
+                // Legacy recency row: a pre-rename binary recorded the
+                // recency migration as version 38 with the recency SQL's
+                // checksum. The stored value can be the LF or CRLF image of
+                // the recency SQL; the heal rewrites the row to version 39
+                // in the target family in the same transaction.
+                let is_legacy_recency_row = *version == LEGACY_RECENCY_APPLIED_VERSION
+                    && !applied_versions.contains(&RECENCY_VERSION);
+                if !is_legacy_recency_row {
+                    anyhow::bail!(
+                        "EOL checksum self-heal: migration {version} checksum matches neither the \
+                         embedded checksum nor the CRLF image of the embedded SQL; not an EOL-only \
+                         difference"
+                    );
+                }
+                let Some(recency) = embedded.get(&RECENCY_VERSION).copied() else {
+                    anyhow::bail!(
+                        "EOL checksum self-heal: recency migration {RECENCY_VERSION} is missing from \
+                         the embedded set"
+                    );
+                };
+                if checksum_family(recency, stored.as_slice()).is_none() {
+                    anyhow::bail!(
+                        "EOL checksum self-heal: legacy recency row {version} checksum matches neither \
+                         the embedded recency checksum nor its CRLF image"
+                    );
+                }
+                let Some(new) = target_checksum(target, recency) else {
+                    anyhow::bail!(
+                        "EOL checksum self-heal: target family has no representable checksum \
+                         for the recency row; refusing the rewrite"
+                    );
+                };
+                legacy_rename = Some((recency.description.to_string(), new));
+                effective.push(recency);
+            }
         }
-        let stored_matches_crlf =
-            crlf_checksum(migration).is_some_and(|image| stored.as_slice() == image.as_slice());
-        if stored_matches_crlf {
-            updates.push((*version, migration.checksum.to_vec()));
-            effective.push(migration);
-            continue;
-        }
-        // Legacy recency row: a pre-rename binary recorded the recency
-        // migration as version 38 with the recency SQL's checksum. For
-        // CRLF-family databases that checksum is the CRLF image of the
-        // recency SQL, which the LF-only repair cannot match, so the heal
-        // rewrites the row to version 39 in the same transaction.
-        let is_legacy_recency_row = *version == LEGACY_RECENCY_APPLIED_VERSION
-            && !applied_versions.contains(&RECENCY_VERSION);
-        if !is_legacy_recency_row {
-            anyhow::bail!(
-                "EOL checksum self-heal: migration {version} checksum matches neither the \
-                 embedded checksum nor the CRLF image of the embedded SQL; not an EOL-only \
-                 difference"
-            );
-        }
-        let Some(recency) = embedded.get(&RECENCY_VERSION).copied() else {
-            anyhow::bail!(
-                "EOL checksum self-heal: recency migration {RECENCY_VERSION} is missing from \
-                 the embedded set"
-            );
-        };
-        let recency_checksum_matches = stored.as_slice() == recency.checksum.as_ref()
-            || crlf_checksum(recency).is_some_and(|image| stored.as_slice() == image.as_slice());
-        if !recency_checksum_matches {
-            anyhow::bail!(
-                "EOL checksum self-heal: legacy recency row {version} checksum matches neither \
-                 the embedded recency checksum nor its CRLF image"
-            );
-        }
-        legacy_rename = Some((recency.description.to_string(), recency.checksum.to_vec()));
-        effective.push(recency);
     }
     if updates.is_empty() && legacy_rename.is_none() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let mut replay = SchemaReplay::default();
@@ -162,9 +231,14 @@ pub(crate) async fn repair_eol_checksum_family(
     }
     transaction.commit().await?;
 
-    let rewritten = updates.len() + usize::from(legacy_rename.is_some());
-    log::info!("rewrote {rewritten} EOL-only sqlx migration checksum(s)");
-    Ok(())
+    let rewritten: Vec<i64> = updates
+        .iter()
+        .map(|(version, _)| *version)
+        .chain(legacy_rename.as_ref().map(|_| RECENCY_VERSION))
+        .collect();
+    let rewritten_len = rewritten.len();
+    log::info!("rewrote {rewritten_len} EOL-only sqlx migration checksum(s)");
+    Ok(rewritten)
 }
 
 /// The gate before any rewrite: every catalog object the effective migrations
@@ -235,7 +309,7 @@ async fn actual_schema_inventory(
 /// form every `core.autocrlf=true` Windows checkout fed to `sqlx::migrate!`
 /// before ticket 18. `None` when the SQL already contains CR bytes and a
 /// line-ending image is therefore not computable.
-fn crlf_checksum(migration: &Migration) -> Option<Vec<u8>> {
+pub(crate) fn crlf_checksum(migration: &Migration) -> Option<Vec<u8>> {
     let sql = migration.sql.as_str();
     if sql.contains('\r') {
         return None;
@@ -251,7 +325,7 @@ fn crlf_checksum(migration: &Migration) -> Option<Vec<u8>> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ObjectKind {
+pub(crate) enum ObjectKind {
     Table,
     Index,
     Trigger,
@@ -259,7 +333,7 @@ enum ObjectKind {
 }
 
 impl ObjectKind {
-    fn from_sqlite_type(kind: &str) -> Option<Self> {
+    pub(crate) fn from_sqlite_type(kind: &str) -> Option<Self> {
         match kind {
             "table" => Some(Self::Table),
             "index" => Some(Self::Index),
@@ -275,13 +349,13 @@ impl ObjectKind {
 /// are skipped, so the replay can only under-approximate expectations
 /// (missing objects still fail loudly); it never invents them.
 #[derive(Default)]
-struct SchemaReplay {
-    objects: BTreeMap<String, ObjectKind>,
+pub(crate) struct SchemaReplay {
+    pub(crate) objects: BTreeMap<String, ObjectKind>,
     children: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl SchemaReplay {
-    fn apply_migration(&mut self, sql: &str) {
+    pub(crate) fn apply_migration(&mut self, sql: &str) {
         let lowered = scrub_sql(sql).to_ascii_lowercase();
         for effect in scan_effects(&lowered) {
             match effect {

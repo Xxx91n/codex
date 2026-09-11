@@ -18,6 +18,7 @@ use codex_config::ConstrainedWithSource;
 use codex_config::FeatureRequirementsToml;
 use codex_config::ManagedAuthPolicy;
 use codex_config::McpServerRequirement;
+use codex_config::MigrationChecksumFamily;
 use codex_config::PluginRequirementsToml;
 use codex_config::ProfileV2Name;
 use codex_config::ResidencyRequirement;
@@ -898,6 +899,9 @@ pub struct Config {
 
     /// Resolved configuration shared by all Codex SQLite databases.
     pub sqlite: codex_state::SqliteConfig,
+    /// Local state database settings (fork-only; ticket 31). Drives the
+    /// in-process self-heal target and the post-migration startup flip.
+    pub state_db_migration_checksum_family: MigrationChecksumFamily,
 
     /// Directory where Codex writes log files (defaults to `$CODEX_HOME/log`).
     pub log_dir: PathBuf,
@@ -4225,7 +4229,21 @@ impl Config {
             memories: memories_config,
             agent_interrupt_message_enabled,
             codex_home,
-            sqlite: codex_state::SqliteConfig::from_sqlite_home(sqlite_home),
+            sqlite: codex_state::SqliteConfig::from_sqlite_home(sqlite_home)
+                .with_maintained_checksum_family(match cfg
+                    .state
+                    .as_ref()
+                    .and_then(|state| state.migration_checksum_family)
+                    .unwrap_or_default()
+                {
+                    MigrationChecksumFamily::Crlf => Some(codex_state::ChecksumFamily::Crlf),
+                    MigrationChecksumFamily::Lf | MigrationChecksumFamily::Auto => None,
+                }),
+            state_db_migration_checksum_family: cfg
+                .state
+                .as_ref()
+                .and_then(|state| state.migration_checksum_family)
+                .unwrap_or_default(),
             log_dir,
             config_layer_stack,
             history,

@@ -2040,6 +2040,14 @@
       },
       "type": "object"
     },
+    "MigrationChecksumFamily": {
+      "enum": [
+        "auto",
+        "lf",
+        "crlf"
+      ],
+      "type": "string"
+    },
     "ModelAvailabilityNuxConfig": {
       "additionalProperties": {
         "format": "uint32",
@@ -3563,6 +3571,20 @@
           "type": "string"
         }
       ]
+    },
+    "StateDbSettingsToml": {
+      "additionalProperties": false,
+      "properties": {
+        "migration_checksum_family": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MigrationChecksumFamily"
+            }
+          ],
+          "description": "Maintenance target for the _sqlx_migrations checksum family. Defaults to auto. The offline flip uses the matching codex state fix-checksums --family ... subcommand; this setting controls the in-process self-heal and the post-migration startup flip."
+        }
+      },
+      "type": "object"
     },
     "ThreadStoreToml": {
       "oneOf": [
@@ -6634,6 +6656,14 @@
         }
       ],
       "description": "User-level skill config entries keyed by SKILL.md path."
+    },
+    "state": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/StateDbSettingsToml"
+        }
+      ],
+      "description": "Local state database settings (fork-only; ticket 31). Controls the in-process self-heal and the post-migration startup flip of the _sqlx_migrations checksum family. Defaults to auto (one-way LF self-heal, no startup rewrite)."
     },
     "sqlite_home": {
       "allOf": [

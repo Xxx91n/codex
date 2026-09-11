@@ -12,6 +12,7 @@ const _: () = assert!(
 mod audit;
 mod eol_checksum_repair;
 mod extract;
+mod fix_checksums;
 pub mod log_db;
 mod migrations;
 mod model;
@@ -19,6 +20,12 @@ mod paths;
 mod runtime;
 mod sqlite;
 mod telemetry;
+
+pub use eol_checksum_repair::ChecksumFamily;
+pub use fix_checksums::FixChecksumsDb;
+pub use fix_checksums::FixChecksumsReport;
+pub use fix_checksums::FixStatus;
+pub use fix_checksums::fix_migration_checksum_families;
 
 pub use model::CreatedProject;
 pub use model::LogEntry;

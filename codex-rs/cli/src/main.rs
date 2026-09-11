@@ -58,6 +58,7 @@ mod queue_cmd;
 mod remote_control_cmd;
 #[cfg(target_os = "windows")]
 mod sandbox_setup;
+mod state_cmd;
 mod state_db_recovery;
 #[cfg(not(windows))]
 mod wsl_paths;
@@ -226,6 +227,9 @@ enum Subcommand {
 
     /// Inspect feature flags.
     Features(FeaturesCli),
+
+    /// Local state database maintenance (fork-only; ticket 31).
+    State(crate::state_cmd::StateCommand),
 }
 
 #[derive(Debug, Parser)]
@@ -1464,6 +1468,23 @@ async fn cli_main(
             .await?;
             println!("{output}");
         }
+        Some(Subcommand::State(crate::state_cmd::StateCommand { subcommand })) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "state",
+            )?;
+            match subcommand {
+                crate::state_cmd::StateSubcommand::FixChecksums(cmd) => {
+                    reject_remote_mode_for_subcommand(
+                        root_remote.as_deref(),
+                        root_remote_auth_token_env.as_deref(),
+                        "state fix-checksums",
+                    )?;
+                    crate::state_cmd::run_fix_checksums(cmd, root_config_overrides).await?;
+                }
+            }
+        }
         Some(Subcommand::MigrateRollouts(command)) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
@@ -2445,6 +2466,7 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::ResponsesApiProxy(_)) => Some("responses-api-proxy"),
         Some(Subcommand::StdioToUds(_)) => Some("stdio-to-uds"),
         Some(Subcommand::Features(_)) => Some("features"),
+        Some(Subcommand::State(_)) => Some("state"),
     }
 }
 
