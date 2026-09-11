@@ -784,7 +784,7 @@ fn resolve_qualified_fallback_matches_known_namespaces_longest_prefix() {
     // shape too, not only `None`.
     assert_eq!(
         registry.resolve_qualified_fallback(&ToolName::new(
-            Some(codex_protocol::DEFAULT_FUNCTION_NAMESPACE),
+            Some(codex_protocol::DEFAULT_FUNCTION_NAMESPACE.to_string()),
             "mcp__1mcp__tool_invoke",
         )),
         Some(ToolName::namespaced("mcp__1mcp", "tool_invoke"))
@@ -819,7 +819,7 @@ async fn dispatch_resolves_chat_wire_qualified_names_to_namespaced_handlers() ->
                 "qualified-call",
                 // Real shape: build_tool_call applies the default namespace.
                 ToolName::new(
-                    Some(codex_protocol::DEFAULT_FUNCTION_NAMESPACE),
+                    Some(codex_protocol::DEFAULT_FUNCTION_NAMESPACE.to_string()),
                     "mcp__1mcp__tool_invoke",
                 ),
             ),
