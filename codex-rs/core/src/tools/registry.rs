@@ -463,11 +463,12 @@ impl ToolRegistry {
         // misses therefore arrive as `Some(DEFAULT_FUNCTION_NAMESPACE)`, not
         // `None`. Treat both shapes as "no explicit namespace"; an explicit
         // non-default namespace that missed exact lookup stays unsupported.
-        if name
-            .namespace
-            .is_some_and(|namespace| namespace != DEFAULT_FUNCTION_NAMESPACE)
-        {
-            return None;
+        match name.namespace.as_deref() {
+            // An explicit non-default namespace that missed exact lookup
+            // stays unsupported; `None` and the default namespace both mean
+            // "no explicit namespace" and qualify for resolution.
+            Some(namespace) if namespace != DEFAULT_FUNCTION_NAMESPACE => return None,
+            _ => {}
         }
         let mut namespaces = self
             .tools
