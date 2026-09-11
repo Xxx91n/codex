@@ -119,7 +119,7 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
 ### 语义补丁队列（FORK_DIVERGENCE 清单）
 - 本仓用法：fork 对上游每条分歧的唯一台账（仓外 `.scratch/architecture-recovery/FORK_DIVERGENCE.md`），
   每条必填「分类 + 上游锚点（merge-base 口径，禁 tag 口径）+ 红线指向 + 最后裁决」；每次上游
-  merge 按清单五步裁决（per ADR-0006 决策 3），新分歧先登记再实现。
+  merge 按清单五步裁决（per ADR-0006 决策 3），新分歧先登记再实现。仓内骨架+字段模板+时点快照落 docs/fork-divergence/（2026-09-11 D-003 豁免入仓，票 30）；运行台账仍仓外唯一权威，每次 merge 重放后手工刷新仓内快照（无自动同步）。
 - 禁止用法：凭记忆裁决不查清单；adapt 条目重放后不刷新裁决日期；ignore 条目物理删除（必须
   留痕 `Resolved:`）；把「语义补丁队列」说成自动合并工具（裁决永远是人工 + CI 验证）。
 - 源：ADR-0006；research/13-fork-divergence-patch-queue-20260905.md。
