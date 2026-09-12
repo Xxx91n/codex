@@ -262,7 +262,7 @@ async fn process_messages_sse(
         };
 
         if !created_emitted {
-            let _ = tx_event.send(Ok(ResponseEvent::Created)).await;
+            let _ = tx_event.send(Ok(ResponseEvent::Created { response_id: None })).await;
             created_emitted = true;
         }
 
@@ -547,8 +547,8 @@ async fn finish_messages_stream(
     for (_index, redacted) in redacted_blocks {
         // Flush: same fork-internal `data\0sig` combined encoding as the
         // `content_block_stop` path (see comment there).
-        let data = redacted.data.unwrap_or_default();
-        let signature = redacted.signature.unwrap_or_default();
+        let data = redacted.data.as_deref().unwrap_or_default();
+        let signature = redacted.signature.as_deref().unwrap_or_default();
         let combined = format!("{data}\0{signature}");
         let item = ResponseItem::Reasoning {
             id: None,

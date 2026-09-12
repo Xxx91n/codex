@@ -222,7 +222,7 @@ async fn process_chat_sse(
         };
 
         if !created_emitted {
-            let _ = tx_event.send(Ok(ResponseEvent::Created)).await;
+            let _ = tx_event.send(Ok(ResponseEvent::Created { response_id: None })).await;
             created_emitted = true;
         }
 

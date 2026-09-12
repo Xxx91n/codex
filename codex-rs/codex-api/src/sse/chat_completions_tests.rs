@@ -100,7 +100,7 @@ async fn chat_sse_reasoning_then_content_synthesizes_reasoning_item() {
     // Event-order contract: start (Added) precedes the deltas, the complete
     // Reasoning item closes at the switch point, then the message stream.
     assert!(
-        matches!(events[0], Ok(ResponseEvent::Created)),
+        matches!(events[0], Ok(ResponseEvent::Created { .. })),
         "first event must be Created: {events:?}"
     );
     assert!(
@@ -451,7 +451,7 @@ fn comparable_event_signatures(
     events
         .iter()
         .filter_map(|ev| match ev {
-            Ok(ResponseEvent::Created) => Some(("Created", String::new())),
+            Ok(ResponseEvent::Created { .. }) => Some(("Created", String::new())),
             Ok(ResponseEvent::OutputItemAdded(item)) => match item {
                 ResponseItem::Reasoning { .. } => Some(("ReasoningAdded", String::new())),
                 ResponseItem::Message { .. } => Some(("MessageAdded", String::new())),
