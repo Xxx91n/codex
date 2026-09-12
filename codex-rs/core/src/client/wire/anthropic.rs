@@ -280,6 +280,7 @@ impl ModelClientSession {
     /// reasoning, include); those degrade away per CONTEXT.md's degradation
     /// table. `system` is a top-level field rather than a message; tool
     /// results travel as `tool_result` blocks under a `user` message.
+    #[allow(dead_code)] // test-only facade; production emits via build_messages_request_degraded (G3 flag, ADR-0009)
     pub(crate) fn build_messages_request(
         &self,
         prompt: &Prompt,
