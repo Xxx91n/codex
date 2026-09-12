@@ -76,5 +76,6 @@ WORKFLOW §2 规定重文档不入库（运行台账在 .scratch/ 仓外）。�
 ## 快照
 
 - [snapshot-2026-09-11.md](snapshot-2026-09-11.md) — 生成 2026-09-11。计数口径对账：
+- [snapshot-2026-09-12.md](snapshot-2026-09-12.md) — 生成 2026-09-12（票 32 upstream merge 五步完成后刷新）。计数口径对账：22 条 ID 条目（REG×3 / CLI×5 / WIR×5 / ADJ×6 / TOOL×2 / STATE×3）+ IGN×1（新增 ignore 留留：legacy remote compaction absorbed-by-upstream）+ 1 条 CI 面 header 备案。新增条目与刷新要点见 ADR-0010。
   21 条 ID 条目（REG×3 / CLI×5 / WIR×4 / ADJ×5 / TOOL×2 / STATE×2）+ 1 条 CI 面
   header 备案 = 22，与票单「当前 22 条目快照」口径一致。
