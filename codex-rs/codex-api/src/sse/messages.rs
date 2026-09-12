@@ -262,7 +262,9 @@ async fn process_messages_sse(
         };
 
         if !created_emitted {
-            let _ = tx_event.send(Ok(ResponseEvent::Created { response_id: None })).await;
+            let _ = tx_event
+                .send(Ok(ResponseEvent::Created { response_id: None }))
+                .await;
             created_emitted = true;
         }
 
