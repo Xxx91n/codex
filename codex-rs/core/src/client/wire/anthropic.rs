@@ -7,6 +7,7 @@ use std::sync::Arc;
 use codex_api::ApiError;
 use codex_api::MessagesClient as ApiMessagesClient;
 use codex_api::MessagesOptions as ApiMessagesOptions;
+use codex_api::TransportError;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_otel::SessionTelemetry;
@@ -21,6 +22,7 @@ use codex_rollout_trace::InferenceTraceContext;
 use codex_tools::create_tools_json_for_anthropic;
 use serde_json::json;
 use tracing::debug;
+use tracing::warn;
 
 use super::content_items_to_text;
 use crate::client::ANTHROPIC_MESSAGES_ENDPOINT;
@@ -34,6 +36,103 @@ use crate::client::map_response_stream;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseStream;
 use crate::responses_metadata::CodexResponsesMetadata;
+
+/// Upstream class discriminator for the ADR-0009 conditional thinking-replay
+/// rule: first-party Anthropic enforces signed thinking blocks on manual
+/// tool-use turns, while third-party /anthropic-compatible endpoints
+/// (DeepSeek/Kimi family gateways) never sign blocks and expect them back
+/// verbatim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AnthropicUpstreamKind {
+    /// An `anthropic.com` host: tiered signature enforcement applies.
+    FirstParty,
+    /// Everything else (gateways, compat endpoints, unset base_url): unsigned
+    /// blocks must be preserved.
+    Compatible,
+}
+
+impl AnthropicUpstreamKind {
+    /// Host-based classification. Anything that is not an `anthropic.com`
+    /// host fails open to `Compatible`: dropping a block a compatible
+    /// endpoint expects back is a guaranteed 400 (D-009 finding 4), while
+    /// preserving is the contract-neutral choice; first-party-only branches
+    /// (the conditional drop, guard G1) then never see non-first-party
+    /// traffic.
+    pub(crate) fn from_base_url(base_url: Option<&str>) -> Self {
+        let Some(base_url) = base_url else {
+            return Self::Compatible;
+        };
+        let after_scheme = base_url
+            .split_once("://")
+            .map(|(_, rest)| rest)
+            .unwrap_or(base_url);
+        let authority = after_scheme
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or(after_scheme);
+        let host = authority
+            .rsplit('@')
+            .next()
+            .unwrap_or(authority)
+            .split(':')
+            .next()
+            .unwrap_or(authority);
+        let host = host.to_ascii_lowercase();
+        if host == "anthropic.com" || host.ends_with(".anthropic.com") {
+            Self::FirstParty
+        } else {
+            Self::Compatible
+        }
+    }
+}
+
+/// The `thinking` parameter track a built request carries (ADR-0005 modes).
+/// Only `Manual` creates the ADR-0009 hard-400 shape: an `enabled` budget
+/// makes the server enforce a leading thinking block on tool-use turns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AnthropicThinkingMode {
+    Disabled,
+    Manual,
+    Adaptive,
+}
+
+fn thinking_mode_of(
+    thinking: Option<&super::reasoning_effort::AnthropicThinking>,
+) -> AnthropicThinkingMode {
+    match thinking
+        .and_then(|t| t.thinking.get("type"))
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("adaptive") => AnthropicThinkingMode::Adaptive,
+        Some(_) => AnthropicThinkingMode::Manual,
+        None => AnthropicThinkingMode::Disabled,
+    }
+}
+
+/// How unsigned (signatureless) reasoning blocks are treated on the way out
+/// (ADR-0009 conditional rule, replacing the old unconditional drop red line
+/// from ADR-0003).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UnsignedReplay {
+    /// Compatible upstream: replay the block verbatim without a signature
+    /// field.
+    Preserve,
+    /// First-party upstream on a branch the server does not enforce: drop the
+    /// block with a loud warn.
+    DropWarn,
+}
+
+/// Thinking-family block emission for `build_messages_messages`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ThinkingEmission {
+    /// Normal build: signed thinking and redacted_thinking replay verbatim;
+    /// unsigned blocks follow the [`UnsignedReplay`] dispatch.
+    Standard { unsigned: UnsignedReplay },
+    /// Guard degradation (G1 pre-flight, G3 recovery): the request carries no
+    /// thinking parameter, so every thinking-family block (signed, redacted,
+    /// unsigned) is stripped for a coherent no-thinking request.
+    Degrade,
+}
 
 impl ModelClientSession {
     /// Streams a turn via the Anthropic Messages API.
@@ -55,6 +154,9 @@ impl ModelClientSession {
             .map(AuthManager::unauthorized_recovery);
         let mut provider_auth_recovery_attempted = false;
         let mut pending_retry = PendingUnauthorizedRetry::default();
+        // Guard G3 (ADR-0009): one bounded adaptive retry when the upstream
+        // 400s on the thinking replay itself (thinking_400_recovery_class).
+        let mut thinking_degraded = false;
         loop {
             let client_setup = self.client.current_client_setup().await?;
             let transport = self
@@ -88,7 +190,8 @@ impl ModelClientSession {
                 compression: responses_options.compression,
             };
 
-            let request = self.build_messages_request(prompt, model_info, effort.clone())?;
+            let request = self
+                .build_messages_request_degraded(prompt, model_info, effort.clone(), thinking_degraded)?;
             let client =
                 ApiMessagesClient::new(transport, client_setup.api_provider, client_setup.api_auth)
                     .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
@@ -135,6 +238,23 @@ impl ModelClientSession {
                     continue;
                 }
                 Err(err) => {
+                    if !thinking_degraded
+                        && let Some(class) =
+                            thinking_400_text(&err).and_then(thinking_400_recovery_class)
+                    {
+                        let response_debug_context =
+                            extract_response_debug_context_from_api_error(&err);
+                        inference_trace_attempt.record_failed(
+                            &err,
+                            response_debug_context.request_id.as_deref(),
+                            /*output_items*/ &[],
+                        );
+                        warn!(
+                            "anthropic G3 (ADR-0009): upstream rejected the thinking replay ({class}); retrying once with thinking degraded for this request",
+                        );
+                        thinking_degraded = true;
+                        continue;
+                    }
                     let response_debug_context =
                         extract_response_debug_context_from_api_error(&err);
                     let err = self.client.state.provider.map_api_error(err);
@@ -162,25 +282,114 @@ impl ModelClientSession {
         model_info: &ModelInfo,
         effort: Option<ReasoningEffortConfig>,
     ) -> Result<serde_json::Value> {
+        self.build_messages_request_degraded(
+            prompt,
+            model_info,
+            effort,
+            /*thinking_degraded*/ false,
+        )
+    }
+
+    /// Same builder with guard G3's degraded shape forced (ADR-0009): the
+    /// request is produced without a `thinking` parameter and without any
+    /// thinking-family blocks, used for the one bounded retry after a
+    /// [`thinking_400_recovery_class`] rejection.
+    pub(crate) fn build_messages_request_degraded(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        effort: Option<ReasoningEffortConfig>,
+        thinking_degraded: bool,
+    ) -> Result<serde_json::Value> {
         let instructions = &prompt.base_instructions.text;
         let input = prompt.get_formatted_input_for_request(/*use_responses_lite*/ false);
-        let messages = build_messages_messages(input);
         let tools = create_tools_json_for_anthropic(&prompt.tools)?;
+
+        let provider = self.client.state.provider.info();
+
+        // Reasoning effort translation (ticket 11 / ADR-0005): a session
+        // effort drives the thinking parameter on the track the provider
+        // selected (adaptive for Claude 4.6+ deployments, manual bucketed
+        // budget otherwise). The legacy provider-level budget stays the
+        // non-effort path so plain budget configs behave exactly as before.
+        let max_tokens = provider
+            .anthropic_max_tokens
+            .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS);
+        let mut thinking = match effort.as_ref() {
+            Some(effort) => {
+                if provider.anthropic_thinking_budget.is_some() {
+                    debug!(
+                        "session reasoning_effort takes precedence over provider.anthropic_thinking_budget",
+                    );
+                }
+                super::reasoning_effort::anthropic_thinking_from_effort(
+                    effort,
+                    provider.anthropic_adaptive_thinking,
+                    max_tokens,
+                )
+            }
+            None => provider.anthropic_thinking_budget.and_then(|budget| {
+                let clamped = super::reasoning_effort::clamp_thinking_budget(budget, max_tokens);
+                let Some(clamped) = clamped else {
+                    debug!(
+                        "anthropic thinking budget {budget} cannot fit under max_tokens {max_tokens}; omitting thinking",
+                    );
+                    return None;
+                };
+                if clamped != budget {
+                    debug!("anthropic thinking budget {budget} out of range; clamped to {clamped}");
+                }
+                Some(super::reasoning_effort::AnthropicThinking {
+                    thinking: json!({ "type": "enabled", "budget_tokens": clamped }),
+                    output_config: None,
+                })
+            }),
+        };
+
+        // ADR-0009: the upstream class and the thinking track together
+        // dispatch how signatureless thinking blocks replay; guard
+        // degradation strips every thinking-family block.
+        let upstream = AnthropicUpstreamKind::from_base_url(provider.base_url.as_deref());
+        let thinking_mode = thinking_mode_of(thinking.as_ref());
+        let emission = if thinking_degraded {
+            ThinkingEmission::Degrade
+        } else {
+            ThinkingEmission::Standard {
+                unsigned: match upstream {
+                    AnthropicUpstreamKind::Compatible => UnsignedReplay::Preserve,
+                    AnthropicUpstreamKind::FirstParty => UnsignedReplay::DropWarn,
+                },
+            }
+        };
+        let mut messages = build_messages_messages(input.clone(), emission);
+
+        // Guard G1 (ADR-0009): on a first-party upstream, manual thinking
+        // with a trailing tool_use turn that does not lead with a thinking
+        // block is a guaranteed 400 (an unsigned block was just dropped
+        // above). Degrade the round loudly instead of sending the doomed
+        // shape bare.
+        if !thinking_degraded
+            && upstream == AnthropicUpstreamKind::FirstParty
+            && thinking_mode == AnthropicThinkingMode::Manual
+            && manual_tool_use_leads_without_thinking(&messages)
+        {
+            warn!(
+                "anthropic G1 (ADR-0009): thinking=enabled with a trailing tool_use turn lacking a leading thinking block would be hard-400ed; dropping the thinking parameter and all thinking blocks for this request",
+            );
+            thinking = None;
+            messages = build_messages_messages(input, ThinkingEmission::Degrade);
+        }
+        if thinking_degraded {
+            thinking = None;
+        }
 
         let mut request = json!({
             "model": model_info.slug.clone(),
             "messages": messages,
-            "max_tokens": self
-                .client
-                .state
-                .provider
-                .info()
-                .anthropic_max_tokens
-                .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS),
+            "max_tokens": max_tokens,
             "stream": true,
         });
 
-        let provider = self.client.state.provider.info();
         let mut tools = tools;
 
         if let Some(obj) = request.as_object_mut() {
@@ -211,44 +420,6 @@ impl ModelClientSession {
                 obj.insert("tools".to_string(), serde_json::Value::Array(tools));
             }
 
-            // Reasoning effort translation (ticket 11 / ADR-0005): a session
-            // effort drives the thinking parameter on the track the provider
-            // selected (adaptive for Claude 4.6+ deployments, manual bucketed
-            // budget otherwise). The legacy provider-level budget stays the
-            // non-effort path so plain budget configs behave exactly as before.
-            let max_tokens = provider
-                .anthropic_max_tokens
-                .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS);
-            let thinking = match effort.as_ref() {
-                Some(effort) => {
-                    if provider.anthropic_thinking_budget.is_some() {
-                        debug!(
-                            "session reasoning_effort takes precedence over provider.anthropic_thinking_budget",
-                        );
-                    }
-                    super::reasoning_effort::anthropic_thinking_from_effort(
-                        effort,
-                        provider.anthropic_adaptive_thinking,
-                        max_tokens,
-                    )
-                }
-                None => provider.anthropic_thinking_budget.and_then(|budget| {
-                    let clamped = super::reasoning_effort::clamp_thinking_budget(budget, max_tokens);
-                    let Some(clamped) = clamped else {
-                        debug!(
-                            "anthropic thinking budget {budget} cannot fit under max_tokens {max_tokens}; omitting thinking",
-                        );
-                        return None;
-                    };
-                    if clamped != budget {
-                        debug!("anthropic thinking budget {budget} out of range; clamped to {clamped}");
-                    }
-                    Some(super::reasoning_effort::AnthropicThinking {
-                        thinking: json!({ "type": "enabled", "budget_tokens": clamped }),
-                        output_config: None,
-                    })
-                }),
-            };
             if let Some(thinking) = thinking {
                 obj.insert("thinking".to_string(), thinking.thinking);
                 if let Some(output_config) = thinking.output_config {
@@ -270,7 +441,16 @@ impl ModelClientSession {
 /// `{}` rather than `null`. Instructions travel as the top-level `system`
 /// field (see `build_messages_request`), so they are not part of the messages
 /// array.
-pub(crate) fn build_messages_messages(input: Vec<ResponseItem>) -> Vec<serde_json::Value> {
+///
+/// Thinking-family blocks are emitted per `emission` (ADR-0009): signed
+/// thinking and redacted_thinking replay verbatim on a standard build,
+/// unsigned blocks dispatch on the upstream class (preserve on compatible
+/// endpoints, drop with a loud warn on unenforced first-party branches), and
+/// a degraded build (guards G1/G3) strips every thinking-family block.
+pub(crate) fn build_messages_messages(
+    input: Vec<ResponseItem>,
+    emission: ThinkingEmission,
+) -> Vec<serde_json::Value> {
     let mut messages: Vec<serde_json::Value> = Vec::new();
     let mut pending_assistant_blocks: Vec<serde_json::Value> = Vec::new();
 
@@ -338,6 +518,9 @@ pub(crate) fn build_messages_messages(input: Vec<ResponseItem>) -> Vec<serde_jso
                 ..
             } if combined.contains('\0') =>
             {
+                if matches!(emission, ThinkingEmission::Degrade) {
+                    continue;
+                }
                 let (data, signature) = match combined.split_once('\0') {
                     Some((d, s)) => (d.to_string(), s.to_string()),
                     None => (combined.clone(), String::new()),
@@ -353,11 +536,17 @@ pub(crate) fn build_messages_messages(input: Vec<ResponseItem>) -> Vec<serde_jso
                 encrypted_content: Some(signature),
                 ..
             } => {
-                // Thinking replay: Anthropic requires thinking blocks be
-                // passed back verbatim (text + signature) inside tool-use
-                // rounds; without the signature the server 400s the whole
-                // turn. Without a signature we drop the block — validation
-                // was relaxed for non-tool turns (2026 steering docs).
+                if matches!(emission, ThinkingEmission::Degrade) {
+                    continue;
+                }
+                // Thinking replay: Anthropic requires signed thinking blocks
+                // be passed back verbatim (text + signature) inside tool-use
+                // rounds; tampering with the signature 400s the whole turn.
+                // Signatureless blocks never reach this arm: their handling
+                // moved from the old unconditional-drop red line (ADR-0003)
+                // to the ADR-0009 conditional dispatch in the unsigned arm
+                // below, escalated to full degradation by guard G1 in
+                // `build_messages_request_degraded`.
                 let thinking: String = content
                     .unwrap_or_default()
                     .iter()
@@ -372,6 +561,47 @@ pub(crate) fn build_messages_messages(input: Vec<ResponseItem>) -> Vec<serde_jso
                     "thinking": thinking,
                     "signature": signature,
                 }));
+            }
+            ResponseItem::Reasoning {
+                content,
+                encrypted_content: None,
+                ..
+            } => {
+                // ADR-0009 conditional rule for signatureless thinking:
+                // compatible endpoints never sign blocks, so the block must
+                // go back verbatim or the next tool round 400s; first-party
+                // upstreams may omit it on unenforced branches (drop + loud
+                // warn), and the manual+tool_use shape is escalated to full
+                // degradation by guard G1 before the request is sent.
+                let ThinkingEmission::Standard { unsigned } = emission else {
+                    continue;
+                };
+                let thinking: String = content
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|fragment| match fragment {
+                        ReasoningItemContent::ReasoningText { text }
+                        | ReasoningItemContent::Text { text } => text.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                match unsigned {
+                    UnsignedReplay::Preserve => {
+                        if thinking.is_empty() {
+                            debug!("anthropic replay: skipping empty unsigned thinking block");
+                            continue;
+                        }
+                        pending_assistant_blocks.push(json!({
+                            "type": "thinking",
+                            "thinking": thinking,
+                        }));
+                    }
+                    UnsignedReplay::DropWarn => {
+                        warn!(
+                            "anthropic ADR-0009: dropped unsigned thinking block on a first-party upstream (unenforced branch per the conditional replay rule)",
+                        );
+                    }
+                }
             }
             ResponseItem::FunctionCall {
                 name,
@@ -492,4 +722,70 @@ fn content_items_to_image_blocks(
         }));
     }
     blocks
+}
+
+/// Guard G1 pre-flight (ADR-0009): a manual-thinking request whose final
+/// assistant message replays a `tool_use` block must lead that message with
+/// a `thinking`/`redacted_thinking` block, or the first-party API hard-400s
+/// the whole turn (D-009 finding 2: thinking config present + last assistant
+/// has tool_use + first block not thinking). Returns true for the shape that
+/// must be degraded before send, never sent bare.
+fn manual_tool_use_leads_without_thinking(messages: &[serde_json::Value]) -> bool {
+    let Some(assistant) = messages.iter().rev().find(|message| {
+        message
+            .get("role")
+            .and_then(serde_json::Value::as_str)
+            == Some("assistant")
+    }) else {
+        return false;
+    };
+    let Some(blocks) = assistant.get("content").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    let leads_with_thinking = blocks.first().is_some_and(|block| {
+        matches!(
+            block.get("type").and_then(serde_json::Value::as_str),
+            Some("thinking") | Some("redacted_thinking")
+        )
+    });
+    let has_tool_use = blocks.iter().any(|block| {
+        block
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            == Some("tool_use")
+    });
+    has_tool_use && !leads_with_thinking
+}
+
+/// Guard G3 (ADR-0009): classify the three 400 response texts that mean the
+/// thinking replay itself was rejected (D-009 finding 3). Recovery is the one
+/// bounded degraded retry wired into `stream_anthropic_messages`.
+pub(crate) fn thinking_400_recovery_class(message: &str) -> Option<&'static str> {
+    let lowered = message.to_ascii_lowercase();
+    if lowered.contains("expected `thinking` or `redacted_thinking`")
+        || lowered.contains("expected thinking or redacted_thinking")
+    {
+        Some("expected-thinking-first")
+    } else if lowered.contains("cannot be modified") {
+        Some("thinking-immutable")
+    } else if lowered.contains("invalid signature") {
+        Some("invalid-signature")
+    } else {
+        None
+    }
+}
+
+/// Pull the 400 payload text out of an API error for
+/// [`thinking_400_recovery_class`]: both the structured [`ApiError::Api`]
+/// shape and the raw transport-400 body qualify.
+fn thinking_400_text(err: &ApiError) -> Option<&str> {
+    match err {
+        ApiError::Api { status, message } if status.as_u16() == 400 => Some(message),
+        ApiError::Transport(TransportError::Http { status, body, .. })
+            if status.as_u16() == 400 =>
+        {
+            body.as_deref()
+        }
+        _ => None,
+    }
 }

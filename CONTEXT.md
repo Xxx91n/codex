@@ -55,11 +55,26 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
 - 源：ADR-0001；AGENTS.md；ADR-0003。
 
 ### thinking signature 回传
-- 本仓用法：带 signature 的 Reasoning 出站原样回传为 thinking 块（
-  `encrypted_content: Some(signature)` guard）；无签名 drop 而非篡改；思维块永不混入
-  content。永久红线。
-- 禁止用法：改/编 signature 再回传（触发上游 400）；thinking 文本拼进 content。
-- 源：ADR-0003（红线，同 anthropic 签名红线同级）；ARCH-tri-wire-20260902。
+> 2026-09-12 修订：旧条目的「无签名 drop 而非篡改…永久红线」经 D-009
+> 调研与用户拍板由 ADR-0009 修订为条件规则，原文下沉标 superseded 留痕；
+> signed 逐字回传部分仍为有效红线。
+- 本仓用法（ADR-0009 条件规则）：带 signature 的 Reasoning 出站原样回传为
+  thinking 块（`encrypted_content: Some(signature)` guard），redacted_thinking 块
+  逐字回传（票 27）；无签名块按上游类型 × 该轮 thinking 轨分派——第一方
+  （base_url host = anthropic.com）在「无 thinking 配置 / adaptive 轨 / 最后
+  assistant 无 tool_use」分支允许 drop+warn，manual+含 tool_use 形态禁止裸
+  发，走守卫 G1 出站预检（移除该轮 thinking 参数与全部 thinking 家族块 +
+  响亮 warn）；第三方 /anthropic 兼容端点（非 anthropic.com host，fail-open）
+  无签名 native thinking 逐字回传（不带 signature 字段）。思维块永不混入
+  content。守卫 G3：三类 400 文本（Expected thinking or redacted_thinking /
+  cannot be modified / Invalid signature）触发恰好一次的降级重试；守卫 G6
+  为三路径回归。
+- 禁止用法：改/编 signature 再回传（触发上游 400）；thinking 文本拼进
+  content；对兼容端点丢块；静默丢块不留响亮痕迹。
+- 源：ADR-0009（条件规则 + 守卫 G1/G3/G6）；ADR-0003（signed 逐字红线，
+  继续有效）；ARCH-tri-wire-20260902；D-009。
+- Superseded（2026-08-27 原条目留痕；仅「无签名无条件 drop」部分被上述
+  条件规则取代）：无签名 drop 而非篡改……永久红线。
 
 ### reasoning_content 透传
 - 本仓用法：Chat wire 入站把 `delta.reasoning_content ?? delta.reasoning`（vLLM 0.18+

@@ -2763,7 +2763,15 @@ impl WebsocketTelemetry for ApiTelemetry {
 }
 
 #[cfg(test)]
+use wire::anthropic::AnthropicUpstreamKind;
+#[cfg(test)]
+use wire::anthropic::ThinkingEmission;
+#[cfg(test)]
+use wire::anthropic::UnsignedReplay;
+#[cfg(test)]
 use wire::anthropic::build_messages_messages;
+#[cfg(test)]
+use wire::anthropic::thinking_400_recovery_class;
 #[cfg(test)]
 use wire::chat::build_chat_messages;
 #[cfg(test)]

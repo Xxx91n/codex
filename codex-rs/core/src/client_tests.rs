@@ -1,14 +1,18 @@
+use super::AnthropicUpstreamKind;
 use super::AuthRequestTelemetryContext;
 use super::CompactConversationRequestSettings;
 use super::ModelClient;
 use super::PendingUnauthorizedRetry;
 use super::Prompt;
+use super::ThinkingEmission;
+use super::UnsignedReplay;
 use super::UnauthorizedRecoveryExecution;
 use super::X_CODEX_INSTALLATION_ID_HEADER;
 use super::X_CODEX_PARENT_THREAD_ID_HEADER;
 use super::X_CODEX_TURN_METADATA_HEADER;
 use super::X_CODEX_WINDOW_ID_HEADER;
 use super::X_OPENAI_SUBAGENT_HEADER;
+use super::thinking_400_recovery_class;
 use crate::AttestationContext;
 use crate::AttestationProvider;
 use crate::GenerateAttestationFuture;
@@ -1456,7 +1460,12 @@ fn build_messages_messages_serializes_tool_roundtrip_items() {
         },
     ];
 
-    let messages = super::build_messages_messages(input);
+    let messages = super::build_messages_messages(
+        input,
+        ThinkingEmission::Standard {
+            unsigned: UnsignedReplay::Preserve,
+        },
+    );
     assert_eq!(
         messages,
         vec![
@@ -1540,7 +1549,12 @@ fn build_messages_messages_emits_image_blocks_and_replays_thinking_with_signatur
         },
     ];
 
-    let messages = super::build_messages_messages(input);
+    let messages = super::build_messages_messages(
+        input,
+        ThinkingEmission::Standard {
+            unsigned: UnsignedReplay::Preserve,
+        },
+    );
     let user = &messages[0];
     assert_eq!(user["role"], "user");
     let blocks = user["content"].as_array().expect("user content array");
@@ -1564,20 +1578,54 @@ fn build_messages_messages_emits_image_blocks_and_replays_thinking_with_signatur
 }
 
 #[test]
-fn build_messages_messages_drops_unsigned_thinking_replay() {
+fn build_messages_messages_drops_unsigned_thinking_replay_on_first_party_and_preserves_on_compatible() {
+    use codex_protocol::models::ReasoningItemContent;
     use codex_protocol::models::ResponseItem;
-    // Without a signature, Anthropic would 400 ("cannot be modified")
-    // on tool-call replays; drop the block instead (contract allows
-    // omission on relaxed paths).
+    // ADR-0009 revised the old unconditional-drop red line (ADR-0003) into a
+    // conditional dispatch: first-party upstreams drop unsigned blocks on the
+    // branches the server does not enforce (guard G1 escalates the manual +
+    // tool_use shape before send), while compatible endpoints must get the
+    // block back verbatim or the next tool round 400s (D-009 finding 4).
     let input = vec![ResponseItem::Reasoning {
         id: None,
         summary: vec![],
-        content: Some(vec![]),
+        content: Some(vec![ReasoningItemContent::ReasoningText {
+            text: "planning the answer".to_string(),
+        }]),
         encrypted_content: None,
         internal_chat_message_metadata_passthrough: None,
     }];
-    let messages = super::build_messages_messages(input);
-    assert!(messages.is_empty());
+
+    let dropped = super::build_messages_messages(
+        input.clone(),
+        ThinkingEmission::Standard {
+            unsigned: UnsignedReplay::DropWarn,
+        },
+    );
+    assert!(
+        dropped.is_empty(),
+        "first-party unenforced branch drops the unsigned block"
+    );
+
+    let kept = super::build_messages_messages(
+        input.clone(),
+        ThinkingEmission::Standard {
+            unsigned: UnsignedReplay::Preserve,
+        },
+    );
+    assert_eq!(kept[0]["role"], "assistant");
+    assert_eq!(kept[0]["content"][0]["type"], "thinking");
+    assert_eq!(kept[0]["content"][0]["thinking"], "planning the answer");
+    assert!(
+        kept[0]["content"][0].get("signature").is_none(),
+        "preserved replay must not fabricate a signature"
+    );
+
+    let degraded = super::build_messages_messages(input, ThinkingEmission::Degrade);
+    assert!(
+        degraded.is_empty(),
+        "guard degradation strips every thinking-family block"
+    );
 }
 
 #[test]
@@ -1990,7 +2038,12 @@ fn build_messages_messages_emits_redacted_thinking_block_verbatim() {
             internal_chat_message_metadata_passthrough: None,
         },
     ];
-    let messages = super::build_messages_messages(input);
+    let messages = super::build_messages_messages(
+        input,
+        ThinkingEmission::Standard {
+            unsigned: UnsignedReplay::Preserve,
+        },
+    );
     // The user message is preserved.
     assert_eq!(messages[0]["role"], "user");
     // The assistant turn opens with the redacted_thinking block (verbatim
@@ -2002,4 +2055,259 @@ fn build_messages_messages_emits_redacted_thinking_block_verbatim() {
     assert_eq!(content[0]["signature"], "sig-r-out-1", "signature must round-trip verbatim");
     assert_eq!(content[1]["type"], "text");
     assert_eq!(content[1]["text"], "answer");
+}
+// ---- ADR-0009: thinking-drop conditional red line + guards G1/G3 ----
+
+/// Anthropic model client for the ADR-0009 thinking-replay tests, pointed at
+/// `base_url` with the manual thinking track active via the legacy budget.
+fn thinking_replay_client(base_url: &str, adaptive: bool) -> ModelClient {
+    let mut provider = create_oss_provider_with_base_url(base_url, WireApi::Anthropic);
+    provider.anthropic_max_tokens = Some(128_000);
+    provider.anthropic_thinking_budget = Some(4_096);
+    provider.anthropic_adaptive_thinking = adaptive;
+    ModelClient::new(
+        None,
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        provider,
+        SessionSource::Cli,
+        "test_originator".to_string(),
+        None,
+        true,
+        false,
+        false,
+        None,
+        false,
+        None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    )
+}
+
+/// A tool round mid-flight: unsigned-or-signed reasoning (by flag), a
+/// tool_use call, and its result — the final assistant message carries a
+/// tool_use block, the shape that hard-400s under manual thinking when the
+/// replay cannot lead with a thinking block (ADR-0009 / guard G1).
+fn thinking_replay_tool_use_history(signed: bool) -> Vec<codex_protocol::models::ResponseItem> {
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::FunctionCallOutputPayload;
+    use codex_protocol::models::ReasoningItemContent;
+    use codex_protocol::models::ResponseItem;
+    vec![
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "run it".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::Reasoning {
+            id: None,
+            summary: vec![],
+            content: Some(vec![ReasoningItemContent::ReasoningText {
+                text: "planning".to_string(),
+            }]),
+            encrypted_content: if signed {
+                Some("sig-replay-1".to_string())
+            } else {
+                None
+            },
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "shell".to_string(),
+            namespace: None,
+            arguments: r#"{"cmd":"true"}"#.to_string(),
+            encrypted_function_args: None,
+            call_id: "toolu_replay_1".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("toolu_replay_1".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("done".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ]
+}
+
+#[test]
+fn build_messages_request_thinking_replay_first_party_manual_tool_use_degrades() {
+    // Guard G1: on a first-party upstream the manual (enabled) track with a
+    // trailing tool_use turn whose unsigned thinking was dropped would be
+    // hard-400ed; the builder must strip the thinking parameter and all
+    // thinking blocks instead of sending the doomed shape bare.
+    let client = thinking_replay_client("https://api.anthropic.com/v1", false);
+    let mut prompt = Prompt::default();
+    prompt.input = thinking_replay_tool_use_history(/*signed*/ false);
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &test_model_info(), None)
+        .expect("messages request should build");
+    assert!(
+        request.get("thinking").is_none(),
+        "G1 must drop the thinking parameter, not bare-send manual+tool_use"
+    );
+    let assistant = &request["messages"][1];
+    assert_eq!(assistant["role"], "assistant");
+    let blocks = assistant["content"].as_array().expect("assistant blocks");
+    assert_eq!(blocks.len(), 1, "degraded round strips thinking blocks too");
+    assert_eq!(blocks[0]["type"], "tool_use");
+}
+
+#[test]
+fn build_messages_request_thinking_replay_first_party_manual_signed_leads_and_keeps() {
+    // Control for G1: a signed thinking block replayed verbatim leads the
+    // tool-use turn, satisfying the first-party contract; no degradation.
+    let client = thinking_replay_client("https://api.anthropic.com/v1", false);
+    let mut prompt = Prompt::default();
+    prompt.input = thinking_replay_tool_use_history(/*signed*/ true);
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &test_model_info(), None)
+        .expect("messages request should build");
+    assert_eq!(request["thinking"]["type"], "enabled");
+    let blocks = request["messages"][1]["content"]
+        .as_array()
+        .expect("assistant blocks");
+    assert_eq!(blocks[0]["type"], "thinking");
+    assert_eq!(blocks[0]["signature"], "sig-replay-1");
+    assert_eq!(blocks[1]["type"], "tool_use");
+}
+
+#[test]
+fn build_messages_request_thinking_replay_first_party_adaptive_drops_unsigned_without_degrading() {
+    // ADR-0009 first-party adaptive branch: the server does not enforce the
+    // leading thinking block, so dropping the unsigned block with a warn
+    // leaves the adaptive parameter untouched.
+    use codex_protocol::openai_models::ReasoningEffort;
+    let client = thinking_replay_client("https://api.anthropic.com/v1", true);
+    let mut prompt = Prompt::default();
+    prompt.input = thinking_replay_tool_use_history(/*signed*/ false);
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &test_model_info(), Some(ReasoningEffort::Medium))
+        .expect("messages request should build");
+    assert_eq!(request["thinking"]["type"], "adaptive");
+    assert_eq!(request["output_config"]["effort"], "medium");
+    let blocks = request["messages"][1]["content"]
+        .as_array()
+        .expect("assistant blocks");
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0]["type"], "tool_use");
+}
+
+#[test]
+fn build_messages_request_thinking_replay_compatible_preserves_unsigned_block() {
+    // ADR-0009 third-party branch: /anthropic-compatible endpoints never sign
+    // blocks; the unsigned block must go back verbatim (no signature field)
+    // and the manual thinking parameter stays.
+    let client = thinking_replay_client("https://gateway.example.internal/v1", false);
+    let mut prompt = Prompt::default();
+    prompt.input = thinking_replay_tool_use_history(/*signed*/ false);
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &test_model_info(), None)
+        .expect("messages request should build");
+    assert_eq!(request["thinking"]["type"], "enabled");
+    let blocks = request["messages"][1]["content"]
+        .as_array()
+        .expect("assistant blocks");
+    assert_eq!(blocks[0]["type"], "thinking");
+    assert_eq!(blocks[0]["thinking"], "planning");
+    assert!(blocks[0].get("signature").is_none());
+    assert_eq!(blocks[1]["type"], "tool_use");
+}
+
+#[test]
+fn build_messages_request_thinking_replay_degraded_forces_strip() {
+    // G3's forced-degradation entry point: even a signed replay is stripped
+    // along with the thinking parameter for the one bounded retry.
+    let client = thinking_replay_client("https://api.anthropic.com/v1", false);
+    let mut prompt = Prompt::default();
+    prompt.input = thinking_replay_tool_use_history(/*signed*/ true);
+    let request = client
+        .new_session()
+        .build_messages_request_degraded(&prompt, &test_model_info(), None, true)
+        .expect("degraded messages request should build");
+    assert!(request.get("thinking").is_none());
+    let blocks = request["messages"][1]["content"]
+        .as_array()
+        .expect("assistant blocks");
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0]["type"], "tool_use");
+}
+
+#[test]
+fn thinking_replay_400_recovery_class_matches_the_three_documented_texts() {
+    // D-009 finding 3: the three 400 texts guard G3 recognizes.
+    assert_eq!(
+        thinking_400_recovery_class(
+            "messages.1.content.0: Expected `thinking` or `redacted_thinking`, but found `text`"
+        ),
+        Some("expected-thinking-first")
+    );
+    assert_eq!(
+        thinking_400_recovery_class("Expected thinking or redacted_thinking at content index 0"),
+        Some("expected-thinking-first")
+    );
+    assert_eq!(
+        thinking_400_recovery_class(
+            "thinking blocks cannot be modified once they have been sent to the model"
+        ),
+        Some("thinking-immutable")
+    );
+    assert_eq!(
+        thinking_400_recovery_class("INVALID SIGNATURE in thinking block"),
+        Some("invalid-signature")
+    );
+}
+
+#[test]
+fn thinking_replay_400_recovery_class_rejects_unrelated_errors() {
+    assert_eq!(thinking_400_recovery_class("invalid_api_key"), None);
+    assert_eq!(
+        thinking_400_recovery_class("prompt is too long: 300000 tokens > 200000 maximum"),
+        None
+    );
+    assert_eq!(thinking_400_recovery_class(""), None);
+}
+
+#[test]
+fn thinking_replay_upstream_kind_classifies_by_host() {
+    // ADR-0009 discriminator: anthropic.com hosts are first-party; anything
+    // else (gateways, local mocks, lookalike suffixes) fails open to
+    // Compatible so third-party blocks are never silently dropped.
+    assert_eq!(
+        AnthropicUpstreamKind::from_base_url(Some("https://api.anthropic.com/v1")),
+        AnthropicUpstreamKind::FirstParty
+    );
+    assert_eq!(
+        AnthropicUpstreamKind::from_base_url(Some("https://api.anthropic.com:443")),
+        AnthropicUpstreamKind::FirstParty
+    );
+    assert_eq!(
+        AnthropicUpstreamKind::from_base_url(Some("https://ANTHROPIC.COM")),
+        AnthropicUpstreamKind::FirstParty
+    );
+    assert_eq!(
+        AnthropicUpstreamKind::from_base_url(Some("https://api.anthropic.com.attacker.example/")),
+        AnthropicUpstreamKind::Compatible
+    );
+    assert_eq!(
+        AnthropicUpstreamKind::from_base_url(Some("https://bedrock-runtime.us-east-1.amazonaws.com")),
+        AnthropicUpstreamKind::Compatible
+    );
+    assert_eq!(
+        AnthropicUpstreamKind::from_base_url(Some("http://localhost:43123/v1")),
+        AnthropicUpstreamKind::Compatible
+    );
+    assert_eq!(
+        AnthropicUpstreamKind::from_base_url(None),
+        AnthropicUpstreamKind::Compatible
+    );
 }

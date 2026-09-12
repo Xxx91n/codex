@@ -146,7 +146,7 @@ jobs:
       # search_tool_enabled_requires_responses_wire (wire gate two-state).
       - name: Test fork seam suites
         shell: bash
-        run: just test -p codex-api -p codex-core -p codex-state -p codex-tools -E 'package(codex-api) or test(chat_wire) or test(anthropic_wire) or test(cross_wire) or test(reasoning_effort) or test(build_chat_messages_keeps_tool_results_adjacent_to_tool_calls) or test(repair_eol_checksum_family) or test(state_checksum_family) or test(chat_completions_) or test(anthropic_qualifies) or test(anthropic_keeps_default) or test(resolve_qualified_fallback) or test(search_tool_enabled_requires_responses_wire) or test(redacted_thinking)'
+        run: just test -p codex-api -p codex-core -p codex-state -p codex-tools -E 'package(codex-api) or test(chat_wire) or test(anthropic_wire) or test(cross_wire) or test(reasoning_effort) or test(build_chat_messages_keeps_tool_results_adjacent_to_tool_calls) or test(repair_eol_checksum_family) or test(state_checksum_family) or test(chat_completions_) or test(anthropic_qualifies) or test(anthropic_keeps_default) or test(resolve_qualified_fallback) or test(search_tool_enabled_requires_responses_wire) or test(redacted_thinking) or test(thinking_replay)'
       # Sync watchdog (ticket 12): the advisory drift probe turned into a
       # gating measure + ff-only trial. Semantics per ADR-0006 decision 3①
       # (merge-base 口径; tag 口径 banned — upstream squash-merge makes tags
