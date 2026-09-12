@@ -397,7 +397,16 @@ async fn process_messages_sse(
                     if reason == "max_tokens" {
                         debug!("messages stream stopped at max_tokens; output may be truncated");
                     }
-                    stop_reason = Some(reason);
+                    stop_reason = Some(reason.clone());
+                    // Ticket 29 / A-007 step 0: budget-policy decisions must be
+                    // measurable. Emit the upstream-declared terminal reason plus
+                    // the observed output-token count at the same code position
+                    // that handles stop_reason (ticket 27 defect ④); the default
+                    // hook is a no-op, so Chat and Responses wires are unaffected.
+                    if let Some(t) = telemetry.as_ref() {
+                        let output_tokens = output_usage.as_ref().map(|u| u.output_tokens);
+                        t.on_stop_reason(&reason, output_tokens);
+                    }
                 }
             }
             "message_stop" => {

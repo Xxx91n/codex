@@ -29,6 +29,15 @@ pub trait SseTelemetry: Send + Sync {
         >,
         duration: Duration,
     );
+
+    /// Terminal `stop_reason` telemetry hook (fork, ticket 29 / A-007).
+    /// Called once per stream when the Anthropic wire observes the
+    /// upstream-declared terminal reason on `message_delta`. The default
+    /// implementation is a no-op so Chat and Responses wires are unaffected.
+    /// Counters tag by model/provider through the implementation.
+    fn on_stop_reason(&self, stop_reason: &str, output_tokens: Option<i64>) {
+        let _ = (stop_reason, output_tokens);
+    }
 }
 
 /// Telemetry for Responses WebSocket transport.

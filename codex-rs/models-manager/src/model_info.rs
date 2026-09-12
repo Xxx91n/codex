@@ -173,6 +173,7 @@ pub fn model_info_from_slug(slug: &str) -> ModelInfo {
         auto_compact_token_limit: None,
         comp_hash: None,
         effective_context_window_percent: 95,
+        max_output_tokens: None,
         experimental_supported_tools: Vec::new(),
         input_modalities: default_input_modalities(),
         used_fallback_model_metadata: true, // this is the fallback model metadata

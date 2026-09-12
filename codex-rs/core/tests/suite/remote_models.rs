@@ -603,6 +603,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
         auto_compact_token_limit: None,
         comp_hash: None,
         effective_context_window_percent: 95,
+        max_output_tokens: None,
         experimental_supported_tools: Vec::new(),
     };
 
@@ -884,6 +885,7 @@ async fn remote_models_apply_legacy_instructions() -> Result<()> {
         auto_compact_token_limit: None,
         comp_hash: None,
         effective_context_window_percent: 95,
+        max_output_tokens: None,
         experimental_supported_tools: Vec::new(),
     };
     let mut models_response = serde_json::to_value(ModelsResponse {
@@ -1487,6 +1489,7 @@ fn test_remote_model_with_policy(
         auto_compact_token_limit: None,
         comp_hash: None,
         effective_context_window_percent: 95,
+        max_output_tokens: None,
         experimental_supported_tools: Vec::new(),
     }
 }

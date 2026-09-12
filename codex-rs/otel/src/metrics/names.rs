@@ -9,6 +9,12 @@ pub const API_CALL_COUNT_METRIC: &str = "codex.api_request";
 pub const API_CALL_DURATION_METRIC: &str = "codex.api_request.duration_ms";
 pub const SSE_EVENT_COUNT_METRIC: &str = "codex.sse_event";
 pub const SSE_EVENT_DURATION_METRIC: &str = "codex.sse_event.duration_ms";
+/// Terminal `stop_reason` counter (fork, ticket 29 / A-007): budget-policy
+/// decisions are measurable — tagged by `stop_reason` (plus model/provider
+/// through session metadata tags) and paired with the output-token
+/// distribution histogram.
+pub const STOP_REASON_COUNT_METRIC: &str = "codex.stop_reason";
+pub const STOP_REASON_OUTPUT_TOKENS_METRIC: &str = "codex.stop_reason.output_tokens";
 pub const WEBSOCKET_REQUEST_COUNT_METRIC: &str = "codex.websocket.request";
 pub const WEBSOCKET_REQUEST_DURATION_METRIC: &str = "codex.websocket.request.duration_ms";
 pub const WEBSOCKET_EVENT_COUNT_METRIC: &str = "codex.websocket.event";

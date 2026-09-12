@@ -1653,6 +1653,7 @@ async fn view_image_tool_returns_unsupported_message_for_text_only_model() -> an
         auto_compact_token_limit: None,
         comp_hash: None,
         effective_context_window_percent: 95,
+        max_output_tokens: None,
         experimental_supported_tools: Vec::new(),
     };
     mount_models_once(

@@ -439,6 +439,12 @@ pub struct ModelInfo {
     /// context window when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_compact_token_limit: Option<i64>,
+    /// Anthropic Messages wire budget ceiling for this model (fork, ticket 29
+    /// / A-007). Same mechanism as `context_window`: metadata sourced from
+    /// the model catalog; `None` means unknown (the wire falls back to
+    /// `DEFAULT_ANTHROPIC_MAX_TOKENS` and warns).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<i64>,
     /// Opaque identifier for compaction-compatible model configurations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comp_hash: Option<String>,
@@ -965,6 +971,7 @@ mod tests {
             auto_compact_token_limit: None,
             comp_hash: None,
             effective_context_window_percent: 95,
+            max_output_tokens: None,
             experimental_supported_tools: vec![],
             input_modalities: default_input_modalities(),
             used_fallback_model_metadata: false,

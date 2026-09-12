@@ -173,12 +173,11 @@ const REALTIME_CALLS_ENDPOINT: &str = "/realtime/calls";
 const CHAT_COMPLETIONS_ENDPOINT: &str = "/chat/completions";
 /// `/messages` is a streaming endpoint, so the idle timeout applies per event.
 const ANTHROPIC_MESSAGES_ENDPOINT: &str = "/messages";
-/// Built-in budget used when the provider cannot tell us a max; the Messages
-/// API requires max_tokens on every request.
-// ponytail: fixed 8192-token output budget truncates long Claude turns
-// (stop_reason=max_tokens now surfaces loudly via sse/messages.rs). upgrade:
-// source per-model max_output_tokens from model/provider config when anthropic
-// deployments need longer turns.
+/// Built-in fallback budget used when neither the provider config nor the
+/// model-catalog metadata can tell us a max; the Messages API requires
+/// max_tokens on every request. Kept (not deleted) per ADR-0002 Ruling 1:
+/// ticket 29 demoted it from the fixed default to the last-resort fallback,
+/// and the wire warns when it applies (unknown/alias model, no metadata).
 const DEFAULT_ANTHROPIC_MAX_TOKENS: u32 = 8_192;
 const RESPONSES_COMPACT_ENDPOINT: &str = "/responses/compact";
 // `/responses/compact` is unary, so the timeout covers the full response rather than one idle
@@ -2708,6 +2707,15 @@ impl SseTelemetry for ApiTelemetry {
         duration: Duration,
     ) {
         self.session_telemetry.log_sse_event(result, duration);
+    }
+
+    /// Ticket 29 / A-007 step 0: forward the terminal `stop_reason` the
+    /// Anthropic wire observed (emitted at the same code position that
+    /// handles `message_delta.stop_reason`, ticket 27 defect ④) into the
+    /// session telemetry counter + output-token histogram. Model/provider
+    /// dimensions ride the session metadata tags.
+    fn on_stop_reason(&self, stop_reason: &str, output_tokens: Option<i64>) {
+        self.session_telemetry.record_stop_reason(stop_reason, output_tokens);
     }
 }
 

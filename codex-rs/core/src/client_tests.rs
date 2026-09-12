@@ -1711,6 +1711,76 @@ fn build_messages_request_clamps_thinking_budget_below_max_tokens() {
 }
 
 #[test]
+fn build_messages_request_metadata_max_tokens_relaxes_thinking_clamp() {
+    // Ticket 29 / A-007 联动验证: with no explicit provider budget, the
+    // model-catalog max_output_tokens metadata now drives max_tokens, so the
+    // thinking clamp widens accordingly instead of hitting the 8192 wall.
+    let mut provider =
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Anthropic);
+    provider.anthropic_max_tokens = None;
+    provider.anthropic_thinking_budget = Some(100_000);
+    let client = ModelClient::new(
+        None,
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        provider,
+        SessionSource::Cli,
+        "test_originator".to_string(),
+        None,
+        true,
+        false,
+        false,
+        None,
+        false,
+        None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    );
+    let prompt = Prompt::default();
+    let mut model_info = test_model_info();
+    model_info.max_output_tokens = Some(200_000);
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &model_info, None)
+        .expect("messages request should build");
+    let obj = request.as_object().expect("object");
+    // Metadata wins (capped at the managed ceiling): max_tokens = 128_000...
+    assert_eq!(obj["max_tokens"], 128_000);
+    // ...and the thinking budget clamps to just under that, not under 8192.
+    assert_eq!(obj["thinking"]["budget_tokens"], 128_000 - 1);
+
+    // Below the cap the metadata value passes through uncapped.
+    let mut provider =
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Anthropic);
+    provider.anthropic_max_tokens = None;
+    provider.anthropic_thinking_budget = Some(100_000);
+    let client = ModelClient::new(
+        None,
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        provider,
+        SessionSource::Cli,
+        "test_originator".to_string(),
+        None,
+        true,
+        false,
+        false,
+        None,
+        false,
+        None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    );
+    let mut model_info = test_model_info();
+    model_info.max_output_tokens = Some(64_000);
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &model_info, None)
+        .expect("messages request should build");
+    let obj = request.as_object().expect("object");
+    assert_eq!(obj["max_tokens"], 64_000);
+    assert_eq!(obj["thinking"]["budget_tokens"], 64_000 - 1);
+}
+
+#[test]
 fn build_messages_request_uses_top_level_system_and_max_tokens() {
     let client = test_model_client(SessionSource::Cli);
     let prompt = Prompt::default();

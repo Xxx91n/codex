@@ -2751,6 +2751,7 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
                 auto_compact_token_limit: None,
                 comp_hash: None,
                 effective_context_window_percent: 95,
+                max_output_tokens: None,
                 experimental_supported_tools: Vec::new(),
                 input_modalities: vec![InputModality::Text],
                 used_fallback_model_metadata: false,

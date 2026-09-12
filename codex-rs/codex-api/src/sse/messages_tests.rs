@@ -638,3 +638,73 @@ async fn redacted_thinking_flushes_from_finish_without_added() {
     assert_eq!(encrypted.as_deref(), Some("enc-payload-red-2\0sig-red-2"));
     assert!(content.is_none(), "redacted block must have content: None, got {content:?}");
 }
+/// Ticket 29 / A-007 step 0: the terminal stop_reason telemetry hook must
+/// fire exactly once per stream with the upstream reason and the observed
+/// output-token count, at the same code position that handles
+/// message_delta.stop_reason (ticket 27 defect ④).
+#[derive(Default)]
+struct RecordingTelemetry {
+    stop_reasons: std::sync::Mutex<Vec<(String, Option<i64>)>>,
+}
+
+impl SseTelemetry for RecordingTelemetry {
+    fn on_sse_poll(
+        &self,
+        _result: &Result<
+            Option<
+                Result<
+                    eventsource_stream::Event,
+                    eventsource_stream::EventStreamError<TransportError>,
+                >,
+            >,
+            tokio::time::error::Elapsed,
+        >,
+        _duration: std::time::Duration,
+    ) {
+    }
+
+    fn on_stop_reason(&self, stop_reason: &str, output_tokens: Option<i64>) {
+        self.stop_reasons
+            .lock()
+            .expect("stop_reasons mutex")
+            .push((stop_reason.to_string(), output_tokens));
+    }
+}
+
+#[tokio::test]
+async fn stop_reason_telemetry_counts_per_stream() {
+    let mut body = String::new();
+    body.push_str(&format!("event: message_start\ndata: {}\n\n", serde_json::json!({
+        "type":"message_start",
+        "message":{"id":"msg_tel","model":"claude-x","usage":{"input_tokens":9,"output_tokens":0}}
+    })));
+    body.push_str(&format!("event: message_delta\ndata: {}\n\n", serde_json::json!({
+        "type":"message_delta",
+        "delta":{"stop_reason":"max_tokens"},
+        "usage":{"output_tokens":77}
+    })));
+    body.push_str(&format!("event: message_stop\ndata: {}\n\n", serde_json::json!({"type":"message_stop"})));
+
+    let telemetry = std::sync::Arc::new(RecordingTelemetry::default());
+    let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent, ApiError>>(16);
+    let stream = ReaderStream::new(std::io::Cursor::new(body))
+        .map_err(|err| TransportError::Network(err.to_string()));
+    tokio::spawn(super::process_messages_sse(
+        Box::pin(stream),
+        tx,
+        std::time::Duration::from_secs(30),
+        Some(telemetry.clone() as std::sync::Arc<dyn SseTelemetry>),
+    ));
+    while rx.recv().await.is_some() {}
+
+    let recorded = telemetry
+        .stop_reasons
+        .lock()
+        .expect("stop_reasons mutex")
+        .clone();
+    assert_eq!(
+        recorded,
+        vec![("max_tokens".to_string(), Some(77))],
+        "stop_reason hook must fire once per stream with reason + output tokens"
+    );
+}

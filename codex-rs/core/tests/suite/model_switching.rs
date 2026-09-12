@@ -152,6 +152,7 @@ fn test_model_info(
         auto_compact_token_limit: None,
         comp_hash: None,
         effective_context_window_percent: 95,
+        max_output_tokens: None,
         experimental_supported_tools: Vec::new(),
     }
 }
@@ -1389,6 +1390,7 @@ async fn model_switch_to_smaller_model_updates_token_context_window() -> Result<
         auto_compact_token_limit: None,
         comp_hash: None,
         effective_context_window_percent,
+        max_output_tokens: None,
         experimental_supported_tools: Vec::new(),
     };
     let mut smaller_model = base_model.clone();

@@ -312,9 +312,23 @@ impl ModelClientSession {
         // selected (adaptive for Claude 4.6+ deployments, manual bucketed
         // budget otherwise). The legacy provider-level budget stays the
         // non-effort path so plain budget configs behave exactly as before.
-        let max_tokens = provider
-            .anthropic_max_tokens
-            .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS);
+        // Ticket 29 / A-007: explicit provider config beats model-catalog
+        // metadata beats the built-in fallback, and the winning value is
+        // capped so the budget stays bounded. Platform deployments
+        // (Bedrock/Vertex-style) set `anthropic_max_tokens` explicitly,
+        // which is the documented guard for joint input+output budget
+        // reservation (D-006 step 2). The fallback must be visible.
+        let resolved_max_tokens = super::max_tokens::resolve_max_tokens(
+            model_info,
+            provider.anthropic_max_tokens,
+        );
+        let max_tokens = resolved_max_tokens.value;
+        if resolved_max_tokens.fallback_used {
+            warn!(
+                "anthropic max_tokens: model {} has no max_output_tokens metadata and no explicit anthropic_max_tokens config; falling back to the built-in {DEFAULT_ANTHROPIC_MAX_TOKENS} budget",
+                model_info.slug,
+            );
+        }
         let mut thinking = match effort.as_ref() {
             Some(effort) => {
                 if provider.anthropic_thinking_budget.is_some() {
