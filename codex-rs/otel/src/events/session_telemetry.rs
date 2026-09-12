@@ -19,9 +19,9 @@ use crate::metrics::RESPONSES_API_OVERHEAD_DURATION_METRIC;
 use crate::metrics::Result as MetricsResult;
 use crate::metrics::SSE_EVENT_COUNT_METRIC;
 use crate::metrics::SSE_EVENT_DURATION_METRIC;
+use crate::metrics::STARTUP_PHASE_DURATION_METRIC;
 use crate::metrics::STOP_REASON_COUNT_METRIC;
 use crate::metrics::STOP_REASON_OUTPUT_TOKENS_METRIC;
-use crate::metrics::STARTUP_PHASE_DURATION_METRIC;
 use crate::metrics::SessionMetricTagValues;
 use crate::metrics::TOOL_CALL_COUNT_METRIC;
 use crate::metrics::TOOL_CALL_DURATION_METRIC;
@@ -1061,7 +1061,11 @@ impl SessionTelemetry {
     /// reason; model/provider dimensions ride the session metadata tags.
     pub fn record_stop_reason(&self, stop_reason: &str, output_tokens: Option<i64>) {
         let reason_tag = sanitize_metric_tag_value(stop_reason);
-        self.counter(STOP_REASON_COUNT_METRIC, /*inc*/ 1, &[("stop_reason", reason_tag.as_str())]);
+        self.counter(
+            STOP_REASON_COUNT_METRIC,
+            /*inc*/ 1,
+            &[("stop_reason", reason_tag.as_str())],
+        );
         if let Some(output_tokens) = output_tokens {
             self.histogram(
                 STOP_REASON_OUTPUT_TOKENS_METRIC,

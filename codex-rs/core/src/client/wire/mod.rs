@@ -8,8 +8,8 @@
 
 pub(crate) mod anthropic;
 pub(crate) mod chat;
-pub(crate) mod reasoning_effort;
 pub(crate) mod max_tokens;
+pub(crate) mod reasoning_effort;
 
 pub(crate) fn content_items_to_text(
     content: &[codex_protocol::models::ContentItem],

@@ -4,8 +4,8 @@ use super::ModelClient;
 use super::PendingUnauthorizedRetry;
 use super::Prompt;
 use super::ThinkingEmission;
-use super::UnsignedReplay;
 use super::UnauthorizedRecoveryExecution;
+use super::UnsignedReplay;
 use super::X_CODEX_INSTALLATION_ID_HEADER;
 use super::X_CODEX_PARENT_THREAD_ID_HEADER;
 use super::X_CODEX_TURN_METADATA_HEADER;
@@ -1591,7 +1591,8 @@ fn build_messages_messages_emits_image_blocks_and_replays_thinking_with_signatur
 }
 
 #[test]
-fn build_messages_messages_drops_unsigned_thinking_replay_on_first_party_and_preserves_on_compatible() {
+fn build_messages_messages_drops_unsigned_thinking_replay_on_first_party_and_preserves_on_compatible()
+ {
     use codex_protocol::models::ReasoningItemContent;
     use codex_protocol::models::ResponseItem;
     // ADR-0009 revised the old unconditional-drop red line (ADR-0003) into a
@@ -2098,7 +2099,9 @@ fn build_messages_messages_emits_redacted_thinking_block_verbatim() {
         ResponseItem::Message {
             id: None,
             role: "user".to_string(),
-            content: vec![codex_protocol::models::ContentItem::InputText { text: "ask".to_string() }],
+            content: vec![codex_protocol::models::ContentItem::InputText {
+                text: "ask".to_string(),
+            }],
             phase: None,
             internal_chat_message_metadata_passthrough: None,
         },
@@ -2116,7 +2119,9 @@ fn build_messages_messages_emits_redacted_thinking_block_verbatim() {
         ResponseItem::Message {
             id: None,
             role: "assistant".to_string(),
-            content: vec![codex_protocol::models::ContentItem::OutputText { text: "answer".to_string() }],
+            content: vec![codex_protocol::models::ContentItem::OutputText {
+                text: "answer".to_string(),
+            }],
             phase: None,
             internal_chat_message_metadata_passthrough: None,
         },
@@ -2131,11 +2136,25 @@ fn build_messages_messages_emits_redacted_thinking_block_verbatim() {
     assert_eq!(messages[0]["role"], "user");
     // The assistant turn opens with the redacted_thinking block (verbatim
     // payload + signature), followed by the text block.
-    let assistant = messages.iter().find(|m| m["role"] == "assistant").expect("assistant turn");
-    let content = assistant["content"].as_array().expect("assistant content array");
-    assert_eq!(content[0]["type"], "redacted_thinking", "first block must be redacted_thinking, not thinking");
-    assert_eq!(content[0]["data"], "data-r-out-1", "encrypted payload must round-trip verbatim");
-    assert_eq!(content[0]["signature"], "sig-r-out-1", "signature must round-trip verbatim");
+    let assistant = messages
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .expect("assistant turn");
+    let content = assistant["content"]
+        .as_array()
+        .expect("assistant content array");
+    assert_eq!(
+        content[0]["type"], "redacted_thinking",
+        "first block must be redacted_thinking, not thinking"
+    );
+    assert_eq!(
+        content[0]["data"], "data-r-out-1",
+        "encrypted payload must round-trip verbatim"
+    );
+    assert_eq!(
+        content[0]["signature"], "sig-r-out-1",
+        "signature must round-trip verbatim"
+    );
     assert_eq!(content[1]["type"], "text");
     assert_eq!(content[1]["text"], "answer");
 }
@@ -2382,7 +2401,9 @@ fn thinking_replay_upstream_kind_classifies_by_host() {
         AnthropicUpstreamKind::Compatible
     );
     assert_eq!(
-        AnthropicUpstreamKind::from_base_url(Some("https://bedrock-runtime.us-east-1.amazonaws.com")),
+        AnthropicUpstreamKind::from_base_url(Some(
+            "https://bedrock-runtime.us-east-1.amazonaws.com"
+        )),
         AnthropicUpstreamKind::Compatible
     );
     assert_eq!(

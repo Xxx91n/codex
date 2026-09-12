@@ -2671,7 +2671,8 @@ impl SseTelemetry for ApiTelemetry {
     /// session telemetry counter + output-token histogram. Model/provider
     /// dimensions ride the session metadata tags.
     fn on_stop_reason(&self, stop_reason: &str, output_tokens: Option<i64>) {
-        self.session_telemetry.record_stop_reason(stop_reason, output_tokens);
+        self.session_telemetry
+            .record_stop_reason(stop_reason, output_tokens);
     }
 }
 

@@ -435,7 +435,9 @@ fn messages_sse_thinking_then_tool_use(
             "index": index,
             "delta": {"type": "signature_delta", "signature": signature},
         })));
-        body.push_str(&frame(serde_json::json!({"type": "content_block_stop", "index": index})));
+        body.push_str(&frame(
+            serde_json::json!({"type": "content_block_stop", "index": index}),
+        ));
         index += 1;
     }
     if let Some((text, signature)) = thinking {
@@ -456,7 +458,9 @@ fn messages_sse_thinking_then_tool_use(
                 "delta": {"type": "signature_delta", "signature": signature},
             })));
         }
-        body.push_str(&frame(serde_json::json!({"type": "content_block_stop", "index": index})));
+        body.push_str(&frame(
+            serde_json::json!({"type": "content_block_stop", "index": index}),
+        ));
         index += 1;
     }
     let mid = arguments_json.len() / 2;
@@ -476,7 +480,9 @@ fn messages_sse_thinking_then_tool_use(
         "index": index,
         "delta": {"type": "input_json_delta", "partial_json": b},
     })));
-    body.push_str(&frame(serde_json::json!({"type": "content_block_stop", "index": index})));
+    body.push_str(&frame(
+        serde_json::json!({"type": "content_block_stop", "index": index}),
+    ));
     body.push_str(&frame(serde_json::json!({
         "type": "message_delta",
         "delta": {"stop_reason": "tool_use"},
@@ -559,7 +565,10 @@ async fn drive_thinking_tool_round(
 
     let first = first_requests.lock().unwrap().first().cloned();
     let second = second_requests.lock().unwrap().first().cloned();
-    Ok((first.expect("tool_use request recorded"), second.expect("follow-up request recorded")))
+    Ok((
+        first.expect("tool_use request recorded"),
+        second.expect("follow-up request recorded"),
+    ))
 }
 
 /// G6 path 1 (ADR-0009): a signed thinking block from a tool round must be

@@ -190,8 +190,12 @@ impl ModelClientSession {
                 compression: responses_options.compression,
             };
 
-            let request = self
-                .build_messages_request_degraded(prompt, model_info, effort.clone(), thinking_degraded)?;
+            let request = self.build_messages_request_degraded(
+                prompt,
+                model_info,
+                effort.clone(),
+                thinking_degraded,
+            )?;
             let client =
                 ApiMessagesClient::new(transport, client_setup.api_provider, client_setup.api_auth)
                     .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
@@ -283,10 +287,7 @@ impl ModelClientSession {
         effort: Option<ReasoningEffortConfig>,
     ) -> Result<serde_json::Value> {
         self.build_messages_request_degraded(
-            prompt,
-            model_info,
-            effort,
-            /*thinking_degraded*/ false,
+            prompt, model_info, effort, /*thinking_degraded*/ false,
         )
     }
 
@@ -318,10 +319,8 @@ impl ModelClientSession {
         // (Bedrock/Vertex-style) set `anthropic_max_tokens` explicitly,
         // which is the documented guard for joint input+output budget
         // reservation (D-006 step 2). The fallback must be visible.
-        let resolved_max_tokens = super::max_tokens::resolve_max_tokens(
-            model_info,
-            provider.anthropic_max_tokens,
-        );
+        let resolved_max_tokens =
+            super::max_tokens::resolve_max_tokens(model_info, provider.anthropic_max_tokens);
         let max_tokens = resolved_max_tokens.value;
         if resolved_max_tokens.fallback_used {
             warn!(
@@ -530,8 +529,7 @@ pub(crate) fn build_messages_messages(
                 content: None,
                 encrypted_content: Some(combined),
                 ..
-            } if combined.contains('\0') =>
-            {
+            } if combined.contains('\0') => {
                 if matches!(emission, ThinkingEmission::Degrade) {
                     continue;
                 }
@@ -746,14 +744,14 @@ fn content_items_to_image_blocks(
 /// must be degraded before send, never sent bare.
 fn manual_tool_use_leads_without_thinking(messages: &[serde_json::Value]) -> bool {
     let Some(assistant) = messages.iter().rev().find(|message| {
-        message
-            .get("role")
-            .and_then(serde_json::Value::as_str)
-            == Some("assistant")
+        message.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
     }) else {
         return false;
     };
-    let Some(blocks) = assistant.get("content").and_then(serde_json::Value::as_array) else {
+    let Some(blocks) = assistant
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+    else {
         return false;
     };
     let leads_with_thinking = blocks.first().is_some_and(|block| {
@@ -762,12 +760,9 @@ fn manual_tool_use_leads_without_thinking(messages: &[serde_json::Value]) -> boo
             Some("thinking") | Some("redacted_thinking")
         )
     });
-    let has_tool_use = blocks.iter().any(|block| {
-        block
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            == Some("tool_use")
-    });
+    let has_tool_use = blocks
+        .iter()
+        .any(|block| block.get("type").and_then(serde_json::Value::as_str) == Some("tool_use"));
     has_tool_use && !leads_with_thinking
 }
 

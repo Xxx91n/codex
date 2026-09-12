@@ -165,6 +165,7 @@ impl MessageUsage {
             codex_rollout_budget_units: None,
         }
     }
+}
 
 pub fn spawn_anthropic_messages_stream(
     stream_response: StreamResponse,

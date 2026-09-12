@@ -33,7 +33,10 @@ pub(crate) struct ResolvedMaxTokens {
 /// source is provider-level config — Bedrock/Vertex-style deployments set
 /// it explicitly, which is the documented platform guard for joint
 /// input+output budget reservation (D-006 step 2).
-pub(crate) fn resolve_max_tokens(model_info: &ModelInfo, explicit: Option<u32>) -> ResolvedMaxTokens {
+pub(crate) fn resolve_max_tokens(
+    model_info: &ModelInfo,
+    explicit: Option<u32>,
+) -> ResolvedMaxTokens {
     let (value, fallback_used) = match explicit {
         // Explicit provider config wins and carries the platform-guard duty:
         // Bedrock/Vertex operators reserve joint budget through it, so it is
