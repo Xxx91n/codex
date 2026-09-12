@@ -299,7 +299,6 @@ async fn process_messages_sse(
                         .await;
                 }
                 if let (Some(index), Some(block)) = (event.index, &event.content_block)
-                if let (Some(index), Some(block)) = (event.index, &event.content_block)
                     && block.block_type == "redacted_thinking"
                 {
                     // Preserve the opaque block verbatim (encrypted payload
@@ -314,6 +313,7 @@ async fn process_messages_sse(
                         },
                     );
                 }
+                if let (Some(index), Some(block)) = (event.index, &event.content_block)
                     && block.block_type == "tool_use"
                 {
                     tool_uses.insert(
