@@ -922,9 +922,9 @@ async fn dispatch_resolves_chat_wire_qualified_names_to_namespaced_handlers() ->
             /*terminal_outcome_reached*/ None,
         )
         .await?;
-    let response = result.into_response();
+    let response = result.into_response().item;
     match response {
-        ResponseInputItem::FunctionCallOutput { call_id, output } => {
+        ResponseItem::FunctionCallOutput { call_id, .. } => {
             assert_eq!(call_id, "qualified-call");
         }
         other => panic!("expected function call output, got {other:?}"),

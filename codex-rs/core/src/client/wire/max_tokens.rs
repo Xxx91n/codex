@@ -65,7 +65,7 @@ mod tests {
     use codex_protocol::openai_models::ConfigShellToolType;
     use codex_protocol::openai_models::InputModality;
     use codex_protocol::openai_models::ModelVisibility;
-    use codex_protocol::openai_models::ReasoningSummary;
+    use codex_protocol::config_types::ReasoningSummary;
     use codex_protocol::openai_models::TruncationPolicyConfig;
     use codex_protocol::openai_models::WebSearchToolType;
 
@@ -114,6 +114,9 @@ mod tests {
             tool_mode: None,
             multi_agent_version: None,
             multi_agent_reasoning_effort: None,
+            available_access_programs: None,
+            guardian: None,
+            supports_experimental_context: false,
             max_output_tokens,
         }
     }

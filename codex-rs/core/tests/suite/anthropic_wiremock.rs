@@ -587,7 +587,7 @@ async fn anthropic_wire_thinking_replay_signed_block_roundtrip() -> Result<()> {
             r#"{"cmd":"echo thinking-replay"}"#,
         ),
     )
-    .await;
+    .await?;
 
     let blocks = recorded_assistant_blocks(&second);
     assert_eq!(blocks.len(), 2, "thinking + tool_use: {blocks:?}");
@@ -617,7 +617,7 @@ async fn anthropic_wire_thinking_replay_unsigned_preserved_on_compatible_upstrea
             r#"{"cmd":"echo thinking-replay"}"#,
         ),
     )
-    .await;
+    .await?;
 
     let blocks = recorded_assistant_blocks(&second);
     assert_eq!(
@@ -650,7 +650,7 @@ async fn anthropic_wire_thinking_replay_redacted_block_roundtrip() -> Result<()>
             r#"{"cmd":"echo thinking-replay"}"#,
         ),
     )
-    .await;
+    .await?;
 
     let blocks = recorded_assistant_blocks(&second);
     assert_eq!(blocks.len(), 2, "redacted + tool_use: {blocks:?}");
