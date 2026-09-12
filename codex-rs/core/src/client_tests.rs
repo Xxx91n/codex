@@ -1759,8 +1759,9 @@ fn build_messages_request_metadata_max_tokens_relaxes_thinking_clamp() {
     let obj = request.as_object().expect("object");
     // Metadata wins (capped at the managed ceiling): max_tokens = 128_000...
     assert_eq!(obj["max_tokens"], 128_000);
-    // ...and the thinking budget clamps to just under that, not under 8192.
-    assert_eq!(obj["thinking"]["budget_tokens"], 128_000 - 1);
+    // ...and the thinking budget keeps its configured value (100_000) under
+    // that ceiling instead of being cut by the 8192 wall.
+    assert_eq!(obj["thinking"]["budget_tokens"], 100_000);
 
     // Below the cap the metadata value passes through uncapped.
     let mut provider =

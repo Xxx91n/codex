@@ -43,8 +43,10 @@ pub(crate) fn resolve_max_tokens(
         // trusted (still capped) rather than intersected with metadata.
         Some(explicit) => (explicit.min(ANTHROPIC_MAX_TOKENS_MANAGED_CAP), false),
         None => match model_info.max_output_tokens {
-            Some(metadata) => (
-                u32::try_from(metadata.clamp(0, i64::from(ANTHROPIC_MAX_TOKENS_MANAGED_CAP)))
+            // Non-positive metadata is a corrupt catalog entry: it must
+            // degrade to the visible built-in fallback, not clamp to 0.
+            Some(metadata) if metadata > 0 => (
+                u32::try_from(metadata.min(i64::from(ANTHROPIC_MAX_TOKENS_MANAGED_CAP)))
                     .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS),
                 false,
             ),
