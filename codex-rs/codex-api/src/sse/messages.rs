@@ -499,6 +499,7 @@ async fn process_messages_sse(
 /// when the stream left a tool_use with truncated input JSON: replaying a
 /// silently-substituted argument object would corrupt the agent loop (goose
 /// issue #7527 / PR #7840 lesson — fail loud, do not fake a call).
+#[allow(clippy::too_many_arguments)] // 8 params: tx + 3 agg maps + text/id/usage/stop_reason (fork SSE flush)
 async fn finish_messages_stream(
     tx_event: &mpsc::Sender<Result<ResponseEvent, ApiError>>,
     assistant_text: &str,
@@ -546,7 +547,7 @@ async fn finish_messages_stream(
     // (ticket 27 def-①). Outbound rebuilds the native block
     // from the fork-internal "\0" combined encoding, same as the
     // content_block_stop path above.
-    for (_index, redacted) in redacted_blocks {
+    for redacted in redacted_blocks.values() {
         // Flush: same fork-internal `data\0sig` combined encoding as the
         // `content_block_stop` path (see comment there).
         let data = redacted.data.as_deref().unwrap_or_default();
