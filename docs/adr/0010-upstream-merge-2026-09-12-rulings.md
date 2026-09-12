@@ -61,3 +61,20 @@ state/model-provider 域接口位移对照（票 32 检查点）：上游 710 �
 - merge diff 巨大（3012 files / +288037 -66202），CI 全量验证为必要门（五步⑤）。
 
 验证往返（五步⑤）：CI 全绿（fork-health wiremock 三件套 + check job）后才允许推远端；本机零构建（CI-only 红线）。
+## 补记：验证往返返修链（2026-09-12 当日完成，r2-r16）
+
+首轮 fork-health（run 34694049698）揭示：票 27 的 `codex-api/src/sse/messages.rs` 自 blob `2493743bb7` 起存在三处结构损坏（`impl MessageUsage` 未闭合 + `content_block_start` 重复的 if-let 头 + 缺 `tool_use` 分支头），导致该文件自票 27 起从未被编译链验证（每轮 CI 红都停在更早的门）。门环递进逐轮暴露并修复：
+
+| 轮 | commit | 内容 | 验证 run |
+|---|---|---|---|
+| r2 | `19c554e199` | 22 格式 hunks（票 27-31 遗留）+ impl 闭合 | 34701350050 |
+| r3 | `53346e910a` | if-let 链两处结构修复 | 34702141771 |
+| r4 | `5c2dec7ebb` | 13 残留格式 hunks（被 parse 错误掩掩） | 34704618270 |
+| r5 | `3eb635e00e` | `Created { response_id: None }` 适配（上游 IR 位移）+ E0507 | 34705358586 |
+| r6 | `e041559cfe` | 发射行 fmt | 34705787118 |
+| r7 | `5cc7b10447` | allow(dead_code)+for_kv_map | 34706596371 |
+| r8 | `d98e97038c` | 测试字段（ReasoningSummary/ModelInfo 新字段/wiremock ?/envelope.item） | 34707946622 |
+| r9 | `04e80557ef`+`05c0955688`+`c4a8622857` | dead_code allow / call_id Option / import 字母序 | 34711841628 |
+| r10 | `b61740f961` | metadata 非正数守卫（E0004 补 Some(_) 兑底 `571cd8032a`）+ 票 29 放宽断言修正 + nextest 过滤词收窄 | **34714654254 全绿** |
+
+接口位移实锤（本表重放验证时未发现、编译链逐轮暴露）：① `ResponseEvent::Created` 结构化（+response_id）；② `Prompt::get_formatted_input_for_request(use_responses_lite: bool)` → `(model_info: &ModelInfo)`。均为 ADR-0007 预判表 S1/S3/S4 型演进，fork 适配保持原语义。另：票 29 的 metadata-relaxes 契约断言自身错误（预算 100_000 低于上限时应保留而非截到上限，该测试从未被执行过）已修正；fork-health 过滤词 `test(max_tokens)` 收窄为三个 fork 侧子串（子串误选上游 code_mode 用例，票 26 教训同款）。**终稿绿证：run 34714654254（main tip `571cd8032a`，全步骤绿含 nextest 338 真跑与同步监控看门犬）。**
