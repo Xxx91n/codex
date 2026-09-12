@@ -522,8 +522,10 @@ fn message_usage_parses_cache_input_tokens_into_token_usage() {
     assert_eq!(token_usage.output_tokens, 7);
     assert_eq!(token_usage.total_tokens, 50 + 30 + 20 + 7);
     let usage_missing_input = MessageUsage {
-        input_tokens: 0, output_tokens: 2,
-        cache_read_input_tokens: 0, cache_creation_input_tokens: 0,
+        input_tokens: 0,
+        output_tokens: 2,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
     };
     let fallback = usage_missing_input.into_token_usage(123);
     assert_eq!(fallback.input_tokens, 123);
@@ -534,9 +536,8 @@ fn message_usage_parses_cache_input_tokens_into_token_usage() {
 /// a usage frame that omits them still parses and maps to zero cache.
 #[test]
 fn message_usage_deserializes_without_cache_fields() {
-    let usage: MessageUsage = serde_json::from_str(
-        r#"{"input_tokens": 4, "output_tokens": 1}"#,
-    ).expect("usage parses without cache fields");
+    let usage: MessageUsage = serde_json::from_str(r#"{"input_tokens": 4, "output_tokens": 1}"#)
+        .expect("usage parses without cache fields");
     assert_eq!(usage.cache_read_input_tokens, 0);
     assert_eq!(usage.cache_creation_input_tokens, 0);
 }
@@ -552,24 +553,51 @@ async fn plain_text_max_tokens_maps_to_context_window_exceeded() {
         "type":"message_start",
         "message":{"id":"msg_trunc_d","model":"claude-x","usage":{"input_tokens":5,"output_tokens":0}}
     })));
-    body.push_str(&format!("event: content_block_delta\ndata: {}\n\n", serde_json::json!({
-        "type":"content_block_delta","index":0,
-        "delta":{"type":"text_delta","text":"partial"}
-    })));
-    body.push_str(&format!("event: message_delta\ndata: {}\n\n", serde_json::json!({
-        "type":"message_delta",
-        "delta":{"stop_reason":"max_tokens"},
-        "usage":{"output_tokens":3}
-    })));
-    body.push_str(&format!("event: message_stop\ndata: {}\n\n", serde_json::json!({"type":"message_stop"})));
+    body.push_str(&format!(
+        "event: content_block_delta\ndata: {}\n\n",
+        serde_json::json!({
+            "type":"content_block_delta","index":0,
+            "delta":{"type":"text_delta","text":"partial"}
+        })
+    ));
+    body.push_str(&format!(
+        "event: message_delta\ndata: {}\n\n",
+        serde_json::json!({
+            "type":"message_delta",
+            "delta":{"stop_reason":"max_tokens"},
+            "usage":{"output_tokens":3}
+        })
+    ));
+    body.push_str(&format!(
+        "event: message_stop\ndata: {}\n\n",
+        serde_json::json!({"type":"message_stop"})
+    ));
 
     let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent, ApiError>>(16);
-    let stream = ReaderStream::new(std::io::Cursor::new(body)).map_err(|err| TransportError::Network(err.to_string()));
-    tokio::spawn(super::process_messages_sse(Box::pin(stream), tx, std::time::Duration::from_secs(30), None));
+    let stream = ReaderStream::new(std::io::Cursor::new(body))
+        .map_err(|err| TransportError::Network(err.to_string()));
+    tokio::spawn(super::process_messages_sse(
+        Box::pin(stream),
+        tx,
+        std::time::Duration::from_secs(30),
+        None,
+    ));
     let mut events = Vec::new();
-    while let Some(ev) = rx.recv().await { events.push(ev); }
-    assert!(events.iter().any(|ev| matches!(ev, Err(ApiError::ContextWindowExceeded))), "plain-text max_tokens must surface ContextWindowExceeded: {events:?}");
-    assert!(!events.iter().any(|ev| matches!(ev, Ok(ResponseEvent::Completed{..}))), "no fake Completed may be synthesized: {events:?}");
+    while let Some(ev) = rx.recv().await {
+        events.push(ev);
+    }
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, Err(ApiError::ContextWindowExceeded))),
+        "plain-text max_tokens must surface ContextWindowExceeded: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|ev| matches!(ev, Ok(ResponseEvent::Completed { .. }))),
+        "no fake Completed may be synthesized: {events:?}"
+    );
 }
 
 /// Defect ① (ticket 27 / A-002): a redacted_thinking block must be preserved
@@ -582,30 +610,57 @@ async fn redacted_thinking_block_is_preserved_and_emitted() {
         "type":"message_start",
         "message":{"id":"msg_red","model":"claude-x","usage":{"input_tokens":3,"output_tokens":0}}
     })));
-    body.push_str(&format!("event: content_block_start\ndata: {}\n\n", serde_json::json!({
-        "type":"content_block_start","index":0,
-        "content_block":{"type":"redacted_thinking","data":"enc-payload-red-1"}
-    })));
-    body.push_str(&format!("event: content_block_delta\ndata: {}\n\n", serde_json::json!({
-        "type":"content_block_delta","index":0,
-        "delta":{"type":"signature_delta","signature":"sig-red-1"}
-    })));
-    body.push_str(&format!("event: content_block_stop\ndata: {}\n\n", serde_json::json!({"type":"content_block_stop","index":0})));
-    body.push_str(&format!("event: message_delta\ndata: {}\n\n", serde_json::json!({
-        "type":"message_delta",
-        "delta":{"stop_reason":"end_turn"},
-        "usage":{"output_tokens":1}
-    })));
-    body.push_str(&format!("event: message_stop\ndata: {}\n\n", serde_json::json!({"type":"message_stop"})));
+    body.push_str(&format!(
+        "event: content_block_start\ndata: {}\n\n",
+        serde_json::json!({
+            "type":"content_block_start","index":0,
+            "content_block":{"type":"redacted_thinking","data":"enc-payload-red-1"}
+        })
+    ));
+    body.push_str(&format!(
+        "event: content_block_delta\ndata: {}\n\n",
+        serde_json::json!({
+            "type":"content_block_delta","index":0,
+            "delta":{"type":"signature_delta","signature":"sig-red-1"}
+        })
+    ));
+    body.push_str(&format!(
+        "event: content_block_stop\ndata: {}\n\n",
+        serde_json::json!({"type":"content_block_stop","index":0})
+    ));
+    body.push_str(&format!(
+        "event: message_delta\ndata: {}\n\n",
+        serde_json::json!({
+            "type":"message_delta",
+            "delta":{"stop_reason":"end_turn"},
+            "usage":{"output_tokens":1}
+        })
+    ));
+    body.push_str(&format!(
+        "event: message_stop\ndata: {}\n\n",
+        serde_json::json!({"type":"message_stop"})
+    ));
 
     let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent, ApiError>>(16);
-    let stream = ReaderStream::new(std::io::Cursor::new(body)).map_err(|err| TransportError::Network(err.to_string()));
-    tokio::spawn(super::process_messages_sse(Box::pin(stream), tx, std::time::Duration::from_secs(30), None));
+    let stream = ReaderStream::new(std::io::Cursor::new(body))
+        .map_err(|err| TransportError::Network(err.to_string()));
+    tokio::spawn(super::process_messages_sse(
+        Box::pin(stream),
+        tx,
+        std::time::Duration::from_secs(30),
+        None,
+    ));
     let mut events = Vec::new();
-    while let Some(ev) = rx.recv().await { events.push(ev); }
+    while let Some(ev) = rx.recv().await {
+        events.push(ev);
+    }
 
     let reasoning = events.iter().find_map(|ev| match ev {
-        Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning { encrypted_content, content, .. })) => Some((encrypted_content.clone(), content.clone())),
+        Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning {
+            encrypted_content,
+            content,
+            ..
+        })) => Some((encrypted_content.clone(), content.clone())),
         _ => None,
     });
     let (encrypted, content) = reasoning.expect("redacted reasoning item must be emitted");
@@ -614,9 +669,23 @@ async fn redacted_thinking_block_is_preserved_and_emitted() {
     // opaque payload + signature combined in encrypted_content (see
     // messages.rs comments for why this encoding survives
     // `should_serialize_reasoning_content` and `event_mapping`).
-    assert!(content.is_none(), "redacted block must have content: None, got {content:?}");
-    assert!(events.iter().any(|ev| matches!(ev, Ok(ResponseEvent::Completed{..}))), "stream should complete after the preserved block: {events:?}");
-    assert!(!events.iter().any(|ev| matches!(ev, Ok(ResponseEvent::OutputItemDone(ResponseItem::Message{..})))), "redacted payload must not become a message: {events:?}");
+    assert!(
+        content.is_none(),
+        "redacted block must have content: None, got {content:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|ev| matches!(ev, Ok(ResponseEvent::Completed { .. }))),
+        "stream should complete after the preserved block: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|ev| matches!(
+            ev,
+            Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { .. }))
+        )),
+        "redacted payload must not become a message: {events:?}"
+    );
 }
 
 /// Defect ① flush path: a redacted_thinking block that never reached
@@ -625,18 +694,43 @@ async fn redacted_thinking_block_is_preserved_and_emitted() {
 async fn redacted_thinking_flushes_from_finish_without_added() {
     let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent, ApiError>>(8);
     let mut redacted: BTreeMap<usize, AggregatedRedactedThinking> = BTreeMap::new();
-    redacted.insert(0, AggregatedRedactedThinking { data: Some("enc-payload-red-2".to_string()), signature: Some("sig-red-2".to_string()) });
-    finish_messages_stream(&tx, "", &BTreeMap::new(), &BTreeMap::new(), &redacted, "msg_red2".to_string(), None, Some("max_tokens")).await;
+    redacted.insert(
+        0,
+        AggregatedRedactedThinking {
+            data: Some("enc-payload-red-2".to_string()),
+            signature: Some("sig-red-2".to_string()),
+        },
+    );
+    finish_messages_stream(
+        &tx,
+        "",
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &redacted,
+        "msg_red2".to_string(),
+        None,
+        Some("max_tokens"),
+    )
+    .await;
     let mut events = Vec::new();
     drop(tx);
-    while let Some(ev) = rx.recv().await { events.push(ev); }
+    while let Some(ev) = rx.recv().await {
+        events.push(ev);
+    }
     let reasoning = events.iter().find_map(|ev| match ev {
-        Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning { encrypted_content, content, .. })) => Some((encrypted_content.clone(), content.clone())),
+        Ok(ResponseEvent::OutputItemDone(ResponseItem::Reasoning {
+            encrypted_content,
+            content,
+            ..
+        })) => Some((encrypted_content.clone(), content.clone())),
         _ => None,
     });
     let (encrypted, content) = reasoning.expect("flushed redacted item expected");
     assert_eq!(encrypted.as_deref(), Some("enc-payload-red-2\0sig-red-2"));
-    assert!(content.is_none(), "redacted block must have content: None, got {content:?}");
+    assert!(
+        content.is_none(),
+        "redacted block must have content: None, got {content:?}"
+    );
 }
 /// Ticket 29 / A-007 step 0: the terminal stop_reason telemetry hook must
 /// fire exactly once per stream with the upstream reason and the observed
@@ -678,12 +772,18 @@ async fn stop_reason_telemetry_counts_per_stream() {
         "type":"message_start",
         "message":{"id":"msg_tel","model":"claude-x","usage":{"input_tokens":9,"output_tokens":0}}
     })));
-    body.push_str(&format!("event: message_delta\ndata: {}\n\n", serde_json::json!({
-        "type":"message_delta",
-        "delta":{"stop_reason":"max_tokens"},
-        "usage":{"output_tokens":77}
-    })));
-    body.push_str(&format!("event: message_stop\ndata: {}\n\n", serde_json::json!({"type":"message_stop"})));
+    body.push_str(&format!(
+        "event: message_delta\ndata: {}\n\n",
+        serde_json::json!({
+            "type":"message_delta",
+            "delta":{"stop_reason":"max_tokens"},
+            "usage":{"output_tokens":77}
+        })
+    ));
+    body.push_str(&format!(
+        "event: message_stop\ndata: {}\n\n",
+        serde_json::json!({"type":"message_stop"})
+    ));
 
     let telemetry = std::sync::Arc::new(RecordingTelemetry::default());
     let (tx, mut rx) = mpsc::channel::<Result<ResponseEvent, ApiError>>(16);

@@ -697,8 +697,8 @@ fn chat_usage_deserializes_with_missing_optional_fields() {
     assert_eq!(usage.prompt_tokens, 7);
     assert_eq!(usage.completion_tokens, 0);
     assert_eq!(usage.total_tokens, 0);
-    let empty: ChatUsage = serde_json::from_str(r#"{}"#)
-        .expect("empty usage parses with all defaults");
+    let empty: ChatUsage =
+        serde_json::from_str(r#"{}"#).expect("empty usage parses with all defaults");
     assert_eq!(empty.prompt_tokens, 0);
     assert_eq!(empty.completion_tokens, 0);
     assert_eq!(empty.total_tokens, 0);
@@ -715,22 +715,37 @@ fn chat_usage_deserializes_with_missing_optional_fields() {
 #[tokio::test]
 async fn chat_chunk_with_partial_usage_still_emits_choices() {
     let mut body = String::new();
-    body.push_str(&format!("data: {}\n\n", serde_json::json!({
-        "choices":[{"index":0,"delta":{"content":"hello"}}],
-        "usage":{"prompt_tokens":2}
-    })));
-    body.push_str(&format!("data: {}\n\n", serde_json::json!({"choices":[],"usage":{"prompt_tokens":2}})));
+    body.push_str(&format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "choices":[{"index":0,"delta":{"content":"hello"}}],
+            "usage":{"prompt_tokens":2}
+        })
+    ));
+    body.push_str(&format!(
+        "data: {}\n\n",
+        serde_json::json!({"choices":[],"usage":{"prompt_tokens":2}})
+    ));
     body.push_str("data: [DONE]\n\n");
     let events = run_chat_sse(body).await;
     let mut saw_text = false;
     let mut saw_completed = false;
     for ev in &events {
-        if let Ok(ResponseEvent::OutputTextDelta(t)) = ev { if t == "hello" { saw_text = true; } }
+        if let Ok(ResponseEvent::OutputTextDelta(t)) = ev {
+            if t == "hello" {
+                saw_text = true;
+            }
+        }
         if let Ok(ResponseEvent::Completed { token_usage, .. }) = ev {
-            if let Some(u) = token_usage { assert_eq!(u.input_tokens, 2); }
+            if let Some(u) = token_usage {
+                assert_eq!(u.input_tokens, 2);
+            }
             saw_completed = true;
         }
     }
-    assert!(saw_text, "text delta from partial-usage chunk must survive: {events:?}");
+    assert!(
+        saw_text,
+        "text delta from partial-usage chunk must survive: {events:?}"
+    );
     assert!(saw_completed, "stream should complete: {events:?}");
 }
