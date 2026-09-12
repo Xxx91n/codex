@@ -50,6 +50,7 @@ pub(crate) fn resolve_max_tokens(
                     .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS),
                 false,
             ),
+            Some(_) => (DEFAULT_ANTHROPIC_MAX_TOKENS, true),
             // Unknown or alias model: the catalog has no ceiling; the built-in
             // 8192 fallback applies and must be visible to the operator.
             None => (DEFAULT_ANTHROPIC_MAX_TOKENS, true),
