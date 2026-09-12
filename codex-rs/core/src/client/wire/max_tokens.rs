@@ -62,10 +62,10 @@ pub(crate) fn resolve_max_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_protocol::config_types::ReasoningSummary;
     use codex_protocol::openai_models::ConfigShellToolType;
     use codex_protocol::openai_models::InputModality;
     use codex_protocol::openai_models::ModelVisibility;
-    use codex_protocol::config_types::ReasoningSummary;
     use codex_protocol::openai_models::TruncationPolicyConfig;
     use codex_protocol::openai_models::WebSearchToolType;
 
