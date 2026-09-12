@@ -47,6 +47,9 @@ pub(crate) struct ResolvedStepSettings {
     pub(crate) reasoning_summary: ReasoningSummary,
     /// Tier sent on requests, filtered by feature and model support.
     pub(crate) service_tier: Option<String>,
+    /// MCP historically follows refreshed thread defaults. Preserve that behavior
+    /// for older clients until this turn receives an explicit live reviewer update.
+    pub(crate) mcp_approvals_reviewer_override: Option<ApprovalsReviewer>,
 }
 
 impl ResolvedStepSettings {
@@ -69,6 +72,7 @@ impl ResolvedStepSettings {
             model_info,
             reasoning_summary,
             service_tier,
+            mcp_approvals_reviewer_override: None,
         }
     }
 
@@ -84,6 +88,12 @@ impl ResolvedStepSettings {
         self.reasoning_effort()
             .or(self.model_info.default_reasoning_level.as_ref())
             .cloned()
+    }
+
+    pub(crate) fn effective_collaboration_mode(&self) -> CollaborationMode {
+        let mut collaboration_mode = self.selected.collaboration_mode.clone();
+        collaboration_mode.settings.model = self.model_info.slug.clone();
+        collaboration_mode
     }
 
     pub(crate) fn approval_policy(&self) -> AskForApproval {
@@ -103,7 +113,7 @@ impl ResolvedStepSettings {
         &self.selected.collaboration_mode
     }
 
-    pub(super) fn personality(&self) -> Option<Personality> {
+    pub(crate) fn personality(&self) -> Option<Personality> {
         self.selected.personality
     }
 
@@ -135,7 +145,11 @@ impl ResolvedStepSettings {
                     .await,
             )
         };
-        Ok(Self::new(Arc::new(selected), model_info, fast_mode_enabled))
+        let mut next = Self::new(Arc::new(selected), model_info, fast_mode_enabled);
+        next.mcp_approvals_reviewer_override = update
+            .approvals_reviewer
+            .or(self.mcp_approvals_reviewer_override);
+        Ok(next)
     }
 
     /// Rechecks the retained selection against current managed constraints.

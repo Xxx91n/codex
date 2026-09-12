@@ -243,8 +243,11 @@ name = "Amazon Bedrock"
 base_url = "https://bedrock.example.com/v1"
 
 [aws]
-profile = "codex-bedrock"
 region = "us-west-2"
+
+[aws.credential_export]
+command = "aws-vault"
+args = ["--profile", "codex-bedrock"]
 
 [aws.auth_refresh]
 command = "aws"
@@ -256,8 +259,13 @@ args = ["login", "--profile", "codex-bedrock"]
     assert_eq!(
         provider.aws,
         Some(ModelProviderAwsAuthInfo {
-            profile: Some("codex-bedrock".to_string()),
+            profile: None,
             region: Some("us-west-2".to_string()),
+            credential_export: Some(AwsCredentialExportConfig {
+                command: "aws-vault".to_string(),
+                args: vec!["--profile".into(), "codex-bedrock".into()],
+                timeout_ms: NonZeroU64::new(30_000).expect("timeout should be non-zero"),
+            }),
             auth_refresh: Some(AwsAuthRefreshConfig {
                 command: "aws".to_string(),
                 args: vec!["login".into(), "--profile".into(), "codex-bedrock".into()],
@@ -285,6 +293,7 @@ fn test_create_amazon_bedrock_provider() {
             aws: Some(ModelProviderAwsAuthInfo {
                 profile: None,
                 region: None,
+                credential_export: None,
                 auth_refresh: None,
             }),
             wire_api: WireApi::Responses,
@@ -323,6 +332,7 @@ fn test_create_amazon_bedrock_runtime_provider_with_aws_configuration() {
         ModelProviderInfo::create_amazon_bedrock_runtime_provider(Some(ModelProviderAwsAuthInfo {
             profile: Some("runtime-profile".to_string()),
             region: Some("us-west-2".to_string()),
+            credential_export: None,
             auth_refresh: None,
         }));
 
@@ -338,6 +348,7 @@ fn test_create_amazon_bedrock_runtime_provider_with_aws_configuration() {
             Some(ModelProviderAwsAuthInfo {
                 profile: Some("runtime-profile".to_string()),
                 region: Some("us-west-2".to_string()),
+                credential_export: None,
                 auth_refresh: None,
             }),
             None,
@@ -439,6 +450,11 @@ fn test_merge_configured_model_providers_adds_custom_provider() {
 
 #[test]
 fn test_merge_configured_model_providers_applies_amazon_bedrock_aws_override() {
+    let credential_export = AwsCredentialExportConfig {
+        command: "aws-vault".to_string(),
+        args: vec!["export".into(), "codex-bedrock".into()],
+        timeout_ms: NonZeroU64::new(30_000).expect("timeout should be non-zero"),
+    };
     let auth_refresh = AwsAuthRefreshConfig {
         command: "aws".to_string(),
         args: vec!["login".into(), "--profile".into(), "codex-bedrock".into()],
@@ -452,8 +468,9 @@ fn test_merge_configured_model_providers_applies_amazon_bedrock_aws_override() {
             anthropic_adaptive_thinking: false,
             anthropic_prompt_caching: None,
             aws: Some(ModelProviderAwsAuthInfo {
-                profile: Some("codex-bedrock".to_string()),
+                profile: None,
                 region: Some("us-west-2".to_string()),
+                credential_export: Some(credential_export.clone()),
                 auth_refresh: Some(auth_refresh.clone()),
             }),
             ..ModelProviderInfo::default()
@@ -465,8 +482,9 @@ fn test_merge_configured_model_providers_applies_amazon_bedrock_aws_override() {
         .get_mut(AMAZON_BEDROCK_PROVIDER_ID)
         .expect("Amazon Bedrock provider should be built in")
         .aws = Some(ModelProviderAwsAuthInfo {
-        profile: Some("codex-bedrock".to_string()),
+        profile: None,
         region: Some("us-west-2".to_string()),
+        credential_export: Some(credential_export),
         auth_refresh: Some(auth_refresh),
     });
 
@@ -484,6 +502,7 @@ fn test_merge_configured_model_providers_applies_runtime_overrides_independently
     let runtime_aws = ModelProviderAwsAuthInfo {
         profile: Some("runtime-profile".to_string()),
         region: Some("eu-west-1".to_string()),
+        credential_export: None,
         auth_refresh: None,
     };
     let configured_model_providers = std::collections::HashMap::from([(
@@ -529,6 +548,7 @@ fn test_merge_configured_model_providers_applies_amazon_bedrock_transport_overri
             aws: Some(ModelProviderAwsAuthInfo {
                 profile: Some("codex-bedrock".to_string()),
                 region: Some("us-west-2".to_string()),
+                credential_export: None,
                 auth_refresh: None,
             }),
             http_headers: Some(maplit::hashmap! {
@@ -547,6 +567,7 @@ fn test_merge_configured_model_providers_applies_amazon_bedrock_transport_overri
     expected_provider.aws = Some(ModelProviderAwsAuthInfo {
         profile: Some("codex-bedrock".to_string()),
         region: Some("us-west-2".to_string()),
+        credential_export: None,
         auth_refresh: None,
     });
     expected_provider
@@ -576,6 +597,7 @@ fn test_merge_configured_model_providers_rejects_amazon_bedrock_non_default_fiel
             aws: Some(ModelProviderAwsAuthInfo {
                 profile: Some("codex-bedrock".to_string()),
                 region: None,
+                credential_export: None,
                 auth_refresh: None,
             }),
             ..ModelProviderInfo::default()
@@ -588,7 +610,7 @@ fn test_merge_configured_model_providers_rejects_amazon_bedrock_non_default_fiel
             configured_model_providers,
         ),
         Err(
-            "model_providers.amazon-bedrock only supports changing `base_url`, `auth`, `http_headers`, `aws.profile`, `aws.region`, and `aws.auth_refresh`; other non-default provider fields are not supported"
+            "model_providers.amazon-bedrock only supports changing `base_url`, `auth`, `http_headers`, `aws.profile`, `aws.region`, `aws.credential_export`, and `aws.auth_refresh`; other non-default provider fields are not supported"
                 .to_string()
         )
     );
@@ -606,6 +628,7 @@ fn test_merge_configured_model_providers_allows_amazon_bedrock_default_fields() 
             aws: Some(ModelProviderAwsAuthInfo {
                 profile: None,
                 region: None,
+                credential_export: None,
                 auth_refresh: None,
             }),
             wire_api: WireApi::Responses,
@@ -632,6 +655,7 @@ fn test_validate_provider_aws_rejects_conflicting_auth() {
         aws: Some(ModelProviderAwsAuthInfo {
             profile: None,
             region: None,
+            credential_export: None,
             auth_refresh: None,
         }),
         env_key: Some("AWS_BEARER_TOKEN_BEDROCK".to_string()),
@@ -655,6 +679,7 @@ fn test_validate_provider_aws_rejects_websockets() {
         aws: Some(ModelProviderAwsAuthInfo {
             profile: None,
             region: None,
+            credential_export: None,
             auth_refresh: None,
         }),
         requires_openai_auth: false,
@@ -685,6 +710,7 @@ fn test_validate_provider_aws_auth_refresh_command() {
             ModelProviderInfo::create_amazon_bedrock_provider(Some(ModelProviderAwsAuthInfo {
                 profile: None,
                 region: None,
+                credential_export: None,
                 auth_refresh: Some(AwsAuthRefreshConfig {
                     command: command.to_string(),
                     args: Vec::new(),
@@ -693,6 +719,78 @@ fn test_validate_provider_aws_auth_refresh_command() {
             }));
 
         assert_eq!(provider.validate(), expected);
+    }
+}
+
+#[test]
+fn test_validate_provider_aws_credential_export_command() {
+    let absolute_command = std::env::current_exe()
+        .expect("current executable should have a path")
+        .to_string_lossy()
+        .into_owned();
+    for (command, expected) in [
+        (
+            String::new(),
+            Err("provider aws.credential_export.command must not be empty".to_string()),
+        ),
+        (
+            "  ".to_string(),
+            Err("provider aws.credential_export.command must not be empty".to_string()),
+        ),
+        ("aws-vault".to_string(), Ok(())),
+        (absolute_command, Ok(())),
+        (
+            "./scripts/export-credentials".to_string(),
+            Err(
+                "provider aws.credential_export.command must be an absolute path or a bare executable name"
+                    .to_string(),
+            ),
+        ),
+        (
+            "scripts/export-credentials".to_string(),
+            Err(
+                "provider aws.credential_export.command must be an absolute path or a bare executable name"
+                    .to_string(),
+            ),
+        ),
+        (
+            "scripts/.".to_string(),
+            Err(
+                "provider aws.credential_export.command must be an absolute path or a bare executable name"
+                    .to_string(),
+            ),
+        ),
+    ] {
+        let mut provider =
+            ModelProviderInfo::create_amazon_bedrock_provider(Some(ModelProviderAwsAuthInfo {
+                profile: None,
+                region: Some("us-west-2".to_string()),
+                credential_export: Some(AwsCredentialExportConfig {
+                    command,
+                    args: vec!["--secret-argument".into()],
+                    timeout_ms: NonZeroU64::new(30_000).expect("timeout should be non-zero"),
+                }),
+                auth_refresh: Some(AwsAuthRefreshConfig {
+                    command: "aws".to_string(),
+                    args: Vec::new(),
+                    timeout_ms: NonZeroU64::new(300_000).expect("timeout should be non-zero"),
+                }),
+            }));
+
+        assert_eq!(provider.validate(), expected);
+        if expected.is_ok() {
+            provider.aws.as_mut().expect("AWS config").profile = Some("codex-bedrock".to_string());
+            assert_eq!(
+                provider.validate(),
+                Err("provider aws.credential_export cannot be combined with aws.profile".to_string()),
+            );
+        }
+        let export = provider
+            .aws
+            .as_ref()
+            .and_then(|aws| aws.credential_export.as_ref())
+            .expect("credential export should be configured");
+        assert!(!format!("{export:?}").contains("--secret-argument"));
     }
 }
 

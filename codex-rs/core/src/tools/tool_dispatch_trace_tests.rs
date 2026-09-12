@@ -66,10 +66,7 @@ impl CoreToolRuntime for TestHandler {}
 struct MissingCellCodeModeSessionProvider;
 
 impl codex_code_mode::CodeModeSessionProvider for MissingCellCodeModeSessionProvider {
-    fn create_session<'a>(
-        &'a self,
-        _delegate: Arc<dyn codex_code_mode::CodeModeSessionDelegate>,
-    ) -> codex_code_mode::CodeModeSessionProviderFuture<'a> {
+    fn create_session(&self) -> codex_code_mode::CodeModeSessionProviderFuture<'_> {
         Box::pin(async {
             Ok(Arc::new(MissingCellCodeModeSession) as Arc<dyn codex_code_mode::CodeModeSession>)
         })
@@ -82,6 +79,7 @@ impl codex_code_mode::CodeModeSession for MissingCellCodeModeSession {
     fn execute<'a>(
         &'a self,
         _request: codex_code_mode::ExecuteRequest,
+        _delegate: Arc<dyn codex_code_mode::CodeModeSessionDelegate>,
     ) -> codex_code_mode::CodeModeSessionResultFuture<'a, codex_code_mode::StartedCell> {
         Box::pin(async { Err("test session cannot execute cells".to_string()) })
     }
@@ -100,6 +98,7 @@ impl codex_code_mode::CodeModeSession for MissingCellCodeModeSession {
         Box::pin(async move {
             Ok(codex_code_mode::WaitOutcome::MissingCell(
                 codex_code_mode::RuntimeResponse::Result {
+                    code_mode_host_duration: None,
                     error_text: Some(format!("exec cell {cell_id} not found")),
                     cell_id,
                     content_items: Vec::new(),
@@ -281,6 +280,7 @@ async fn missing_code_mode_wait_traces_only_the_wait_tool_call() -> anyhow::Resu
     let temp = TempDir::new()?;
     let (mut session, turn) = make_session_and_context().await;
     session.services.code_mode_service = CodeModeService::new(
+        session.thread_id,
         Arc::new(MissingCellCodeModeSessionProvider),
         &turn.config.code_mode,
         session.services.executed_tool_calls.clone(),

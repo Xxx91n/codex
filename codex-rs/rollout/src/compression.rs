@@ -62,11 +62,17 @@ pub(crate) fn compressed_rollout_path(path: &Path) -> PathBuf {
 }
 
 /// Materializes a compressed rollout back to plain `.jsonl` for async append paths.
-pub(crate) async fn materialize_rollout_for_append(path: &Path) -> io::Result<PathBuf> {
+pub(crate) async fn materialize_rollout_for_append(
+    path: &Path,
+    writer_lock: Option<std::sync::Arc<crate::WriterLockGuard>>,
+) -> io::Result<PathBuf> {
     let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || materialize_rollout_for_append_blocking(path.as_path()))
-        .await
-        .map_err(io::Error::other)?
+    tokio::task::spawn_blocking(move || {
+        let _writer_lock = writer_lock;
+        materialize_rollout_for_append_blocking(path.as_path())
+    })
+    .await
+    .map_err(io::Error::other)?
 }
 
 /// Materializes a compressed rollout back to plain `.jsonl` for blocking append paths.
@@ -233,6 +239,7 @@ mod worker {
     use std::io::Write;
     use std::path::Path;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::Duration;
     use std::time::Instant;
     use std::time::SystemTime;
@@ -244,7 +251,6 @@ mod worker {
     use tokio::task::JoinSet;
 
     use crate::ARCHIVED_SESSIONS_SUBDIR;
-    use crate::RolloutReferenceIndex;
     use crate::SESSIONS_SUBDIR;
 
     use super::RolloutFile;
@@ -372,17 +378,9 @@ mod worker {
 
         metrics::run("started");
         let started_at = Instant::now();
+        let writer_locks = Arc::new(crate::WriterLockCoordinator::new(&codex_home));
         let result = async {
             cleanup_stale_temps(codex_home.as_path()).await?;
-            let Some(reference_index) = RolloutReferenceIndex::scan_until(
-                codex_home.as_path(),
-                started_at,
-                WORKER_MAX_RUNTIME,
-            )
-            .await?
-            else {
-                return Ok(CompressionStats::default());
-            };
             let mut stats = CompressionStats::default();
             for root in [
                 codex_home.join(ARCHIVED_SESSIONS_SUBDIR),
@@ -391,7 +389,7 @@ mod worker {
                 if started_at.elapsed() >= WORKER_MAX_RUNTIME {
                     break;
                 }
-                compress_rollouts_in_root(root.as_path(), started_at, &reference_index, &mut stats)
+                compress_rollouts_in_root(root.as_path(), started_at, &mut stats, &writer_locks)
                     .await?;
             }
             Ok::<_, io::Error>(stats)
@@ -432,8 +430,8 @@ mod worker {
     async fn compress_rollouts_in_root(
         root: &Path,
         started_at: Instant,
-        reference_index: &RolloutReferenceIndex,
         stats: &mut CompressionStats,
+        writer_locks: &Arc<crate::WriterLockCoordinator>,
     ) -> io::Result<()> {
         if !tokio::fs::try_exists(root).await.unwrap_or(false) {
             return Ok(());
@@ -491,34 +489,29 @@ mod worker {
                     continue;
                 }
                 let path = rollout_file.into_path();
-                let Some(rollout_id) = crate::rollout_id_from_path(path.as_path()) else {
+                if crate::rollout_id_from_path(path.as_path()).is_none() {
                     stats.skipped = stats.skipped.saturating_add(1);
                     metrics::file("skipped_unreadable_meta");
                     continue;
-                };
-                let Ok(meta) = crate::read_session_meta_line(path.as_path()).await else {
-                    stats.skipped = stats.skipped.saturating_add(1);
-                    metrics::file("skipped_unreadable_meta");
-                    continue;
-                };
-                if reference_index.reference_count(rollout_id) > 0 {
-                    stats.skipped = stats.skipped.saturating_add(1);
-                    metrics::file("skipped_referenced");
-                    continue;
                 }
-                if meta.meta.history_base.is_some() {
-                    stats.skipped = stats.skipped.saturating_add(1);
-                    metrics::file("skipped_fork_pointer");
-                    continue;
-                }
+                let thread_id = match crate::read_session_meta_line(path.as_path()).await {
+                    Ok(metadata) => metadata.meta.id,
+                    Err(_) => {
+                        stats.skipped = stats.skipped.saturating_add(1);
+                        metrics::file("skipped_unreadable_meta");
+                        continue;
+                    }
+                };
                 stats.scanned = stats.scanned.saturating_add(1);
                 metrics::file("scanned");
                 while jobs.len() >= MAX_CONCURRENT_COMPRESSION_JOBS {
                     collect_next_compression_job(&mut jobs, stats).await;
                 }
+                let writer_locks = Arc::clone(writer_locks);
                 jobs.spawn_blocking(move || {
                     let started_at = Instant::now();
-                    let result = compress_rollout_if_cold_blocking(path.as_path());
+                    let result =
+                        compress_rollout_if_cold_blocking(path.as_path(), &writer_locks, thread_id);
                     let duration = started_at.elapsed();
                     (path, duration, result)
                 });
@@ -534,6 +527,7 @@ mod worker {
     enum CompressionOutcome {
         Compressed,
         SkippedNotCold,
+        SkippedBusy,
         SkippedChanged,
         SkippedAlreadyCompressed,
     }
@@ -543,6 +537,7 @@ mod worker {
             match self {
                 CompressionOutcome::Compressed => "compressed",
                 CompressionOutcome::SkippedNotCold => "skipped_not_cold",
+                CompressionOutcome::SkippedBusy => "skipped_busy",
                 CompressionOutcome::SkippedChanged => "skipped_changed",
                 CompressionOutcome::SkippedAlreadyCompressed => "skipped_already_compressed",
             }
@@ -598,6 +593,7 @@ mod worker {
                         stats.compressed = stats.compressed.saturating_add(1);
                     }
                     CompressionOutcome::SkippedNotCold
+                    | CompressionOutcome::SkippedBusy
                     | CompressionOutcome::SkippedChanged
                     | CompressionOutcome::SkippedAlreadyCompressed => {
                         stats.skipped = stats.skipped.saturating_add(1);
@@ -629,7 +625,11 @@ mod worker {
         }
     }
 
-    fn compress_rollout_if_cold_blocking(path: &Path) -> io::Result<CompressionMeasurement> {
+    fn compress_rollout_if_cold_blocking(
+        path: &Path,
+        writer_locks: &Arc<crate::WriterLockCoordinator>,
+        thread_id: codex_protocol::ThreadId,
+    ) -> io::Result<CompressionMeasurement> {
         let before = match cold_file_state(path)? {
             ColdFileState::Cold(state) => state,
             ColdFileState::NotCold(state) => {
@@ -672,6 +672,23 @@ mod worker {
         set_file_metadata(temp_file.as_file(), before.modified, &before.permissions)?;
         temp_file.as_file().sync_all()?;
         let compressed_bytes = temp_file.as_file().metadata()?.len();
+
+        // Encoding and verification do not block writers. Coordination prevents writer
+        // acquisition while we recheck, publish, and remove the original file.
+        let Some(_publication_guard) = writer_locks.try_acquire_for_publication(thread_id)? else {
+            return Ok(CompressionMeasurement::new(
+                CompressionOutcome::SkippedBusy,
+                source_bytes,
+                /*compressed_bytes*/ None,
+            ));
+        };
+        if !same_file_state(path, &before)? {
+            return Ok(CompressionMeasurement::new(
+                CompressionOutcome::SkippedChanged,
+                source_bytes,
+                /*compressed_bytes*/ None,
+            ));
+        }
 
         match temp_file.persist_noclobber(compressed_path.as_path()) {
             Ok(_) => {}
@@ -745,6 +762,8 @@ mod worker {
     fn encode_zstd_to_writer(source: &Path, output: impl Write) -> io::Result<()> {
         let mut input = File::open(source)?;
         let mut encoder = zstd::stream::write::Encoder::new(output, COMPRESSION_LEVEL)?;
+        // Preserve fast byte-bound checks for paginated history without decoding the whole file.
+        encoder.set_pledged_src_size(Some(input.metadata()?.len()))?;
         io::copy(&mut input, &mut encoder)?;
         encoder.finish()?;
         Ok(())

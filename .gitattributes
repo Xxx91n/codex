@@ -88,3 +88,6 @@ codex-rs/state/goals_migrations/*.sql text eol=lf
 codex-rs/state/memory_migrations/*.sql text eol=lf
 codex-rs/state/queue_migrations/*.sql text eol=lf
 codex-rs/state/thread_history_migrations/*.sql text eol=lf
+
+# --- 7. Upstream LF pin (kept verbatim from upstream/main, merge 2026-09-12) ---
+third_party/voice/sources.json text eol=lf

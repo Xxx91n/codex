@@ -23,8 +23,9 @@ use crate::tools::handlers::PlanHandler;
 use crate::tools::handlers::ReadMcpResourceHandler;
 use crate::tools::handlers::RequestPermissionsHandler;
 use crate::tools::handlers::RequestPluginInstallHandler;
+use crate::tools::handlers::RequestUserInputAsyncHandler;
 use crate::tools::handlers::RequestUserInputHandler;
-use crate::tools::handlers::SendUserMessageAsyncHandler;
+use crate::tools::handlers::SendMessageToUserAsyncHandler;
 use crate::tools::handlers::SleepHandler;
 use crate::tools::handlers::TestSyncHandler;
 use crate::tools::handlers::ToolSearchHandlerCache;
@@ -76,6 +77,7 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ModelMessages;
 use codex_protocol::openai_models::ToolMode;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::ResponsesApiNamespace;
@@ -110,6 +112,7 @@ const IMAGEGEN_TOOL_NAME: &str = "imagegen";
 struct CoreToolPlanContext<'a> {
     turn_context: &'a TurnContext,
     model_info: &'a ModelInfo,
+    model_messages: Option<&'a ModelMessages>,
     environments: &'a TurnEnvironmentSnapshot,
     mcp: &'a codex_mcp::McpBinding,
     tool_suggest_candidates: Option<&'a crate::tools::router::ToolSuggestCandidates>,
@@ -124,6 +127,7 @@ pub(crate) fn build_tool_router(
     session: &Session,
     turn_context: &TurnContext,
     model_info: &ModelInfo,
+    model_messages: Option<&ModelMessages>,
     environments: &TurnEnvironmentSnapshot,
     mcp: &Arc<codex_mcp::McpBinding>,
     apps_enabled: bool,
@@ -139,6 +143,7 @@ pub(crate) fn build_tool_router(
     let context = CoreToolPlanContext {
         turn_context,
         model_info,
+        model_messages,
         environments,
         mcp,
         tool_suggest_candidates,
@@ -150,18 +155,6 @@ pub(crate) fn build_tool_router(
     add_core_tool_sources(&context, &mut registry);
 
     let hosted_specs = if crate::guardian::is_basic_session_source(&turn_context.session_source) {
-        if let Some(history_tools) = session
-            .services
-            .thread_extension_data
-            .get::<crate::codex_delegate::GuardianReadOnlyHistoryTools>()
-        {
-            append_extension_tool_executors(
-                turn_context,
-                model_info,
-                history_tools.0.iter().cloned(),
-                &mut registry,
-            );
-        }
         Vec::new()
     } else {
         let registered_mcp_tools = session.services.mcp_handler_cache.append_mcp_tools(
@@ -291,6 +284,7 @@ pub(crate) fn build_core_tool_registry(
     let context = CoreToolPlanContext {
         turn_context,
         model_info,
+        model_messages: model_info.model_messages.as_ref(),
         environments,
         mcp,
         tool_suggest_candidates,
@@ -1009,10 +1003,17 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
             {
                 registry.add(ExecCommandHandler::new(ExecCommandHandlerOptions {
                     allow_login_shell: any_environment_allows_login_shell(context.environments),
+                    allow_tty: turn_context
+                        .config
+                        .features
+                        .enabled(Feature::UnifiedExecTty),
                     exec_permission_approvals_enabled: false,
                     include_environment_id,
                     include_shell_parameter: unified_exec_should_include_shell_parameter(
                         turn_context,
+                        context.environments,
+                    ),
+                    include_windows_shell_guidance: should_include_windows_shell_guidance(
                         context.environments,
                     ),
                 }));
@@ -1061,6 +1062,25 @@ fn any_environment_allows_login_shell(environments: &TurnEnvironmentSnapshot) ->
         .any(|environment| environment.config().allow_login_shell)
 }
 
+fn should_include_windows_shell_guidance(environments: &TurnEnvironmentSnapshot) -> bool {
+    let mut environments = environments.turn_environments();
+    let Some(environment) = environments.next() else {
+        return false;
+    };
+    let executor_platform_os = if environments.next().is_none() {
+        environment.executor_platform_os.as_deref()
+    } else {
+        None
+    };
+
+    // One tool schema can target any ready environment. Multi-environment turns and legacy
+    // executors without platform OS information preserve the host-derived guidance.
+    match executor_platform_os {
+        Some(platform_os) => platform_os == "windows",
+        None => cfg!(windows),
+    }
+}
+
 #[instrument(level = "trace", skip_all)]
 fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistry) {
     let turn_context = context.turn_context;
@@ -1068,7 +1088,6 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
     let environment_mode = tool_environment_mode(context.environments);
     if !environment_mode.has_environment()
         || !features.enabled(Feature::ShellTool)
-        || !features.enabled(Feature::UnifiedExec)
         || matches!(context.model_info.shell_type, ConfigShellToolType::Disabled)
     {
         return;
@@ -1077,16 +1096,26 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
     let allow_login_shell = any_environment_allows_login_shell(context.environments);
     let exec_permission_approvals_enabled = features.enabled(Feature::ExecPermissionApprovals);
     let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
-    registry.add(ExecCommandHandler::new(ExecCommandHandlerOptions {
+    let options = ExecCommandHandlerOptions {
         allow_login_shell,
+        allow_tty: features.enabled(Feature::UnifiedExecTty),
         exec_permission_approvals_enabled,
         include_environment_id,
         include_shell_parameter: unified_exec_should_include_shell_parameter(
             turn_context,
             context.environments,
         ),
-    }));
-    registry.add(WriteStdinHandler);
+        include_windows_shell_guidance: should_include_windows_shell_guidance(context.environments),
+    };
+    if features.enabled(Feature::UnifiedExec) {
+        registry.add(ExecCommandHandler::new(options));
+        registry.add(WriteStdinHandler);
+    } else {
+        // Managed requirements are the only configuration path that can keep
+        // unified exec disabled. Preserve command execution without exposing a
+        // resumable process or write_stdin authority prohibited by policy.
+        registry.add(ExecCommandHandler::one_shot(options));
+    }
 }
 
 fn unified_exec_should_include_shell_parameter(
@@ -1146,9 +1175,34 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
             .model_info
             .experimental_supported_tools
             .iter()
-            .any(|tool| tool == "send_user_message_async")
+            // Existing model catalogs still advertise the previous name.
+            .any(|tool| {
+                matches!(
+                    tool.as_str(),
+                    "request_user_input_async" | "send_user_message_async"
+                )
+            })
     {
-        registry.add_with_exposure(SendUserMessageAsyncHandler, ToolExposure::DirectModelOnly);
+        registry.add_with_exposure(
+            RequestUserInputAsyncHandler {
+                description: context
+                    .model_messages
+                    .and_then(|messages| messages.tools.as_ref())
+                    .and_then(|tools| tools.send_user_message_async.as_ref())
+                    .and_then(|tool| tool.description.clone()),
+            },
+            ToolExposure::DirectModelOnly,
+        );
+    }
+
+    if !turn_context.session_source.is_non_root_agent()
+        && context
+            .model_info
+            .experimental_supported_tools
+            .iter()
+            .any(|tool| tool == "send_message_to_user_async")
+    {
+        registry.add_with_exposure(SendMessageToUserAsyncHandler, ToolExposure::DirectModelOnly);
     }
 
     if environment_mode.has_environment() && features.enabled(Feature::RequestPermissionsTool) {

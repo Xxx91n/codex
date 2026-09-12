@@ -80,8 +80,8 @@ impl ChatWidget {
             self.refresh_effective_service_tier();
             self.sync_service_tier_commands();
         }
-        if feature == Feature::Personality {
-            self.sync_personality_command_enabled();
+        if feature == Feature::Worktrees {
+            self.sync_worktrees_enabled();
         }
         if feature == Feature::Plugins {
             self.sync_plugins_command_enabled();
@@ -96,6 +96,21 @@ impl ChatWidget {
                 self.turn_lifecycle.budget_limited_turn_ids.clear();
                 self.update_collaboration_mode_indicator();
             }
+        }
+        if feature == Feature::RealtimeConversation && !enabled {
+            self.realtime_conversation_available_for_thread = false;
+            self.bottom_pane
+                .set_voice_command_enabled(/*enabled*/ false);
+            self.stop_realtime_conversation();
+        }
+        if feature == Feature::RealtimeConversation
+            && enabled
+            && !self.realtime_conversation_available_for_thread
+        {
+            self.add_info_message(
+                "Voice conversations will be available in new threads.".into(),
+                /*hint*/ None,
+            );
         }
         if feature == Feature::MentionsV2 {
             self.sync_mentions_v2_enabled();
@@ -120,18 +135,6 @@ impl ChatWidget {
     pub(crate) fn set_approvals_reviewer(&mut self, policy: ApprovalsReviewer) {
         self.config.approvals_reviewer = policy;
         self.refresh_status_surfaces();
-    }
-
-    pub(crate) fn set_world_writable_warning_acknowledged(&mut self, acknowledged: bool) {
-        self.config.notices.hide_world_writable_warning = Some(acknowledged);
-    }
-
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    pub(crate) fn world_writable_warning_hidden(&self) -> bool {
-        self.config
-            .notices
-            .hide_world_writable_warning
-            .unwrap_or(false)
     }
 
     /// Override the reasoning effort used when Plan mode is active.
@@ -177,17 +180,8 @@ impl ChatWidget {
         self.refresh_model_dependent_surfaces();
     }
 
-    /// Set the personality in the widget's config copy.
-    pub(crate) fn set_personality(&mut self, personality: Personality) {
-        self.config.personality = Some(personality);
-    }
-
     pub(crate) fn status_account_display(&self) -> Option<&StatusAccountDisplay> {
         self.status_account_display.as_ref()
-    }
-
-    pub(crate) fn runtime_model_provider_base_url(&self) -> Option<&str> {
-        self.runtime_model_provider_base_url.as_deref()
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -216,9 +210,16 @@ impl ChatWidget {
     ) {
         // Account-update notifications are the identity boundary. The visible account fields can
         // be identical across two accounts, so always invalidate account-scoped requests and data.
+        self.model_popup_request_id = None;
+        self.invalidate_permission_discovery();
         self.invalidate_connector_scope();
         self.clear_pending_token_activity_refreshes();
         self.clear_pending_rate_limit_reset_requests();
+        self.clear_backend_banner();
+        self.luna_reserve_notice_account_id = None;
+        self.automatic_model_switch_state = backend_banners::AutomaticModelSwitchState::default();
+        self.input_queue.rate_limit_recovery_pending = false;
+        self.add_credits_nudge_email_in_flight = None;
         self.codex_rate_limit_reached_type = None;
         self.codex_spend_control_reached = None;
         self.rate_limit_warnings = RateLimitWarningState::default();
@@ -252,11 +253,19 @@ impl ChatWidget {
 
     /// Set the syntax theme override in the widget's config copy.
     pub(crate) fn set_tui_theme(&mut self, theme: Option<String>) {
-        self.config.tui_theme = theme;
+        self.local_settings.tui.theme = theme;
     }
 
     /// Set the model in the widget's config copy and stored collaboration mode.
     pub(crate) fn set_model(&mut self, model: &str) {
+        if model != self.current_model() {
+            if self.current_model() == crate::model_catalog::LUNA_RESERVE_MODEL {
+                self.clear_reserve_return();
+            } else {
+                self.automatic_model_switch_state =
+                    backend_banners::AutomaticModelSwitchState::default();
+            }
+        }
         self.current_collaboration_mode = self.current_collaboration_mode.with_updates(
             Some(model.to_string()),
             /*effort*/ None,
@@ -281,9 +290,15 @@ impl ChatWidget {
             .unwrap_or_else(|| self.current_collaboration_mode.model())
     }
 
-    pub(super) fn sync_personality_command_enabled(&mut self) {
-        self.bottom_pane
-            .set_personality_command_enabled(self.config.features.enabled(Feature::Personality));
+    pub(crate) fn set_local_worktree_operations(&mut self, enabled: bool) {
+        self.local_worktree_operations = enabled;
+        self.sync_worktrees_enabled();
+    }
+
+    pub(super) fn sync_worktrees_enabled(&mut self) {
+        self.bottom_pane.set_worktrees_enabled(
+            self.config.features.enabled(Feature::Worktrees) && self.local_worktree_operations,
+        );
     }
 
     pub(super) fn sync_plugins_command_enabled(&mut self) {
@@ -299,20 +314,6 @@ impl ChatWidget {
     pub(super) fn sync_mentions_v2_enabled(&mut self) {
         self.bottom_pane
             .set_mentions_v2_enabled(self.config.features.enabled(Feature::MentionsV2));
-    }
-
-    pub(super) fn current_model_supports_personality(&self) -> bool {
-        let model = self.current_model();
-        self.model_catalog
-            .try_list_models()
-            .ok()
-            .and_then(|models| {
-                models
-                    .into_iter()
-                    .find(|preset| preset.model == model)
-                    .map(|preset| preset.supports_personality)
-            })
-            .unwrap_or(false)
     }
 
     /// Return whether the effective model currently advertises image-input support.
@@ -424,9 +425,15 @@ impl ChatWidget {
         )
     }
 
+    pub(crate) fn set_sparkle_terminal_focus(&mut self, focused: bool) {
+        self.bottom_pane.set_sparkle_terminal_focus(focused);
+    }
+
     pub(super) fn refresh_model_display(&mut self) {
         let effective = self.effective_collaboration_mode();
         self.session_header.set_model(effective.model());
+        self.bottom_pane
+            .set_astra_sparkle(effective.model(), &self.local_settings.tui);
         // Keep composer paste affordances aligned with the currently effective model.
         self.sync_image_paste_enabled();
         self.sync_service_tier_commands();
@@ -445,11 +452,14 @@ impl ChatWidget {
     /// header/title (`refresh_model_display`) but forget the footer status line
     /// (`refresh_status_line`).
     pub(super) fn refresh_model_dependent_surfaces(&mut self) {
+        self.sync_backend_banner_view();
         self.refresh_model_display();
         self.refresh_status_line();
+        self.refresh_open_model_picker();
     }
 
     fn apply_thread_settings(&mut self, mut settings: ThreadSettings) {
+        self.invalidate_permission_discovery();
         let cwd_changed = self.config.cwd != settings.cwd;
         self.apply_thread_settings_cwd(settings.cwd.clone());
         self.config.model_provider_id = settings.model_provider.clone();
@@ -490,7 +500,6 @@ impl ChatWidget {
         self.refresh_effective_service_tier();
         self.refresh_status_surfaces();
         self.sync_service_tier_commands();
-        self.sync_personality_command_enabled();
         if cwd_changed {
             self.invalidate_connector_scope();
             self.refresh_skills_for_current_cwd(/*force_reload*/ true);
@@ -546,7 +555,7 @@ impl ChatWidget {
         if model.is_empty() {
             DEFAULT_MODEL_DISPLAY_NAME
         } else {
-            model
+            crate::model_catalog::model_display_name(model)
         }
     }
 

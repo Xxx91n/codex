@@ -1,14 +1,8 @@
 use super::*;
 use crate::extensions::send_thread_warning;
-use crate::realtime_event_handling::apply_realtime_event_effects;
-use crate::realtime_event_handling::persist_realtime_items;
-use crate::realtime_history::RealtimeEventEffects;
 use codex_app_server_protocol::ThreadQueueChangedNotification;
 use codex_extension_api::ThreadIdleCause;
 use codex_protocol::config_types::MultiAgentMode;
-use codex_protocol::protocol::ThreadHistoryMode;
-
-pub(super) const THREAD_UNLOADING_DELAY: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Clone)]
 pub(super) struct ListenerTaskContext {
@@ -17,9 +11,8 @@ pub(super) struct ListenerTaskContext {
     pub(super) outgoing: Arc<OutgoingMessageSender>,
     pub(super) pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
     pub(super) thread_watch_manager: ThreadWatchManager,
-    pub(super) thread_list_state_permit: Arc<Semaphore>,
-    pub(super) fallback_model_provider: String,
     pub(super) codex_home: PathBuf,
+    pub(super) thread_unload_delay: Duration,
     pub(super) skills_watcher: Arc<SkillsWatcher>,
     pub(super) turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
 }
@@ -63,7 +56,7 @@ impl UnloadingState {
     fn unloading_target(&self) -> Option<Instant> {
         match (self.has_subscribers, self.is_active) {
             ((false, has_no_subscribers_since), (false, is_inactive_since)) => {
-                Some(std::cmp::max(has_no_subscribers_since, is_inactive_since) + self.delay)
+                std::cmp::max(has_no_subscribers_since, is_inactive_since).checked_add(self.delay)
             }
             _ => None,
         }
@@ -228,7 +221,7 @@ pub(super) async fn ensure_listener_task_running(
     let Some(mut unloading_state) = UnloadingState::new(
         &listener_task_context,
         conversation_id,
-        THREAD_UNLOADING_DELAY,
+        listener_task_context.thread_unload_delay,
     )
     .await
     else {
@@ -247,8 +240,6 @@ pub(super) async fn ensure_listener_task_running(
         )
         .await;
     let config_snapshot = conversation.config_snapshot().await;
-    let realtime_history_enabled =
-        matches!(config_snapshot.history_mode, ThreadHistoryMode::Paginated);
     let thread_settings_baseline = thread_settings_from_config_snapshot(&config_snapshot);
     let (mut listener_command_rx, listener_generation) = {
         let mut thread_state = thread_state.lock().await;
@@ -278,8 +269,6 @@ pub(super) async fn ensure_listener_task_running(
         thread_state_manager,
         pending_thread_unloads,
         thread_watch_manager,
-        thread_list_state_permit,
-        fallback_model_provider,
         codex_home,
         turn_cost_worker,
         ..
@@ -331,20 +320,10 @@ pub(super) async fn ensure_listener_task_running(
                     // Track the event before emitting any typed translations
                     // so thread-local state such as raw event opt-in stays
                     // synchronized with the conversation.
-                    let (raw_events_enabled, realtime_effects) = {
+                    let raw_events_enabled = {
                         let mut thread_state = thread_state.lock().await;
                         thread_state.track_current_turn_event(&event.id, &event.msg);
-                        let realtime_effects = if realtime_history_enabled
-                            && thread_state.realtime_history.should_observe(&event.msg)
-                        {
-                            let active_turn_id = thread_state.active_turn_snapshot().map(|turn| turn.id);
-                            thread_state
-                                .realtime_history
-                                .observe(&event.msg, active_turn_id.as_deref())
-                        } else {
-                            RealtimeEventEffects::default()
-                        };
-                        (thread_state.experimental_raw_events, realtime_effects)
+                        thread_state.experimental_raw_events
                     };
                     if matches!(
                         &event.msg,
@@ -362,14 +341,6 @@ pub(super) async fn ensure_listener_task_running(
                         conversation_id,
                     );
 
-                    apply_realtime_event_effects(
-                        conversation.as_ref(),
-                        &thread_outgoing,
-                        conversation_id,
-                        realtime_effects,
-                    )
-                    .await;
-
                     apply_bespoke_event_handling(
                         event.clone(),
                         conversation_id,
@@ -378,8 +349,6 @@ pub(super) async fn ensure_listener_task_running(
                         thread_outgoing,
                         thread_state.clone(),
                         thread_watch_manager.clone(),
-                        thread_list_state_permit.clone(),
-                        fallback_model_provider.clone(),
                     )
                     .await;
                     if matches!(event.msg, EventMsg::ShutdownComplete)
@@ -512,7 +481,10 @@ pub(super) async fn handle_thread_listener_command(
     listener_command: ThreadListenerCommand,
 ) {
     match listener_command {
-        ThreadListenerCommand::SendThreadResumeResponse(resume_request) => {
+        ThreadListenerCommand::SendThreadResumeResponse {
+            request: resume_request,
+            completion_tx,
+        } => {
             handle_pending_thread_resume_request(
                 conversation_id,
                 conversation,
@@ -525,6 +497,7 @@ pub(super) async fn handle_thread_listener_command(
                 *resume_request,
             )
             .await;
+            let _ = completion_tx.send(());
         }
         ThreadListenerCommand::EmitThreadGoalUpdated { turn_id, goal } => {
             outgoing
@@ -581,32 +554,6 @@ pub(super) async fn handle_thread_listener_command(
             )
             .await;
             let _ = completion_tx.send(());
-        }
-        ThreadListenerCommand::SealRealtimeUserInput {
-            input,
-            completion_tx,
-        } => {
-            let items = thread_state
-                .lock()
-                .await
-                .realtime_history
-                .seal_user_input(&input);
-            let subscribed_connection_ids = thread_state_manager
-                .subscribed_connection_ids(conversation_id)
-                .await;
-            let thread_outgoing = ThreadScopedOutgoingMessageSender::new(
-                outgoing.clone(),
-                subscribed_connection_ids,
-                conversation_id,
-            );
-            let result = persist_realtime_items(
-                conversation.as_ref(),
-                &thread_outgoing,
-                &conversation_id.to_string(),
-                items,
-            )
-            .await;
-            let _ = completion_tx.send(result);
         }
     }
 }
@@ -777,6 +724,7 @@ pub(super) async fn handle_pending_thread_resume_request(
     let cwd = config_snapshot.cwd().clone();
     let ThreadConfigSnapshot {
         model,
+        disabled_plugin_ids,
         model_provider_id,
         service_tier,
         approval_policy,
@@ -795,6 +743,7 @@ pub(super) async fn handle_pending_thread_resume_request(
 
     let response = ThreadResumeResponse {
         thread,
+        disabled_plugin_ids,
         model,
         model_provider: model_provider_id,
         service_tier,

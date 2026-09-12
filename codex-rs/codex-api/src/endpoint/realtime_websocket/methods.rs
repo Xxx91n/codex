@@ -652,7 +652,10 @@ impl RealtimeWebsocketEvents {
             | RealtimeEvent::ConversationItemDone { .. }
             | RealtimeEvent::NoopRequested(_)
             | RealtimeEvent::ConversationItemAdded(_)
-            | RealtimeEvent::Error(_) => {}
+            | RealtimeEvent::Error(_)
+            | RealtimeEvent::HistoryItemStarted(_)
+            | RealtimeEvent::HistoryTranscriptDelta { .. }
+            | RealtimeEvent::HistoryItemCompleted(_) => {}
         }
         truncate_active_transcript(&mut active_transcript.entries);
     }
@@ -962,6 +965,17 @@ impl RealtimeWebsocketClient {
         let connector = maybe_build_rustls_client_config_with_custom_ca()
             .map_err(|err| ApiError::Stream(format!("failed to configure websocket TLS: {err}")))?
             .map(tokio_tungstenite::Connector::Rustls);
+        // A fresh Windows install may not have downloaded the server's trusted root yet.
+        // Use platform validation only for system trust, preserving custom CA semantics.
+        #[cfg(windows)]
+        let connector = match connector {
+            Some(connector) => Some(connector),
+            None => Some(tokio_tungstenite::Connector::Rustls(
+                codex_http_client::build_windows_platform_tls_config().map_err(|err| {
+                    ApiError::Stream(format!("failed to configure websocket TLS: {err}"))
+                })?,
+            )),
+        };
         let (stream, response) = tokio_tungstenite::connect_async_tls_with_config(
             request,
             Some(websocket_config()),

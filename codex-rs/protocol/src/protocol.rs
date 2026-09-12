@@ -34,6 +34,7 @@ use crate::dynamic_tools::DynamicToolResponse;
 use crate::dynamic_tools::DynamicToolSpec;
 use crate::error::Result as CodexResult;
 use crate::items::AgentMessageDelivery;
+use crate::items::AsyncUserInputQuestion;
 use crate::items::TurnItem;
 use crate::mcp::CallToolResult;
 use crate::mcp::RequestId;
@@ -97,6 +98,7 @@ pub use crate::approvals::NetworkPolicyAmendment;
 pub use crate::approvals::NetworkPolicyRuleAction;
 pub use crate::environment::EnvironmentConfig;
 pub use crate::environment::EnvironmentConfigState;
+pub use crate::environment::has_full_access;
 pub use crate::legacy_events::HasLegacyEvent;
 pub use crate::permissions::FileSystemAccessMode;
 pub use crate::permissions::FileSystemPath;
@@ -254,8 +256,16 @@ pub struct ConversationStartParams {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConversationStartTransport {
     Websocket,
-    Webrtc { sdp: String },
-    ExistingCall { call_id: String },
+    Webrtc {
+        sdp: String,
+    },
+    ExistingCall {
+        call_id: String,
+        /// Endpoint selected by the embedding runtime for this call's sideband.
+        /// This is an in-process override, not a client-supplied API parameter.
+        /// `None` uses the configured endpoint or the default public API.
+        sideband_base_url: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
@@ -440,6 +450,13 @@ pub enum RealtimeEvent {
     ConversationItemDone {
         item_id: String,
     },
+    /// Canonical display history produced by Core, separate from provider events.
+    HistoryItemStarted(crate::realtime::RealtimeItem),
+    HistoryTranscriptDelta {
+        item_id: String,
+        delta: String,
+    },
+    HistoryItemCompleted(crate::realtime::RealtimeItem),
     HandoffRequested(RealtimeHandoffRequested),
     NoopRequested(RealtimeNoopRequested),
     Error(String),
@@ -475,6 +492,8 @@ pub struct ConversationSpeechParams {
 /// task kind. Child sessions and consumers of frozen initial settings are unchanged.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnSettingsUpdate {
+    /// Changes the reviewer for subsequent approval requests, not pending reviews.
+    pub approvals_reviewer: Option<ApprovalsReviewer>,
     pub model: Option<String>,
     /// `None` preserves the selection; `Some(None)` clears it.
     pub effort: Option<Option<ReasoningEffortConfig>>,
@@ -502,6 +521,10 @@ pub enum TurnSettingsUpdateOutcome {
 pub struct ThreadSettingsOverrides {
     /// Updated fallback `cwd` and environments supplied together as a complete pair.
     pub environments: Option<TurnEnvironmentSelections>,
+
+    /// Updated top-level runtime workspace roots for default environments.
+    /// Explicit environment selections own their roots separately.
+    pub runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
 
     /// Updated profile-defined workspace roots for status summaries and
     /// per-turn config reconstruction.
@@ -550,6 +573,10 @@ pub struct ThreadSettingsOverrides {
 
     /// Updated personality preference.
     pub personality: Option<Personality>,
+
+    /// Replace the thread's disabled plugin IDs. Omission preserves the current
+    /// selection, and an empty list clears it.
+    pub disabled_plugin_ids: Option<Vec<String>>,
 }
 
 /// Source classification for client-supplied context.
@@ -716,12 +743,6 @@ pub enum Op {
     /// model.
     SetThreadMemoryMode { mode: ThreadMemoryMode },
 
-    /// Request Codex to drop the last N user turns from in-memory context.
-    ///
-    /// This does not attempt to revert local filesystem changes. Clients are
-    /// responsible for undoing any edits on disk.
-    ThreadRollback { num_turns: u32 },
-
     /// Request a code review from the agent.
     Review { review_request: ReviewRequest },
 
@@ -739,6 +760,8 @@ pub enum Op {
     RunUserShellCommand {
         /// The raw command string after '!'
         command: String,
+        /// Maximum execution time in milliseconds. Defaults to one hour.
+        timeout_ms: Option<u64>,
     },
 }
 
@@ -933,7 +956,6 @@ impl Op {
             Self::ReloadUserConfig => "reload_user_config",
             Self::Compact => "compact",
             Self::SetThreadMemoryMode { .. } => "set_thread_memory_mode",
-            Self::ThreadRollback { .. } => "thread_rollback",
             Self::Review { .. } => "review",
             Self::ApproveGuardianDeniedAction { .. } => "approve_guardian_denied_action",
             Self::Shutdown => "shutdown",
@@ -1376,7 +1398,8 @@ pub enum EventMsg {
     /// Conversation history was compacted (either automatically or manually).
     ContextCompacted(ContextCompactedEvent),
 
-    /// Conversation history was rolled back by dropping the last N user turns.
+    /// Legacy persisted marker for dropping the last N user turns.
+    /// Retained for replay of existing rollouts; live rollback operations are unsupported.
     ThreadRolledBack(ThreadRolledBackEvent),
 
     /// Agent has started a turn.
@@ -1646,6 +1669,11 @@ pub struct HookOutputEntry {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub struct HookRunSummary {
+    /// Internal classification used to suppress lifecycle notifications without losing telemetry.
+    #[serde(skip)]
+    #[schemars(skip)]
+    #[ts(skip)]
+    pub builtin: bool,
     pub id: String,
     pub event_name: HookEventName,
     pub handler_type: HookHandlerType,
@@ -1854,6 +1882,7 @@ pub enum CodexErrorInfo {
     ActiveTurnNotSteerable {
         turn_kind: NonSteerableTurnKind,
     },
+    // Retained to deserialize errors recorded in legacy rollouts.
     ThreadRollbackFailed,
     Other,
 }
@@ -2140,6 +2169,10 @@ pub struct TurnCompleteEvent {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct TurnStartedEvent {
     pub turn_id: String,
+    /// ID of the originating turn in the root thread; equals `turn_id` for root turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub root_turn_id: Option<String>,
     // Persist for rollout consumers that correlate turns with telemetry traces.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -2156,6 +2189,11 @@ pub struct TurnStartedEvent {
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct ThreadSettingsAppliedEvent {
+    /// Logical task that owns this snapshot, independent of the physical rollout file.
+    /// Absent in older histories; copied snapshots retain their original owner's ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub thread_id: Option<ThreadId>,
     pub thread_settings: ThreadSettingsSnapshot,
 }
 
@@ -2172,6 +2210,12 @@ pub struct ThreadSettingsSnapshot {
     #[ts(optional)]
     pub active_permission_profile: Option<ActivePermissionProfile>,
     pub cwd: AbsolutePathBuf,
+    /// Top-level runtime workspace roots for default environments, excluding roots
+    /// supplied by explicit environment selections or permission profiles.
+    /// An absent value means unknown; an empty list means no roots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffortConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2179,6 +2223,9 @@ pub struct ThreadSettingsSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub personality: Option<Personality>,
     pub collaboration_mode: CollaborationMode,
+    /// Thread-owned plugin selection, retained even when a plugin is unavailable.
+    #[serde(default)]
+    pub disabled_plugin_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq, JsonSchema, TS)]
@@ -2201,6 +2248,19 @@ pub struct TokenUsage {
     #[schemars(skip)]
     #[ts(skip)]
     pub codex_rollout_budget_units: Option<serde_json::Number>,
+}
+
+/// Best-effort Responses API usage observed for one completed response.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct TokenUsageRecord {
+    pub thread_id: ThreadId,
+    pub turn_id: String,
+    pub session_id: SessionId,
+    pub root_turn_id: String,
+    pub response_id: String,
+    pub usage: TokenUsage,
+    pub turn_token_usage: TokenUsage,
+    pub thread_token_usage: TokenUsage,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
@@ -2280,6 +2340,9 @@ pub struct TokenCountEvent {
 pub struct RateLimitSnapshot {
     pub limit_id: Option<String>,
     pub limit_name: Option<String>,
+    /// Normal model metadata for a quota alias; never a replacement for the request model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal_model_slug: Option<String>,
     pub primary: Option<RateLimitWindow>,
     pub secondary: Option<RateLimitWindow>,
     pub credits: Option<CreditsSnapshot>,
@@ -2453,6 +2516,9 @@ pub struct AgentMessageEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub delivery: Option<AgentMessageDelivery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub questions: Option<Vec<AsyncUserInputQuestion>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
@@ -2546,6 +2612,9 @@ pub struct McpInvocation {
 pub struct McpToolCallBeginEvent {
     /// Identifier so this can be paired with the McpToolCallEnd event.
     pub call_id: String,
+    /// Originating turn; absent in older rollout records.
+    #[serde(default)]
+    pub turn_id: String,
     pub invocation: McpInvocation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -2575,6 +2644,9 @@ pub struct McpToolCallBeginEvent {
 pub struct McpToolCallEndEvent {
     /// Identifier for the corresponding McpToolCallBegin that finished.
     pub call_id: String,
+    /// Originating turn; absent in older rollout records.
+    #[serde(default)]
+    pub turn_id: String,
     pub invocation: McpInvocation,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -2988,6 +3060,7 @@ pub struct HistoryPosition {
 /// and should be used when there is no config override.
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, TS)]
 pub struct SessionMeta {
+    /// session_id is equal to the root thread's ID.
     pub session_id: SessionId,
     pub id: ThreadId,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3000,6 +3073,13 @@ pub struct SessionMeta {
     pub parent_thread_id: Option<ThreadId>,
     pub timestamp: String,
     pub cwd: PathBuf,
+    /// Top-level runtime workspace roots at creation for default environments,
+    /// excluding roots supplied by explicit environment selections or permission profiles.
+    /// An absent value means unknown; an empty list means no roots.
+    /// Keep native paths parseable across hosts; validate them when restoring settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub runtime_workspace_roots: Option<Vec<PathBuf>>,
     pub originator: String,
     pub cli_version: String,
     #[serde(default)]
@@ -3061,6 +3141,7 @@ impl Default for SessionMeta {
             parent_thread_id: None,
             timestamp: String::new(),
             cwd: PathBuf::new(),
+            runtime_workspace_roots: None,
             originator: String::new(),
             cli_version: String::new(),
             source: SessionSource::default(),
@@ -3151,6 +3232,14 @@ pub struct TurnContextNetworkItem {
 pub struct TurnContextItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
+    /// Root turn that owns this subagent turn's attribution.
+    /// Only set for subagent turns; persisted so resume keeps the scope frozen at turn start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_turn_id: Option<String>,
+    /// Plugin selection captured for this turn. Absent in older histories.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub disabled_plugin_ids: Option<Vec<String>>,
     pub cwd: AbsolutePathBuf,
     /// Effective workspace roots used to materialize symbolic
     /// `:workspace_roots` filesystem permissions in `permission_profile`.
@@ -4385,6 +4474,16 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn old_turn_started_records_have_no_root_attribution() {
+        let event: TurnStartedEvent = serde_json::from_value(serde_json::json!({
+            "turn_id": "old-turn",
+            "model_context_window": null
+        }))
+        .unwrap();
+        assert_eq!(event.root_turn_id, None);
+    }
+
+    #[test]
     fn review_decision_denied_round_trip() -> Result<()> {
         let decision = ReviewDecision::Denied {
             rejection: "denied reason".to_string(),
@@ -4393,6 +4492,43 @@ mod tests {
 
         assert_eq!(serde_json::to_value(&decision)?, value);
         assert_eq!(serde_json::from_value::<ReviewDecision>(value)?, decision);
+        Ok(())
+    }
+
+    #[test]
+    fn hook_builtin_classification_stays_internal() -> Result<()> {
+        let wire = json!({
+            "id": "cleanup-hook",
+            "event_name": "stop",
+            "handler_type": "mcp_tool",
+            "execution_mode": "sync",
+            "scope": "turn",
+            "source_path": test_path_buf("/tmp/hooks.json").abs(),
+            "source": "plugin",
+            "display_order": 0,
+            "status": "completed",
+            "status_message": null,
+            "started_at": 10,
+            "completed_at": 11,
+            "duration_ms": 1000,
+            "entries": [],
+        });
+        let mut run: HookRunSummary = serde_json::from_value(wire.clone())?;
+        assert!(!run.builtin);
+        run.builtin = true;
+        assert_eq!(serde_json::to_value(run)?, wire);
+
+        let mut untrusted_wire = wire;
+        untrusted_wire["builtin"] = json!(true);
+        assert!(!serde_json::from_value::<HookRunSummary>(untrusted_wire)?.builtin);
+        let schema = serde_json::to_value(schemars::schema_for!(HookRunSummary))?;
+        assert!(
+            !schema["properties"]
+                .as_object()
+                .expect("hook properties")
+                .contains_key("builtin")
+        );
+        assert!(!HookRunSummary::decl().contains("builtin:"));
         Ok(())
     }
 
@@ -5226,6 +5362,7 @@ mod tests {
         assert_eq!(legacy_events.len(), 1);
         match &legacy_events[0] {
             EventMsg::McpToolCallBegin(event) => {
+                assert_eq!(event.turn_id, "turn-1");
                 assert_eq!(event.call_id, "mcp-1");
                 assert_eq!(event.invocation.server, "server");
                 assert_eq!(event.invocation.tool, "tool");
@@ -5351,6 +5488,7 @@ mod tests {
         assert_eq!(legacy_events.len(), 1);
         match &legacy_events[0] {
             EventMsg::McpToolCallEnd(event) => {
+                assert_eq!(event.turn_id, "turn-1");
                 assert_eq!(event.call_id, "mcp-1");
                 assert_eq!(event.invocation.server, "server");
                 assert_eq!(event.invocation.tool, "tool");
@@ -5950,6 +6088,8 @@ mod tests {
     fn turn_context_item_serializes_network_when_present() -> Result<()> {
         let item = TurnContextItem {
             turn_id: None,
+            root_turn_id: None,
+            disabled_plugin_ids: None,
             cwd: test_path_buf("/tmp").abs(),
             workspace_roots: None,
             current_date: None,

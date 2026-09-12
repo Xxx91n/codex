@@ -48,6 +48,12 @@ use ratatui::style::Color;
 use ratatui::style::Modifier;
 use ratatui::widgets::WidgetRef;
 
+mod cursor;
+
+#[cfg(test)]
+#[path = "custom_terminal_test_support.rs"]
+pub(crate) mod test_support;
+
 fn osc8_hyperlink_parts(symbol: &str) -> Option<(&str, &str)> {
     let content = symbol.strip_prefix("\x1b]8;;")?;
     let destination_end = content.find('\x07')?;
@@ -136,6 +142,8 @@ where
     current: usize,
     /// Whether the cursor is currently hidden
     pub hidden_cursor: bool,
+    /// Last cursor style sent successfully, so ordinary redraws do not repaint its repair anchor.
+    last_cursor_style: Option<SetCursorStyle>,
     /// Area of the viewport
     pub viewport_area: Rect,
     /// Last known size of the terminal. Used to detect if the internal buffers have to be resized.
@@ -215,6 +223,7 @@ where
             buffers: [Buffer::empty(Rect::ZERO), Buffer::empty(Rect::ZERO)],
             current: 0,
             hidden_cursor: false,
+            last_cursor_style: None,
             viewport_area: Rect::new(
                 /*x*/ 0,
                 cursor_pos.y,
@@ -285,6 +294,10 @@ where
     /// current backend for drawing.
     pub fn flush(&mut self) -> io::Result<()> {
         let updates = diff_buffers(self.previous_buffer(), self.current_buffer());
+        self.flush_updates(updates)
+    }
+
+    fn flush_updates(&mut self, updates: Vec<DrawCommand>) -> io::Result<()> {
         let last_put_command = updates.iter().rfind(|command| command.is_put());
         if let Some(&DrawCommand::Put { x, y, .. }) = last_put_command {
             self.last_known_cursor_pos = Position { x, y };
@@ -303,6 +316,9 @@ where
 
     /// Sets the viewport area.
     pub fn set_viewport_area(&mut self, area: Rect) {
+        if self.viewport_area != area {
+            self.invalidate_cursor_state();
+        }
         self.current_buffer_mut().resize(area);
         self.previous_buffer_mut().resize(area);
         self.viewport_area = area;
@@ -422,13 +438,19 @@ where
         let cursor_position = frame.cursor_position;
         let cursor_style = frame.cursor_style;
 
-        // Draw to stdout
-        self.flush()?;
+        // Not every terminal or multiplexer hides intermediate cursor moves inside a
+        // synchronized update, especially when the frame spans multiple writes.
+        let updates = diff_buffers(self.previous_buffer(), self.current_buffer());
+        if !updates.is_empty() && !self.hidden_cursor {
+            self.hide_cursor()?;
+        }
+        self.flush_updates(updates)?;
 
         match cursor_position {
-            None => self.hide_cursor()?,
+            None if !self.hidden_cursor => self.hide_cursor()?,
+            None => {}
             Some(position) => {
-                self.set_cursor_style(cursor_style)?;
+                self.set_cursor_style_with_repair(cursor_style)?;
                 self.set_cursor_position(position)?;
                 self.show_cursor()?;
             }
@@ -457,7 +479,9 @@ where
 
     /// Sets the visible terminal cursor style.
     pub fn set_cursor_style(&mut self, style: SetCursorStyle) -> io::Result<()> {
-        queue!(self.backend, style)
+        queue!(self.backend, style)?;
+        self.last_cursor_style = Some(style);
+        Ok(())
     }
 
     /// Restores the user-configured terminal cursor style.
@@ -835,7 +859,9 @@ impl ModifierDiff {
     }
 }
 
+// Keep nested #[path] modules discoverable by cargo-shear as well as rustc.
 #[cfg(test)]
+#[path = "custom_terminal/tests"]
 mod tests {
     use super::*;
     use std::num::NonZeroU16;
@@ -851,6 +877,9 @@ mod tests {
     use ratatui::widgets::Paragraph;
     use ratatui::widgets::Widget;
     use ratatui::widgets::Wrap;
+
+    #[path = "cursor_tests.rs"]
+    mod cursor;
 
     struct CaptureBackend {
         output: Vec<u8>,
@@ -999,6 +1028,79 @@ mod tests {
         assert_snapshot!(terminal.backend().vt100().screen().contents(), @r"
         probe-08 clean words
         probe-09 clean words
+        ");
+    }
+
+    #[tokio::test]
+    async fn leaving_alternate_screen_repaints_restored_inline_viewport() {
+        let mut tui = crate::tui::test_support::make_test_tui().expect("test tui");
+        let size = tui.terminal.last_known_screen_size;
+        let inline = Rect::new(/*x*/ 0, /*y*/ 3, size.width, /*height*/ 6);
+        tui.terminal.set_viewport_area(inline);
+        tui.enter_alt_screen().expect("enter alternate screen");
+        tui.terminal
+            .draw(|frame| {
+                Paragraph::new(vec![
+                    Line::from(" Resume a previous session"),
+                    Line::default(),
+                    Line::from(" Type to search".dim()),
+                ])
+                .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw picker");
+        tui.leave_alt_screen().expect("leave alternate screen");
+
+        let mut terminal = Terminal::with_options(VT100Backend::new(size.width, size.height))
+            .expect("physical terminal");
+        write!(terminal.backend_mut(), "Previous conversation").expect("write history");
+        terminal.set_viewport_area(inline);
+        terminal
+            .draw(|frame| {
+                Paragraph::new(vec![
+                    Line::default(),
+                    Line::default(),
+                    Line::from(vec!["›".bold(), " ".into(), "/resume".dim()]),
+                ])
+                .render(frame.area(), frame.buffer_mut());
+            })
+            .expect("draw submitted command");
+
+        // Apply the real Tui screen-return baseline to the unchanged physical main screen.
+        // Matching spaces and letters in the picker must not leave /resume cells behind.
+        *terminal.previous_buffer_mut() = tui.terminal.previous_buffer().clone();
+        for _ in 0..2 {
+            terminal
+                .draw(|frame| {
+                    Paragraph::new(vec![
+                        Line::default(),
+                        Line::default(),
+                        Line::from(vec![
+                            "›".bold(),
+                            " ".into(),
+                            "Ask Codex to do anything".dim(),
+                        ]),
+                    ])
+                    .render(frame.area(), frame.buffer_mut());
+                })
+                .expect("restore composer");
+        }
+
+        let visible = terminal
+            .backend()
+            .vt100()
+            .screen()
+            .contents()
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_snapshot!(visible.trim_end(), @r"
+        Previous conversation
+
+
+
+
+        › Ask Codex to do anything
         ");
     }
 
@@ -1229,31 +1331,6 @@ mod tests {
                 .iter()
                 .any(|command| matches!(command, DrawCommand::Put { x: 1, y: 0, .. })),
             "expected the styled trailing cell to be cleared; commands: {commands:?}"
-        );
-    }
-
-    #[test]
-    fn terminal_draw_applies_requested_cursor_style() {
-        let mut output = Vec::new();
-        let mut terminal =
-            Terminal::with_options(CaptureBackend::new(/*width*/ 2, /*height*/ 1))
-                .expect("terminal");
-        terminal.set_viewport_area(Rect::new(0, 0, 2, 1));
-
-        terminal
-            .try_draw(|frame| {
-                frame.set_cursor_style(SetCursorStyle::SteadyBar);
-                frame.set_cursor_position((0, 0));
-                io::Result::Ok(())
-            })
-            .expect("draw");
-
-        queue!(output, SetCursorStyle::SteadyBar).expect("queue style");
-        let expected = String::from_utf8(output).expect("utf8");
-        let actual = terminal.backend().output();
-        assert!(
-            actual.contains(&expected),
-            "expected terminal output to contain cursor style {expected:?}, got {actual:?}"
         );
     }
 

@@ -23,11 +23,13 @@ fn mcp_inventory_connection_states() {
     ]
     .into_iter()
     .map(|(name, runtime_status)| McpServerStatus {
+        server_capabilities: None,
         name: name.to_string(),
         runtime_status,
         plugin_id: None,
         server_info: None,
         tools: HashMap::new(),
+        tools_error: None,
         resources: Vec::new(),
         resource_templates: Vec::new(),
         auth_status: McpAuthStatus::Unknown,

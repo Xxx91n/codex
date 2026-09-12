@@ -5,6 +5,7 @@ use std::fs;
 
 use anyhow::Context;
 use anyhow::Result;
+use codex_config::test_support::CloudConfigBundleFixture;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_core::config::Constrained;
@@ -44,6 +45,7 @@ use core_test_support::submit_thread_settings;
 use core_test_support::test_codex::local;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
+use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
 use test_case::test_case;
@@ -79,6 +81,7 @@ async fn strict_tool_collisions_fail_the_turn_before_sampling(
     let server = start_mock_server().await;
     let mut builder = test_codex().with_config(move |config| {
         config.tool_registry.error_on_tool_collisions = true;
+        config.update_plan_enabled = true;
         if pre_compact {
             config.model_auto_compact_token_limit = Some(0);
         }
@@ -121,20 +124,25 @@ async fn strict_tool_collisions_fail_the_turn_before_sampling(
             defer_loading: false,
         })]
     };
-    let thread = test
+    let codex_core::NewThread { thread, .. } = test
         .thread_manager
         .start_thread(StartThreadOptions {
             dynamic_tools,
             ..StartThreadOptions::new(test.config.clone())
         })
-        .await?
-        .thread;
+        .await?;
 
     thread
-        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-            text: "use the planning tool".to_string(),
-            text_elements: Vec::new(),
-        }]))
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "use the planning tool".to_string(),
+                text_elements: Vec::new(),
+            }])
+            .on_start(codex_core::TurnStartOptions {
+                root_turn_id: Some("root-turn".into()),
+                ..Default::default()
+            }),
+        )
         .await?;
 
     let EventMsg::Error(error) =
@@ -155,6 +163,18 @@ async fn strict_tool_collisions_fail_the_turn_before_sampling(
         unreachable!("event predicate guarantees turn completion");
     };
     assert_eq!(completed.error, Some(error));
+    thread.flush_rollout().await?;
+    let history = thread.load_history(/*include_archived*/ false).await?;
+    let attribution = history.items.iter().find_map(|item| match item {
+        codex_history::RolloutItem::EventMsg(EventMsg::TurnStarted(event))
+            if event.turn_id == completed.turn_id =>
+        {
+            event.root_turn_id.as_deref()
+        }
+        _ => None,
+    });
+    assert_eq!(attribution, Some("root-turn"));
+
     assert!(
         server
             .received_requests()
@@ -230,6 +250,7 @@ async fn empty_turn_environments_omits_environment_backed_tools() -> Result<()> 
     .await;
 
     let mut builder = test_codex().with_config(|config| {
+        config.update_plan_enabled = true;
         config
             .features
             .enable(Feature::UnifiedExec)
@@ -840,7 +861,7 @@ async fn exec_command_enforces_glob_deny_read_policy() -> Result<()> {
 #[derive(Clone, Copy, Debug)]
 enum CommandToolAvailability {
     Default,
-    LegacyUnifiedExecDisabled,
+    ManagedUnifiedExecDisabled,
     ShellToolDisabled,
     ModelDisabled,
 }
@@ -857,12 +878,16 @@ async fn collect_tools(availability: CommandToolAvailability) -> Result<Vec<Stri
 
     let mut builder = match availability {
         CommandToolAvailability::Default => test_codex(),
-        CommandToolAvailability::LegacyUnifiedExecDisabled => test_codex().with_config(|config| {
-            config
-                .features
-                .disable(Feature::UnifiedExec)
-                .expect("test config should allow feature update");
-        }),
+        CommandToolAvailability::ManagedUnifiedExecDisabled => test_codex()
+            .with_cloud_config_bundle(
+                CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                    r#"
+[features]
+unified_exec = false
+shell_tool = true
+"#,
+                ),
+            ),
         CommandToolAvailability::ShellToolDisabled => test_codex().with_config(|config| {
             config
                 .features
@@ -905,10 +930,7 @@ async fn unified_exec_spec_toggle_end_to_end() -> Result<()> {
         }
     }
 
-    for availability in [
-        CommandToolAvailability::Default,
-        CommandToolAvailability::LegacyUnifiedExecDisabled,
-    ] {
+    for availability in [CommandToolAvailability::Default] {
         let tools = collect_tools(availability).await?;
         for command_tool in ["exec_command", "write_stdin"] {
             assert!(
@@ -917,6 +939,16 @@ async fn unified_exec_spec_toggle_end_to_end() -> Result<()> {
             );
         }
     }
+
+    let tools = collect_tools(CommandToolAvailability::ManagedUnifiedExecDisabled).await?;
+    assert!(
+        tools.iter().any(|name| name == "exec_command"),
+        "managed unified-exec disable should keep one-shot command execution: {tools:?}"
+    );
+    assert!(
+        !tools.iter().any(|name| name == "write_stdin"),
+        "managed unified-exec disable must not expose retained process authority: {tools:?}"
+    );
 
     Ok(())
 }

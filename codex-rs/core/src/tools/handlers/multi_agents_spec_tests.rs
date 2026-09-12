@@ -28,6 +28,7 @@ fn model_preset(id: &str, show_in_picker: bool) -> ModelPreset {
             description: "1.5x speed, increased usage".to_string(),
         }],
         default_service_tier: None,
+        available_access_programs: None,
         is_default: false,
         upgrade: None,
         show_in_picker,
@@ -115,12 +116,7 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
             .and_then(|schema| schema.description.as_deref()),
         Some("Reasoning effort override for the new agent. Omit to inherit the parent effort.")
     );
-    assert_eq!(
-        properties
-            .get("service_tier")
-            .and_then(|schema| schema.description.as_deref()),
-        Some(SPAWN_AGENT_SERVICE_TIER_OVERRIDE_DESCRIPTION)
-    );
+    assert!(!properties.contains_key("service_tier"));
     assert_eq!(
         parameters.required.as_ref(),
         Some(&vec!["task_name".to_string(), "message".to_string()])
@@ -181,12 +177,7 @@ fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
             .and_then(|schema| schema.description.as_deref()),
         Some(SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION)
     );
-    assert_eq!(
-        properties
-            .get("service_tier")
-            .and_then(|schema| schema.description.as_deref()),
-        Some(SPAWN_AGENT_SERVICE_TIER_OVERRIDE_DESCRIPTION)
-    );
+    assert!(!properties.contains_key("service_tier"));
 }
 
 #[test]

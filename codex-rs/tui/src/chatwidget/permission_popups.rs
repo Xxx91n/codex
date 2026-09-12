@@ -15,11 +15,22 @@ impl ChatWidget {
 
     /// Open a popup to choose the permissions mode.
     pub(crate) fn open_permissions_popup(&mut self) {
-        if self.config.explicit_permission_profile_mode {
-            self.open_permission_profiles_popup();
+        if self.config.explicit_permission_profile_mode
+            || self.permission_profiles_menu_opened
+            || self
+                .config
+                .permissions
+                .active_permission_profile()
+                .is_some_and(|profile| !profile.id.starts_with(':'))
+        {
+            self.request_permission_profiles();
             return;
         }
 
+        self.open_legacy_permissions_popup();
+    }
+
+    pub(super) fn open_legacy_permissions_popup(&mut self) {
         let include_read_only = cfg!(target_os = "windows");
         let current_approval =
             AskForApproval::from(self.config.permissions.approval_policy.value());
@@ -312,6 +323,17 @@ impl ChatWidget {
         };
         let requires_confirmation =
             approvals_reviewer == ApprovalsReviewer::User && preset.id == "full-access";
+        #[cfg(target_os = "windows")]
+        if preset.id == "auto" && self.windows_sandbox_host == crate::app::WindowsSandboxHost::Mixed
+        {
+            let preset = preset.clone();
+            return vec![Box::new(move |tx| {
+                tx.send(AppEvent::OpenWindowsSandboxEnablePrompt {
+                    preset: preset.clone(),
+                    profile_selection: profile_selection.clone(),
+                });
+            })];
+        }
         if requires_confirmation {
             let preset = preset.clone();
             return vec![Box::new(move |tx| {
@@ -325,39 +347,19 @@ impl ChatWidget {
         if approvals_reviewer == ApprovalsReviewer::User && preset.id == "auto" {
             #[cfg(target_os = "windows")]
             {
+                if self.windows_sandbox_host == crate::app::WindowsSandboxHost::Remote {
+                    // The remote server owns the permission choice. Its executor
+                    // cannot be set up from this TUI's Windows account.
+                    return apply_actions();
+                }
                 if crate::windows_sandbox::level_from_config(&self.config)
                     == WindowsSandboxLevel::Disabled
                 {
                     let preset = preset.clone();
-                    if crate::windows_sandbox::sandbox_setup_is_complete(
-                        self.config.codex_home.as_path(),
-                    ) {
-                        return vec![Box::new(move |tx| {
-                            tx.send(AppEvent::EnableWindowsSandboxForAgentMode {
-                                preset: preset.clone(),
-                                mode: WindowsSandboxEnableMode::Elevated,
-                                profile_selection: profile_selection.clone(),
-                            });
-                        })];
-                    }
                     return vec![Box::new(move |tx| {
                         tx.send(AppEvent::OpenWindowsSandboxEnablePrompt {
                             preset: preset.clone(),
                             profile_selection: profile_selection.clone(),
-                        });
-                    })];
-                }
-                if let Some((sample_paths, extra_count, failed_scan)) =
-                    self.world_writable_warning_details()
-                {
-                    let preset = preset.clone();
-                    return vec![Box::new(move |tx| {
-                        tx.send(AppEvent::OpenWorldWritableWarningConfirmation {
-                            preset: Some(preset.clone()),
-                            profile_selection: profile_selection.clone(),
-                            sample_paths: sample_paths.clone(),
-                            extra_count,
-                            failed_scan,
                         });
                     })];
                 }
@@ -396,7 +398,7 @@ impl ChatWidget {
                 matches!(
                     current_permission_profile,
                     PermissionProfile::Managed { .. }
-                ) && file_system_policy.can_write_path_with_cwd(cwd, cwd)
+                ) && file_system_policy.can_write_local_path_with_cwd(cwd, cwd)
                     && !file_system_policy.has_full_disk_write_access()
             }
             _ => current_permission_profile == &preset.permission_profile,
