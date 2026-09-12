@@ -303,7 +303,7 @@ impl ModelClientSession {
         thinking_degraded: bool,
     ) -> Result<serde_json::Value> {
         let instructions = &prompt.base_instructions.text;
-        let input = prompt.get_formatted_input_for_request(/*use_responses_lite*/ false);
+        let input = prompt.get_formatted_input_for_request(model_info);
         let tools = create_tools_json_for_anthropic(&prompt.tools)?;
 
         let provider = self.client.state.provider.info();
