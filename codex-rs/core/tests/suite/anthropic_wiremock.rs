@@ -514,7 +514,7 @@ async fn drive_thinking_tool_round(
     first_body: String,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
     let call_id = "toolu_thinking_replay";
-    let args = r#"{"cmd":"echo thinking-replay"}"#;
+    let _args = r#"{"cmd":"echo thinking-replay"}"#;
     let first_requests = mount_messages_sse_once_match(
         server,
         move |request: &Request| !body_reports_tool_output(request, call_id),

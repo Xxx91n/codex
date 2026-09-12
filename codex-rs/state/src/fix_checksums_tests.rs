@@ -320,7 +320,7 @@ async fn state_checksum_family_fix_rejects_when_concurrent_writer_holds_lock() {
 
     let blocker = build_pool(&sqlite).await;
     let mut conn = blocker.acquire().await.expect("acquire");
-    let mut tx = conn.begin_with("BEGIN IMMEDIATE").await.expect("begin");
+    let tx = conn.begin_with("BEGIN IMMEDIATE").await.expect("begin");
 
     let started = std::time::Instant::now();
     let result = fix_migration_checksum_families(&sqlite, ChecksumFamily::Crlf, true).await;
