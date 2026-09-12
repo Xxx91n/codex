@@ -16,6 +16,7 @@ that supersedes and links the old one, incrementing the `NNNN` counter.
 | [0007](0007-major-upgrade-playbook.md) | Accepted (contingency playbook) | Upstream 1.0 major-upgrade playbook: break-surface preview, registration-point impact template, controlled full-CI verification window, frozen baseline & EOL clauses |
 | [0008](0008-chat-wire-tool-fidelity-protocol.md) | Accepted | Chat wire tool-calling fidelity: adjacency invariant + namespace qualified-name loopback + wire-aware tool exposure (chat/anthropic flatten MCP tools; Responses lazy-load unchanged) |
 | [0009](0009-thinking-drop-conditional-replay.md) | Accepted (supersedes the unconditional unsigned-thinking-drop argument of ADR-0003; signed verbatim replay stays) | Thinking-drop conditional red line: unsigned blocks dispatch on upstream class (first-party drop+warn with G1 pre-flight degrade on manual+tool_use; compatible endpoints verbatim) + guards G1/G3/G6 |
+| [0010](0010-upstream-merge-2026-09-12-rulings.md) | Accepted | Upstream merge 2026-09-12 (behind 710, merge-base 6be2a6ca952a → c4017a87aa): 7-file conflict rulings per FORK_DIVERGENCE adapt entries + IGN-1 legacy-remote-compaction absorbed-by-upstream 1ac689cc7d |
 
 Term definitions for vocabulary used across ADRs live in the repo-root
 [CONTEXT.md](../../CONTEXT.md) (single vocabulary authority). Agent-facing
