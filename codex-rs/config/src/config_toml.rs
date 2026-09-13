@@ -467,9 +467,10 @@ pub struct ConfigToml {
     pub memories: Option<MemoriesToml>,
 
     /// Local state database settings (fork-only; ticket 31). Controls the
-    /// in-process self-heal and the post-migration startup flip of the
-    /// _sqlx_migrations checksum family. Defaults to auto (one-way LF
-    /// self-heal, no startup rewrite).
+    /// _sqlx_migrations checksum family maintenance. Defaults to auto:
+    /// follow the family this binary embeds (the official platform
+    /// family); mismatches fail loud with the repair command and nothing
+    /// is rewritten automatically.
     pub state: Option<StateDbSettingsToml>,
 
     /// User-level skill config entries keyed by SKILL.md path.

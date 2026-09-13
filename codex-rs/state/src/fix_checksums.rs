@@ -1,9 +1,12 @@
 //! Offline maintenance for the EOL sqlx migration checksum family.
 //!
-//! Mirrors the in-process self-heal in `eol_checksum_repair`, but applies
-//! the full six-precondition gate documented in D-015 before touching any
-//! database, runs every gate across every runtime database before deciding
-//! to write, and produces a machine-readable JSON report.
+//! Mirrors the explicit-maintenance rewrite paths in
+//! `eol_checksum_repair`, but applies the full six-precondition gate
+//! documented in D-015 before touching any database, runs every gate across
+//! every runtime database before deciding to write, and produces a
+//! machine-readable JSON report. Under the ticket 35 default (`auto`) this
+//! subcommand is the only sanctioned rewrite entry point: the startup path
+//! fails loud with the exact command instead of rewriting on its own.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -21,7 +24,7 @@ use crate::SqliteConfig;
 use crate::eol_checksum_repair::ChecksumFamily;
 use crate::eol_checksum_repair::ObjectKind;
 use crate::eol_checksum_repair::SchemaReplay;
-use crate::eol_checksum_repair::crlf_checksum;
+use crate::eol_checksum_repair::checksum_family;
 use crate::eol_checksum_repair::repair_eol_checksum_family;
 use crate::migrations::GOALS_MIGRATOR;
 use crate::migrations::LOGS_MIGRATOR;
@@ -68,7 +71,7 @@ pub struct FixChecksumsDb {
     pub path: String,
     pub status: FixStatus,
     /// Line-ending family across the applied rows:
-    ///   `"lf"` — every row carries the embedded (LF) checksum.
+    ///   `"lf"` — every row carries the LF image of the embedded SQL.
     ///   `"crlf"` — every row carries the CRLF image of the embedded SQL.
     ///   `"mixed"` — both families appear (e.g. the fork ran its migrator
     ///   on an LF-stamped database and a pre-ticket-18 official binary
@@ -164,12 +167,10 @@ fn detect_family(migrator: &Migrator, rows: &[(i64, Vec<u8>)]) -> Option<String>
         let Some(migration) = migrator.migrations.iter().find(|m| m.version == *version) else {
             continue;
         };
-        if stored.as_slice() == migration.checksum.as_ref() {
-            lf_count += 1;
-        } else if crlf_checksum(migration)
-            .is_some_and(|image| stored.as_slice() == image.as_slice())
-        {
-            crlf_count += 1;
+        match checksum_family(migration, stored.as_slice()) {
+            Some(ChecksumFamily::Lf) => lf_count += 1,
+            Some(ChecksumFamily::Crlf) => crlf_count += 1,
+            None => {}
         }
     }
     match (lf_count, crlf_count) {
@@ -367,10 +368,7 @@ async fn validate_database(
         else {
             continue;
         };
-        let in_embedded = stored.as_slice() == migration.checksum.as_ref();
-        let in_crlf =
-            crlf_checksum(migration).is_some_and(|image| stored.as_slice() == image.as_slice());
-        if !in_embedded && !in_crlf {
+        if checksum_family(migration, stored.as_slice()).is_none() {
             pool.close().await;
             return FixChecksumsDb {
                 label: spec.label.to_string(),
@@ -438,14 +436,8 @@ async fn validate_database(
                 .migrations
                 .iter()
                 .find(|m| m.version == *version)?;
-            let in_embedded = stored.as_slice() == migration.checksum.as_ref();
-            let in_crlf =
-                crlf_checksum(migration).is_some_and(|image| stored.as_slice() == image.as_slice());
-            match (target, in_embedded, in_crlf) {
-                (ChecksumFamily::Lf, true, _) | (ChecksumFamily::Crlf, _, true) => None,
-                (ChecksumFamily::Lf, _, true) | (ChecksumFamily::Crlf, true, _) => Some(*version),
-                _ => None,
-            }
+            let family = checksum_family(migration, stored.as_slice())?;
+            (family != target).then_some(*version)
         })
         .collect();
     let status = if rewritten_versions.is_empty() {
@@ -554,11 +546,7 @@ async fn apply_to_database(
     let detected = if rewritten.is_empty() {
         Some(target.as_str().to_string())
     } else {
-        let other = match target {
-            ChecksumFamily::Lf => "crlf",
-            ChecksumFamily::Crlf => "lf",
-        };
-        Some(other.to_string())
+        Some(target.flip().as_str().to_string())
     };
     let status = if rewritten.is_empty() {
         FixStatus::NoChange

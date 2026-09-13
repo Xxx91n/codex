@@ -10,6 +10,7 @@ const _: () = assert!(
 );
 
 mod audit;
+mod checksum_family_notice;
 mod eol_checksum_repair;
 mod extract;
 mod fix_checksums;

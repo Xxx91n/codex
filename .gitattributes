@@ -75,19 +75,27 @@ codex-rs/apply-patch/tests/fixtures/scenarios/023_preserves_crlf_line_endings/**
 codex-rs/app-server-protocol/schema/** linguist-generated
 codex-rs/hooks/schema/generated/** linguist-generated
 
-# --- 6. sqlx migration sources: byte-stable LF (ticket 25) ---
+# --- 6. sqlx migration sources: official platform family (ticket 35, D-004) ---
 # sqlx::migrate! embeds these .sql bytes and their SHA-384 checksums into the
-# binary at compile time, so a CRLF checkout flips the whole embedded checksum
-# family and locks out every database written by the other family. Lock the
-# six migration directories explicitly (later rules override earlier ones) so
-# the embedded bytes stay identical across platforms and checkout configs,
-# independent of any later change to the section-1 default.
-codex-rs/state/migrations/*.sql text eol=lf
-codex-rs/state/logs_migrations/*.sql text eol=lf
-codex-rs/state/goals_migrations/*.sql text eol=lf
-codex-rs/state/memory_migrations/*.sql text eol=lf
-codex-rs/state/queue_migrations/*.sql text eol=lf
-codex-rs/state/thread_history_migrations/*.sql text eol=lf
+# binary at compile time. The official openai/codex Windows CLI is built from
+# a Windows checkout whose default core.autocrlf=true converts these files to
+# CRLF, so its embedded checksum family is CRLF there and LF on Linux/macOS.
+# The fork must embed the same family to coexist on one shared home: these
+# six directories request plain text normalization with the eol attribute
+# left UNSPECIFIED (!eol overrides the section-1 eol=lf), so the checkout
+# line endings follow the local git configuration exactly like an official
+# build machine. Repository blobs stay LF; only the checkout side is native.
+# Do NOT pin eol=lf here: that re-introduces the ticket 25 LF lock that
+# stranded shared homes in the wrong family (docs/fork-checksum-family.md).
+# CI guards this in both layers: fork-health asserts the per-platform
+# checkout bytes; fork-cli-test-release byte-scans the release binaries
+# for the embedded SHA-384 digests.
+codex-rs/state/migrations/*.sql text !eol
+codex-rs/state/logs_migrations/*.sql text !eol
+codex-rs/state/goals_migrations/*.sql text !eol
+codex-rs/state/memory_migrations/*.sql text !eol
+codex-rs/state/queue_migrations/*.sql text !eol
+codex-rs/state/thread_history_migrations/*.sql text !eol
 
 # --- 7. Upstream LF pin (kept verbatim from upstream/main, merge 2026-09-12) ---
 third_party/voice/sources.json text eol=lf

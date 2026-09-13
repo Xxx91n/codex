@@ -920,8 +920,10 @@ pub struct Config {
 
     /// Resolved configuration shared by all Codex SQLite databases.
     pub sqlite: codex_state::SqliteConfig,
-    /// Local state database settings (fork-only; ticket 31). Drives the
-    /// in-process self-heal target and the post-migration startup flip.
+    /// Local state database settings (fork-only; tickets 31/35). Drives
+    /// the explicit checksum-family maintenance opt-in; the default
+    /// auto behavior follows the embedded (official platform) family and
+    /// never rewrites on its own.
     pub state_db_migration_checksum_family: MigrationChecksumFamily,
 
     /// Directory where Codex writes log files (defaults to `$CODEX_HOME/log`).
@@ -4265,8 +4267,12 @@ impl Config {
                     .and_then(|state| state.migration_checksum_family)
                     .unwrap_or_default()
                 {
+                    // Ticket 35: auto (None) follows the embedded official
+                    // platform family and fails loud on drift; crlf and lf
+                    // stay the explicit ticket-31 maintenance opt-ins.
                     MigrationChecksumFamily::Crlf => Some(codex_state::ChecksumFamily::Crlf),
-                    MigrationChecksumFamily::Lf | MigrationChecksumFamily::Auto => None,
+                    MigrationChecksumFamily::Lf => Some(codex_state::ChecksumFamily::Lf),
+                    MigrationChecksumFamily::Auto => None,
                 }),
             state_db_migration_checksum_family: cfg
                 .state

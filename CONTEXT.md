@@ -18,7 +18,9 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
    （三注册点 / 构建 / 同步）。
 3. `docs/adr/` — append-only 决策记录（索引：`docs/adr/README.md`）：0001 基线与
    同步、0002 merge rulings、0003 Gemini 裁决、0004 reasoning_content 透传、
-   0005 reasoning_effort 翻译、0006 语义补丁队列；新裁决递增编号，新词随其 ADR 入本表。
+   0005 reasoning_effort 翻译、0006 语义补丁队列、0007 1.0 预案、0008 chat wire
+   保真、0009 thinking 条件回传、0010 2026-09-12 merge 裁决、0011 checksum 家族
+   回归官方默认；新裁决递增编号，新词随其 ADR 入本表。
 4. 嵌套 AGENTS 链（就近优先）：`codex-rs/AGENTS.md`（Rust workspace 纪律）→
    `core/src/client/wire/AGENTS.md`（per-wire 协议红线）。
 5. `.github/workflows/fork-health.yml` — 每日 fork seam 看门狗（seam crates
@@ -174,7 +176,10 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
 - **PONYTAIL**：刻意取舍台账（ADR-0002 记 max_tokens）；禁当普通 TODO。
 - **翻译有损面**：thinking、cache_control、store/previous_response_id、compact 降级面。
 - **thoughtSignature**：Gemini 术语，仅存于 ADR-0003 重开预案；禁用于 anthropic signature。
-- **EOL checksum 家族**：_sqlx_migrations 校验和字节稳定靠六迁移目录 LF 锁 + 启动自愈
+- **EOL checksum 家族**：_sqlx_migrations 校验和家族 = 构建机 checkout 的平台原生家族
+  （Windows 构建 CRLF、Linux/macOS 构建 LF，对齐官方构建 checkout 行尾策略）。2026-09-14
+  修订（票 35/ADR-0011）：原「六迁移目录 LF 锁 + 启动自愈」机制作废——auto 默认启动零
+  自动改写，家族漂移 fail-loud + 显式修复命令（见「state 校验和家族双向切换」）。
 
 
 ### anthropic max_tokens 元数据优先（票 29 / A-007）
@@ -182,10 +187,35 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
 - 禁止用法：删除该常量；绕过 `wire/max_tokens.rs::resolve_max_tokens` 手拼预算；对负数/零元数据不设守卫（r13 教训：clamp(0,cap) 吞负数绕过兑底）。
 - 源：ADR-0010 重放链；D-006 完整方案 b；live 实证 docs/specs/claude-live-acceptance-20260913/。
 
-### state 校验和家族双向切换（票 31 / D-015）
-- 本仓用法：`_sqlx_migrations` 校验和家族（CRLF/LF 字节形态）可双向维持——子命令 `state fix-checksums --family crlf|lf [--dry-run] [--apply]`（默认 dry-run,JSON 报告）+ 配置 `[state] migration_checksum_family = auto|lf|crlf`（默认 auto=维持单向 LF 自愈,显式 crlf 时启动维持库为 CRLF 家族,官方 Windows 版可开）。六条安全前提缺一拒绝（家族判据/归一化 sha384 指纹相等/SchemaReplay 一致/版本集合一致/原子可逆/单二进制并发边界）。
-- 禁止用法：启动时自动反向重写（工业界零先例,xdifu/Flyway repair 均为显式命令）；未过六前提的回写；fork 与官方二进制并发开同一库。
-- 源：D-015；docs/fork-checksum-family.md；xdifu codex-repair 对齐（官方 #23863 同族事故）。
+### state 校验和家族双向切换（票 31 / D-015 → 票 35 语义翻转 / ADR-0011）
+> 2026-09-14 修订（票 35，依据 D-001~D-004 与 research/35）：auto 默认语义由「维持单向 LF
+> 自愈」翻转为「跟随二进制内嵌家族（=官方平台家族），漂移 fail-loud + 显式命令、零自动
+> 改写」；原条目全文下沉 superseded 留痕，六前提与禁止用法主体继续有效。
+- 本仓用法（票 35 后）：`[state] migration_checksum_family = auto|lf|crlf`。默认 auto =
+  跟随本二进制内嵌家族（官方平台家族：Windows 构建 CRLF、Linux/macOS 构建 LF）；启动家族
+  不匹配时做只读诊断→fail-loud 错误（文案含「库=X 家族 / 二进制=Y 家族 / codex state
+  fix-checksums --family Y --apply」），auto 路径零自动改写；真漂移/篡改/未知版本保留 sqlx
+  原始错误且不提供修复通道。首次检测到漂移指纹（库家族, 二进制家族, 平台）时打印一次性
+  提示并持久化 marker `$CODEX_HOME/.checksum-family-notices.json`（指纹任一变化再提示；
+  `CODEX_DISABLE_CHECKSUM_FAMILY_NOTICE=1` 关闭；提示不阻塞启动流程——错误本身始终带修复
+  命令）。显式 crlf/lf = 票 31 启动维持行为不变（先重定位到内嵌家族过验证→迁移→落配置
+  家族）。离线 `codex state fix-checksums --family <lf|crlf> [--apply]`（默认 dry-run,
+  JSON 报告；六条安全前提缺一拒绝——家族判据/归一化 sha384 指纹相等/SchemaReplay 一致/
+  版本集合一致/原子可逆/单二进制并发边界）；`--family lf` 保留为应急逃生口（A-025）。
+- 禁止用法：auto 下启动隐式自动改写（「启动自动反向重写无公开先例」约束持续有效，#38528
+  未合并佐证；xdifu/Flyway repair 均为显式命令）；未过六前提的回写；fork 与官方二进制并发
+  开同一库；给篡改校验和的失败提供修复命令；给六迁移目录重新钉 eol=lf。
+- 源：ADR-0011（supersede 票 25 LF 锁裁决）；D-001~D-004（dual-cli 账本）；research/35
+  （S1-S12）；docs/fork-checksum-family.md；xdifu codex-repair / Flyway repair 模型。
+- Superseded（2026-09-12 票 31 原条目留痕；仅「auto=维持单向 LF 自愈」默认语义被上述修订
+  取代，其余仍有效）：本仓用法：`_sqlx_migrations` 校验和家族（CRLF/LF 字节形态）可双向
+  维持——子命令 `state fix-checksums --family crlf|lf [--dry-run] [--apply]`（默认 dry-run,
+  JSON 报告）+ 配置 `[state] migration_checksum_family = auto|lf|crlf`（默认 auto=维持单向
+  LF 自愈,显式 crlf 时启动维持库为 CRLF 家族,官方 Windows 版可开）。六条安全前提缺一拒绝
+  （家族判据/归一化 sha384 指纹相等/SchemaReplay 一致/版本集合一致/原子可逆/单二进制并发
+  边界）。禁止用法：启动时自动反向重写（工业界零先例,xdifu/Flyway repair 均为显式命令）；
+  未过六前提的回写；fork 与官方二进制并发开同一库。源：D-015；docs/fork-checksum-family.md；
+  xdifu codex-repair 对齐（官方 #23863 同族事故）。
 
 ## 维护
 

@@ -8,9 +8,13 @@ use sqlx::migrate::Migration;
 use sqlx::migrate::Migrator;
 
 use super::ChecksumFamily;
+use super::FamilyDrift;
 use super::ObjectKind;
 use super::SchemaReplay;
 use super::actual_schema_inventory;
+use super::detect_checksum_family_drift;
+use super::family_checksum;
+use super::migrator_embedded_family;
 use super::repair_eol_checksum_family;
 use crate::migrations::GOALS_MIGRATOR;
 use crate::migrations::LOGS_MIGRATOR;
@@ -20,26 +24,40 @@ use crate::migrations::STATE_MIGRATOR;
 use crate::migrations::THREAD_HISTORY_MIGRATOR;
 use crate::migrations::runtime_state_migrator;
 
-/// The checksum sqlx would embed for the CRLF image of a migration: the byte
-/// form every pre-ticket-18 Windows checkout fed to `sqlx::migrate!`.
-fn crlf_image_checksum(migration: &Migration) -> Vec<u8> {
-    let image = Migration::new(
-        migration.version,
-        migration.description.clone(),
-        migration.migration_type,
-        AssertSqlSafe(migration.sql.as_str().replace('\n', "\r\n")).into_sql_str(),
-        migration.no_tx,
-    );
-    image.checksum.into_owned()
+// Ticket 35 made the embedded checksum family platform-relative (official
+// platform default), so these tests phrase every flip relative to the
+// `embedded()`/`flipped()` pair of the build running them.
+fn embedded() -> ChecksumFamily {
+    migrator_embedded_family(&STATE_MIGRATOR)
 }
 
-fn crlf_image_checksum_for(migrator: &Migrator, version: i64) -> Vec<u8> {
+fn flipped() -> ChecksumFamily {
+    embedded().flip()
+}
+
+/// The checksum sqlx would embed for the given line-ending image of a
+/// migration (`embedded()` collapses to the precomputed embedded checksum).
+fn image_checksum(migration: &Migration, family: ChecksumFamily) -> Vec<u8> {
+    family_checksum(migration, family).expect("line-ending image should be computable")
+}
+
+fn image_checksum_for(migrator: &Migrator, version: i64, family: ChecksumFamily) -> Vec<u8> {
     let migration = migrator
         .migrations
         .iter()
         .find(|migration| migration.version == version)
         .expect("migration should exist");
-    crlf_image_checksum(migration)
+    image_checksum(migration, family)
+}
+
+/// The embedded SQL of a migration rewritten into the flipped family.
+fn flipped_sql(sql: &str) -> String {
+    let lf = sql.replace("\r\n", "\n");
+    if flipped() == ChecksumFamily::Crlf {
+        lf.replace("\n", "\r\n")
+    } else {
+        lf
+    }
 }
 
 fn embedded_checksum(migrator: &Migrator, version: i64) -> Vec<u8> {
@@ -105,25 +123,25 @@ async fn repair_eol_checksum_family_heals_eol_only_checksums() {
         .await
         .expect("current migrations should apply");
 
-    // Stamp the stored history with the CRLF images of the embedded SQL: the
-    // byte form pre-ticket-18 Windows builds fed to sqlx::migrate!.
+    // Stamp the stored history with the opposite line-ending family: the
+    // byte form a build from the other checkout fed to sqlx::migrate!.
     for migration in STATE_MIGRATOR.migrations.iter() {
         sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
-            .bind(crlf_image_checksum(migration).as_slice())
+            .bind(image_checksum(migration, flipped()).as_slice())
             .bind(migration.version)
             .execute(&pool)
             .await
-            .expect("CRLF-family checksum should update");
+            .expect("flipped-family checksum should update");
     }
 
-    // The LF-family migrator must reject that history before the heal.
+    // The embedded-family migrator must reject that history before the heal.
     let strict_error = STATE_MIGRATOR
         .run(&pool)
         .await
-        .expect_err("LF-family migrator should reject a CRLF-family history");
+        .expect_err("embedded-family migrator should reject a flipped-family history");
     assert!(matches!(strict_error, MigrateError::VersionMismatch(_)));
 
-    repair_eol_checksum_family(&pool, &runtime_state_migrator(), ChecksumFamily::Lf)
+    repair_eol_checksum_family(&pool, &runtime_state_migrator(), embedded())
         .await
         .expect("EOL-only checksum flip should be healed");
 
@@ -164,30 +182,33 @@ async fn repair_eol_checksum_family_rejects_schema_mismatch() {
 
     for migration in partial.migrations.iter() {
         sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
-            .bind(crlf_image_checksum(migration).as_slice())
+            .bind(image_checksum(migration, flipped()).as_slice())
             .bind(migration.version)
             .execute(&pool)
             .await
-            .expect("CRLF-family checksum should update");
+            .expect("flipped-family checksum should update");
     }
     sqlx::query("DROP TABLE thread_sections")
         .execute(&pool)
         .await
         .expect("schema drift should apply");
 
-    let heal_error =
-        repair_eol_checksum_family(&pool, &runtime_state_migrator(), ChecksumFamily::Lf)
-            .await
-            .expect_err("schema drift must hard-fail instead of rewriting checksums");
+    let heal_error = repair_eol_checksum_family(
+        &pool,
+        &runtime_state_migrator(),
+        embedded(),
+    )
+    .await
+    .expect_err("schema drift must hard-fail instead of rewriting checksums");
     assert!(heal_error.to_string().contains("schema"));
 
-    // Nothing was rewritten: the history still carries the CRLF family.
+    // Nothing was rewritten: the history still carries the flipped family.
     let stored: Vec<u8> =
         sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 1")
             .fetch_one(&pool)
             .await
             .expect("version 1 row should load");
-    assert_eq!(stored, crlf_image_checksum_for(&STATE_MIGRATOR, 1));
+    assert_eq!(stored, image_checksum_for(&STATE_MIGRATOR, 1, flipped()));
 
     pool.close().await;
 }
@@ -219,10 +240,13 @@ async fn repair_eol_checksum_family_rejects_non_eol_checksum() {
         .await
         .expect("corrupted checksum should update");
 
-    let heal_error =
-        repair_eol_checksum_family(&pool, &runtime_state_migrator(), ChecksumFamily::Lf)
-            .await
-            .expect_err("checksums outside both line-ending families must hard-fail");
+    let heal_error = repair_eol_checksum_family(
+        &pool,
+        &runtime_state_migrator(),
+        embedded(),
+    )
+    .await
+    .expect_err("checksums outside both line-ending families must hard-fail");
     assert!(
         heal_error
             .to_string()
@@ -263,8 +287,9 @@ async fn repair_eol_checksum_family_rewrites_legacy_recency_row() {
         .await
         .expect("sqlite database should open");
 
-    // A pre-rename CRLF-family binary: migrations 1..37 plus the recency
-    // migration recorded as version 38.
+    // A pre-rename binary of the OTHER family: migrations 1..37 plus the
+    // recency migration recorded as version 38 with the flipped image of
+    // the recency SQL.
     let pre_recency = migrator_through(&STATE_MIGRATOR, /*max_version*/ 37);
     let recency = STATE_MIGRATOR
         .migrations
@@ -272,12 +297,11 @@ async fn repair_eol_checksum_family_rewrites_legacy_recency_row() {
         .find(|migration| migration.version == 39)
         .expect("recency migration should exist");
     let mut legacy_migrations = pre_recency.migrations.iter().cloned().collect::<Vec<_>>();
-    // The recency migration as the pre-rename binary recorded it: version 38.
     legacy_migrations.push(Migration::new(
         38,
         recency.description.clone(),
         recency.migration_type,
-        AssertSqlSafe(recency.sql.as_str().replace('\n', "\r\n")).into_sql_str(),
+        AssertSqlSafe(flipped_sql(recency.sql.as_str())).into_sql_str(),
         recency.no_tx,
     ));
     Migrator::with_migrations(legacy_migrations)
@@ -285,7 +309,7 @@ async fn repair_eol_checksum_family_rewrites_legacy_recency_row() {
         .await
         .expect("legacy recency migrations should apply");
 
-    repair_eol_checksum_family(&pool, &runtime_state_migrator(), ChecksumFamily::Lf)
+    repair_eol_checksum_family(&pool, &runtime_state_migrator(), embedded())
         .await
         .expect("legacy recency row should be healed");
 
@@ -343,7 +367,7 @@ async fn repair_eol_checksum_family_is_noop_without_mismatches() {
         .await
         .expect("current migrations should apply");
 
-    repair_eol_checksum_family(&pool, &runtime_state_migrator(), ChecksumFamily::Lf)
+    repair_eol_checksum_family(&pool, &runtime_state_migrator(), embedded())
         .await
         .expect("a matching history should not error the heal");
 
@@ -381,8 +405,9 @@ async fn repair_eol_checksum_family_schema_replay_covers_all_runtime_databases()
         migrator.run(&pool).await.expect("migrations should apply");
 
         // The DDL replay must reproduce the exact catalog of a database the
-        // migrator itself built, for every runtime migration set: the gate in
-        // repair_eol_checksum_family compares against exactly this replay.
+        // migrator itself built, for every runtime migration set: the gate
+        // in repair_eol_checksum_family compares against exactly this
+        // replay.
         let mut replay = SchemaReplay::default();
         for migration in migrator.migrations.iter() {
             replay.apply_migration(migration.sql.as_str());
@@ -400,7 +425,7 @@ async fn repair_eol_checksum_family_schema_replay_covers_all_runtime_databases()
 }
 
 #[tokio::test]
-async fn repair_eol_checksum_family_with_crlf_target_rewrites_lf_history() {
+async fn repair_eol_checksum_family_with_flipped_target_rewrites_embedded_history() {
     let sqlite_home = crate::runtime::test_support::unique_temp_dir();
     tokio::fs::create_dir_all(&sqlite_home)
         .await
@@ -419,17 +444,17 @@ async fn repair_eol_checksum_family_with_crlf_target_rewrites_lf_history() {
         .await
         .expect("current migrations should apply");
 
-    // The LF-family migrator accepts the database as-is.
-    let rewritten =
-        repair_eol_checksum_family(&pool, &runtime_state_migrator(), ChecksumFamily::Crlf)
-            .await
-            .expect("flipping to the CRLF target should succeed");
+    // The embedded-family migrator accepts the database as-is; flipping to
+    // the opposite family must rewrite every row.
+    let rewritten = repair_eol_checksum_family(&pool, &runtime_state_migrator(), flipped())
+        .await
+        .expect("flipping to the opposite target should succeed");
     assert!(
         !rewritten.is_empty(),
-        "every LF-stamped row must be rewritten"
+        "every embedded-stamped row must be rewritten"
     );
 
-    // Every row now carries the CRLF image of the embedded SQL.
+    // Every row now carries the flipped line-ending image.
     for migration in STATE_MIGRATOR.migrations.iter() {
         let stored: Vec<u8> =
             sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = ?")
@@ -437,10 +462,11 @@ async fn repair_eol_checksum_family_with_crlf_target_rewrites_lf_history() {
                 .fetch_one(&pool)
                 .await
                 .expect("stored checksum should load");
-        let image = crlf_image_checksum(migration);
+        let image = image_checksum(migration, flipped());
         assert_eq!(
-            stored, image,
-            "version {} must carry the CRLF image",
+            stored,
+            image,
+            "version {} must carry the flipped image",
             migration.version
         );
     }
@@ -449,7 +475,7 @@ async fn repair_eol_checksum_family_with_crlf_target_rewrites_lf_history() {
 }
 
 #[tokio::test]
-async fn repair_eol_checksum_family_with_crlf_target_rejects_schema_mismatch() {
+async fn repair_eol_checksum_family_with_flipped_target_rejects_schema_mismatch() {
     let sqlite_home = crate::runtime::test_support::unique_temp_dir();
     tokio::fs::create_dir_all(&sqlite_home)
         .await
@@ -473,13 +499,12 @@ async fn repair_eol_checksum_family_with_crlf_target_rejects_schema_mismatch() {
         .await
         .expect("schema drift should apply");
 
-    let heal_error =
-        repair_eol_checksum_family(&pool, &runtime_state_migrator(), ChecksumFamily::Crlf)
-            .await
-            .expect_err("schema drift must hard-fail in the Crlf target too");
+    let heal_error = repair_eol_checksum_family(&pool, &runtime_state_migrator(), flipped())
+        .await
+        .expect_err("schema drift must hard-fail for the flipped target too");
     assert!(heal_error.to_string().contains("schema"));
 
-    // Nothing was rewritten: rows still carry the embedded (LF) checksum.
+    // Nothing was rewritten: rows still carry the embedded checksum.
     let stored: Vec<u8> =
         sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 1")
             .fetch_one(&pool)
@@ -491,7 +516,7 @@ async fn repair_eol_checksum_family_with_crlf_target_rejects_schema_mismatch() {
 }
 
 #[tokio::test]
-async fn repair_eol_checksum_family_with_crlf_target_rewrites_legacy_recency_row() {
+async fn repair_eol_checksum_family_with_flipped_target_rewrites_recency_row() {
     let sqlite_home = crate::runtime::test_support::unique_temp_dir();
     tokio::fs::create_dir_all(&sqlite_home)
         .await
@@ -506,8 +531,9 @@ async fn repair_eol_checksum_family_with_crlf_target_rewrites_legacy_recency_row
         .await
         .expect("sqlite database should open");
 
-    // Pre-rename LF-family binary: migrations 1..37 plus the recency
-    // migration recorded as version 38 with the LF (embedded) checksum.
+    // Migrations 1..37 plus the recency migration at version 39, all in the
+    // embedded family: flipping to the opposite family must carry the
+    // recency row across too.
     let pre_recency = migrator_through(&STATE_MIGRATOR, /*max_version*/ 37);
     let recency = STATE_MIGRATOR
         .migrations
@@ -523,25 +549,25 @@ async fn repair_eol_checksum_family_with_crlf_target_rewrites_legacy_recency_row
     Migrator::with_migrations(legacy_migrations)
         .run(&pool)
         .await
-        .expect("legacy recency migrations should apply");
+        .expect("recency migrations should apply");
 
-    repair_eol_checksum_family(&pool, &runtime_state_migrator(), ChecksumFamily::Crlf)
+    repair_eol_checksum_family(&pool, &runtime_state_migrator(), flipped())
         .await
-        .expect("legacy recency row should be healed to CRLF target");
+        .expect("recency row should be healed to the flipped target");
 
-    // The row is now version 39 with the CRLF image of the recency SQL.
+    // The row is version 39 with the flipped image of the recency SQL.
     let renamed: Vec<u8> =
         sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 39")
             .fetch_one(&pool)
             .await
             .expect("recency row should exist at version 39");
-    assert_eq!(renamed, crlf_image_checksum(recency));
+    assert_eq!(renamed, image_checksum(recency, flipped()));
 
     pool.close().await;
 }
 
 #[tokio::test]
-async fn repair_eol_checksum_family_with_crlf_target_is_noop_when_already_crlf() {
+async fn repair_eol_checksum_family_with_flipped_target_is_noop_when_already_flipped() {
     let sqlite_home = crate::runtime::test_support::unique_temp_dir();
     tokio::fs::create_dir_all(&sqlite_home)
         .await
@@ -559,24 +585,138 @@ async fn repair_eol_checksum_family_with_crlf_target_is_noop_when_already_crlf()
         .run(&pool)
         .await
         .expect("current migrations should apply");
-    // Pre-flip every row to the CRLF image.
+    // Pre-flip every row to the opposite family.
     for migration in STATE_MIGRATOR.migrations.iter() {
         sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
-            .bind(crlf_image_checksum(migration).as_slice())
+            .bind(image_checksum(migration, flipped()).as_slice())
             .bind(migration.version)
             .execute(&pool)
             .await
-            .expect("CRLF image should update");
+            .expect("flipped image should update");
     }
 
-    let rewritten =
-        repair_eol_checksum_family(&pool, &runtime_state_migrator(), ChecksumFamily::Crlf)
-            .await
-            .expect("already-CRLF history is a no-op for the CRLF target");
+    let rewritten = repair_eol_checksum_family(&pool, &runtime_state_migrator(), flipped())
+        .await
+        .expect("already-flipped history is a no-op for the flipped target");
     assert!(
         rewritten.is_empty(),
         "no rows should be rewritten when already in target"
     );
 
     pool.close().await;
+}
+
+#[tokio::test]
+async fn detect_checksum_family_drift_reports_pure_flip() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let pool = sqlite
+        .open_read_write_pool(&sqlite.state_db_path())
+        .await
+        .expect("sqlite database should open");
+    STATE_MIGRATOR
+        .run(&pool)
+        .await
+        .expect("current migrations should apply");
+
+    // No drift while the history sits in the embedded family.
+    assert_eq!(
+        detect_checksum_family_drift(&pool, &runtime_state_migrator(), embedded())
+            .await
+            .expect("probe should succeed"),
+        None
+    );
+
+    for migration in STATE_MIGRATOR.migrations.iter() {
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
+            .bind(image_checksum(migration, flipped()).as_slice())
+            .bind(migration.version)
+            .execute(&pool)
+            .await
+            .expect("flip should update");
+    }
+    let drift = detect_checksum_family_drift(&pool, &runtime_state_migrator(), embedded())
+        .await
+        .expect("probe should succeed")
+        .expect("flipped history is a pure family drift");
+    assert_eq!(drift.db_family, Some(flipped()));
+    assert_eq!(drift.binary_family, embedded());
+
+    // One row dragged back -> mixed database, still drift but unlabelable.
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = 1")
+        .bind(embedded_checksum(&STATE_MIGRATOR, 1).as_slice())
+        .execute(&pool)
+        .await
+        .expect("mix should update");
+    let drift = detect_checksum_family_drift(&pool, &runtime_state_migrator(), embedded())
+        .await
+        .expect("probe should succeed")
+        .expect("mixed history is still drift");
+    assert_eq!(drift.db_family, None);
+
+    // A checksum outside both families -> no guidance (sqlx error stands).
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = 1")
+        .bind([5_u8, 6].as_slice())
+        .execute(&pool)
+        .await
+        .expect("tamper should update");
+    assert_eq!(
+        detect_checksum_family_drift(&pool, &runtime_state_migrator(), embedded())
+            .await
+            .expect("probe should succeed"),
+        None
+    );
+
+    pool.close().await;
+}
+
+#[test]
+fn drift_guidance_names_both_families_and_the_command() {
+    let drift = FamilyDrift {
+        db_family: Some(ChecksumFamily::Lf),
+        binary_family: ChecksumFamily::Crlf,
+    };
+    let guidance = drift.guidance();
+    assert!(guidance.contains("checksum family mismatch"), "guidance: {guidance}");
+    assert!(
+        guidance.contains("stored migrations are in the lf family"),
+        "guidance: {guidance}"
+    );
+    assert!(
+        guidance.contains("this binary embeds the crlf family"),
+        "guidance: {guidance}"
+    );
+    assert_eq!(
+        drift.repair_command(),
+        "codex state fix-checksums --family crlf --apply"
+    );
+    assert!(guidance.contains(&drift.repair_command()), "guidance: {guidance}");
+    let notice = drift.notice_text();
+    assert!(notice.contains("one-time notice"), "notice: {notice}");
+    assert!(
+        notice.contains("docs/fork-checksum-family.md"),
+        "notice: {notice}"
+    );
+    let fingerprint = drift.fingerprint();
+    assert_eq!(fingerprint.db_family, "lf");
+    assert_eq!(fingerprint.binary_family, "crlf");
+    assert_eq!(fingerprint.platform, std::env::consts::OS);
+
+    // Mixed databases label as "mixed" and keep pointing at the binary
+    // family (the repair is the same command).
+    let mixed = FamilyDrift {
+        db_family: None,
+        binary_family: ChecksumFamily::Lf,
+    };
+    assert!(
+        mixed.guidance().contains("stored migrations are in the mixed family"),
+        "guidance: {}",
+        mixed.guidance()
+    );
 }

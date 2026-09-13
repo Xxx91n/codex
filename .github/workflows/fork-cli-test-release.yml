@@ -72,6 +72,53 @@ jobs:
       - name: Verify binary
         shell: bash
         run: ./target/${{ matrix.target }}/release/${{ matrix.bin }} --version
+      # Ticket 35 (A-019/A-024, authoritative layer): sqlx::migrate! embeds
+      # SHA384(migration file bytes) verbatim, so the checked-out .sql bytes
+      # must be the official platform family (CRLF on the Windows runner,
+      # LF on Linux/macOS - runner git defaults per actions/checkout #135,
+      # .gitattributes section 6 text !eol) AND their digests must be found
+      # verbatim inside the release binary. Byte-scan, no disassembly:
+      # constant data survives strip/LTO. Catches the failure mode the
+      # ticket 25 LF lock could not: wrong bytes reaching the artifact.
+      - name: Assert embedded checksum family (official platform default)
+        shell: bash
+        run: |
+          set -euo pipefail
+          PY=python3
+          command -v "$PY" >/dev/null 2>&1 || PY=python
+          "$PY" - "target/${{ matrix.target }}/release/${{ matrix.bin }}" <<'PY'
+          import hashlib, sys, glob, os
+
+          binary = sys.argv[1]
+          data = open(binary, "rb").read()
+          expected_crlf = os.name == "nt"
+          dirs = [
+              "state/migrations",
+              "state/logs_migrations",
+              "state/goals_migrations",
+              "state/memory_migrations",
+              "state/queue_migrations",
+              "state/thread_history_migrations",
+          ]
+          problems = []
+          total = 0
+          for d in dirs:
+              for f in sorted(glob.glob(os.path.join(d, "*.sql"))):
+                  total += 1
+                  raw = open(f, "rb").read()
+                  if expected_crlf and b"\r\n" not in raw:
+                      problems.append(f + ": windows checkout must be CRLF family")
+                  if (not expected_crlf) and b"\r" in raw:
+                      problems.append(f + ": non-windows checkout must be LF-only")
+                  digest = hashlib.sha384(raw).digest()
+                  if digest not in data:
+                      problems.append(f + ": SHA-384 of the checked-out bytes is absent from the binary")
+          if problems:
+              print("\n".join(problems), file=sys.stderr)
+              sys.exit(1)
+          label = "CRLF" if expected_crlf else "LF"
+          print(f"embedded checksum family assertion: {total} migration sources, digests present, {label} native")
+          PY
       - name: Package artifact
         shell: bash
         run: |
@@ -130,11 +177,135 @@ jobs:
         shell: bash
         run: cargo test --locked --lib -p codex-api -p codex-model-provider-info
 
+  e2e-official-coexistence:
+    # Ticket 35 (A-024): the family wall must not silently return. Full
+    # restore drill on a throwaway CODEX_HOME (real user homes untouched;
+    # CI-only, mirrors the completion-def copy exercise):
+    #   1. fork cold boot (app-server, the D-012 incident surface) creates
+    #      the databases in the embedded official platform family (CRLF);
+    #   2. --family lf (the ticket 35 escape hatch) simulates the legacy
+    #      LF drift on the same copy;
+    #   3. default auto startup must fail LOUD naming both families and the
+    #      exact repair command, write the one-time marker, touch no row;
+    #   4. --family crlf --apply restores; a follow-up dry run proves
+    #      landing + idempotency (A-025);
+    #   5. fork boot passes again;
+    #   6. the OFFICIAL openai/codex Windows release binary from GitHub
+    #      Releases cold-boots the same home - the inverse of the incident
+    #      turned regression gate.
+    name: e2e official+fork coexistence (windows)
+    if: ${{ github.repository == 'Xxx91n/codex' && (inputs.platforms == 'all' || contains(inputs.platforms, 'windows')) }}
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - name: Download fork CLI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-x86_64-pc-windows-msvc
+          path: fork-cli
+      - name: End-to-end family coexistence drill
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          # git-bash $! and the Windows PID namespace usually agree, but not
+          # guaranteed for native exes: kill first (bash-owned job), then
+          # taskkill by PID, then reap so no server holds the WAL when
+          # fix-checksums takes the concurrency gate below.
+          taskkill_pid() { kill "$1" 2>/dev/null || true; taskkill //F //PID "$1" >/dev/null 2>&1 || true; }
+          7z x -y -ofork-bin fork-cli/codex-win-x86_64-pc-windows-msvc.zip >/dev/null
+          FORK="$PWD/fork-bin/codex.exe"
+          "$FORK" --version
+          SCRATCH="$(mktemp -d)"
+          export CODEX_HOME="$SCRATCH/home"
+          mkdir -p "$CODEX_HOME"
+          # -- 1. fork cold boot creates the databases -------------------
+          "$FORK" app-server </dev/null >"$SCRATCH/fork_boot1.log" 2>&1 &
+          boot_pid=$!
+          for i in $(seq 1 90); do
+            [ -f "$CODEX_HOME/state_5.sqlite" ] && break
+            sleep 1
+          done
+          sleep 3
+          taskkill_pid $boot_pid
+          wait "$boot_pid" 2>/dev/null || true
+          sleep 2
+          [ -f "$CODEX_HOME/state_5.sqlite" ] || { cat "$SCRATCH/fork_boot1.log"; fail "fork cold boot did not create state_5.sqlite"; }
+          if grep -qi "checksum family mismatch" "$SCRATCH/fork_boot1.log"; then fail "unexpected family mismatch on fresh boot"; fi
+          # -- 2. simulate the legacy LF drift via the escape hatch ------
+          "$FORK" state fix-checksums --family lf --apply >"$SCRATCH/flip_lf.json" 2>&1 \
+            || { cat "$SCRATCH/flip_lf.json"; fail "escape-hatch lf flip failed"; }
+          jq -e '.applied == true' "$SCRATCH/flip_lf.json" >/dev/null || fail "escape-hatch flip not applied"
+          jq -e '[.databases[] | select(.label == "state DB")][0].status == "rewritten"' "$SCRATCH/flip_lf.json" >/dev/null || fail "state DB was not flipped to lf"
+          # -- 3. default auto startup fails loud, rewrites nothing ------
+          set +e
+          timeout 120 "$FORK" app-server </dev/null >"$SCRATCH/fork_boot2.log" 2>&1
+          rc=$?
+          set -e
+          [ $rc -ne 0 ] || fail "auto startup must fail on a drifted database (rc=$rc)"
+          grep -q "checksum family mismatch" "$SCRATCH/fork_boot2.log" || { cat "$SCRATCH/fork_boot2.log"; fail "fail-loud family mismatch text missing"; }
+          grep -q "stored migrations are in the lf family" "$SCRATCH/fork_boot2.log" || fail "drift text lacks the database family"
+          grep -q "this binary embeds the crlf family" "$SCRATCH/fork_boot2.log" || fail "drift text lacks the binary family"
+          grep -q "codex state fix-checksums --family crlf --apply" "$SCRATCH/fork_boot2.log" || fail "drift text lacks the repair command"
+          [ -f "$CODEX_HOME/.checksum-family-notices.json" ] || fail "one-time notice marker not persisted"
+          "$FORK" state fix-checksums --family lf >"$SCRATCH/dry_lf.json" 2>&1
+          jq -e '[.databases[] | select(.label == "state DB")][0].status == "no_change"' "$SCRATCH/dry_lf.json" >/dev/null || fail "startup rewrote checksums under auto (drift must survive)"
+          # -- 4. restore to the official family + prove idempotency -----
+          "$FORK" state fix-checksums --family crlf --apply >"$SCRATCH/restore.json" 2>&1 \
+            || { cat "$SCRATCH/restore.json"; fail "crlf restore failed"; }
+          jq -e '.applied == true' "$SCRATCH/restore.json" >/dev/null || fail "restore not applied"
+          "$FORK" state fix-checksums --family crlf >"$SCRATCH/verify.json" 2>&1
+          jq -e '[.databases[] | select(.label == "state DB")][0] | (.status == "no_change" and .detected_family == "crlf")' "$SCRATCH/verify.json" >/dev/null || { cat "$SCRATCH/verify.json"; fail "restored database did not land the crlf family"; }
+          # (every row byte-equals the CRLF image of the embedded SQL via the
+          #  flip gate; the build-job digest assertion proves embedded ==
+          #  official bytes => per-row official-family baseline parity)
+          # -- 5. fork boot passes again ----------------------------------
+          set +e
+          timeout 120 "$FORK" app-server </dev/null >"$SCRATCH/fork_boot3.log" 2>&1
+          rc=$?
+          set -e
+          if grep -qi "checksum family mismatch\|failed to initialize sqlite state runtime" "$SCRATCH/fork_boot3.log"; then
+            cat "$SCRATCH/fork_boot3.log"; fail "fork boot still fails after restore"
+          fi
+          [ $rc -eq 0 ] || [ $rc -eq 124 ] || { cat "$SCRATCH/fork_boot3.log"; fail "fork boot exited rc=$rc after restore"; }
+          # -- 6. official release binary cold-boots the restored home ----
+          ASSET_URL=$(gh api repos/openai/codex/releases/latest \
+            --jq '.assets[] | select(.name | test("win"; "i")) | .browser_download_url' | head -1)
+          [ -n "$ASSET_URL" ] || fail "no windows asset on the latest official release"
+          mkdir -p official && cd official
+          curl -fsSL -o pkg "$ASSET_URL"
+          case "$ASSET_URL" in
+            *.zip) 7z x -y pkg >/dev/null ;;
+            *.tar.gz|*.tgz) tar xzf pkg ;;
+            *) cp pkg codex.exe ;;
+          esac
+          OFFICIAL=$(find . -type f -iname "*.exe" | head -1)
+          [ -n "$OFFICIAL" ] || fail "official release package has no exe"
+          chmod +x "$OFFICIAL"
+          cd "$SCRATCH"
+          set +e
+          timeout 120 "$PWD/official/$OFFICIAL" app-server </dev/null >"$SCRATCH/official_boot.log" 2>&1
+          rc=$?
+          set -e
+          if grep -qi "checksum family mismatch\|failed to initialize sqlite state runtime" "$SCRATCH/official_boot.log"; then
+            cat "$SCRATCH/official_boot.log"
+            fail "official Windows binary cannot open the fork-restored database"
+          fi
+          # rc 124 = served until the timeout stopped it (success); anything
+          # else must be a clean exit. Official migrations newer than our
+          # anchor land its own CRLF family and the fork runtime tolerates a
+          # ahead database via ignore_missing.
+          [ $rc -eq 0 ] || [ $rc -eq 124 ] || { cat "$SCRATCH/official_boot.log"; fail "official binary exited rc=$rc"; }
+          echo "e2e coexistence drill: fork-created -> lf drift -> auto fail-loud -> crlf restore -> fork + official cold boots all pass"
+
   release:
     # Publish only the full 3-OS run; single-platform test builds deliver via
     # build artifacts (the rolling tag race bit run 34317047952 already).
+    # The green e2e coexistence drill gates publication (ticket 35).
     if: inputs.platforms == 'all'
-    needs: build
+    needs: [build, e2e-official-coexistence]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -153,6 +324,6 @@ jobs:
           gh release create "$tag" \
             --repo "${{ github.repository }}" \
             --title "$title" \
-            --notes "Test build of the tri-wire fork CLI (feat/tri-wire-api). Windows x86_64 / Linux x86_64 / macOS aarch64 (Apple Silicon). Unsigned. Report issues in this repo." \
+            --notes "Test build of the tri-wire fork CLI (feat/tri-wire-api). Windows x86_64 / Linux x86_64 / macOS aarch64 (Apple Silicon). Unsigned. Report issues in this repo. Family change (ticket 35): migration checksums follow the official platform family again (Windows=CRLF). If a startup reports a checksum family mismatch, run codex state fix-checksums --family crlf --apply once; runbook: docs/fork-checksum-family.md" \
             --prerelease \
             dist/*.zip dist/*.tar.gz

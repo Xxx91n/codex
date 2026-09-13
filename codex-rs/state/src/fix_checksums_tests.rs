@@ -8,16 +8,32 @@ use super::ChecksumFamily;
 use super::FixStatus;
 use super::fix_migration_checksum_families;
 use crate::SqliteConfig;
-use crate::eol_checksum_repair::crlf_checksum;
+use crate::checksum_family_notice::NOTICE_FILE_NAME;
+use crate::eol_checksum_repair::family_checksum;
+use crate::eol_checksum_repair::migrator_embedded_family;
 use crate::migrations::STATE_MIGRATOR;
 use crate::runtime::test_support::unique_temp_dir;
 
+// Ticket 35: the embedded checksum family follows the checkout of the build
+// (machine) (official platform family), so every test here is phrased
+// relative to `embedded()` / `flipped()` instead of hard-coding LF as the
+// embedded side. The literal Crlf/Lf stamps still appear where a test pins
+// an absolute family (explicit maintenance opt-ins).
+fn embedded() -> ChecksumFamily {
+    migrator_embedded_family(&STATE_MIGRATOR)
+}
+
+fn flipped() -> ChecksumFamily {
+    embedded().flip()
+}
+
+fn image(migration: &sqlx::migrate::Migration, family: ChecksumFamily) -> Vec<u8> {
+    family_checksum(migration, family).expect("line-ending image should be computable")
+}
+
 async fn stamp_family(pool: &SqlitePool, family: ChecksumFamily) {
     for migration in STATE_MIGRATOR.migrations.iter() {
-        let checksum: Vec<u8> = match family {
-            ChecksumFamily::Lf => migration.checksum.to_vec(),
-            ChecksumFamily::Crlf => crlf_checksum(migration).expect("crlf image should exist"),
-        };
+        let checksum = image(migration, family);
         sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
             .bind(checksum.as_slice())
             .bind(migration.version)
@@ -35,7 +51,7 @@ async fn build_pool(sqlite: &SqliteConfig) -> SqlitePool {
         .expect("state pool should open")
 }
 
-async fn open_state_db_lf_stamped(sqlite: &SqliteConfig) -> SqlitePool {
+async fn open_state_db_embedded_stamped(sqlite: &SqliteConfig) -> SqlitePool {
     let pool = build_pool(sqlite).await;
     STATE_MIGRATOR
         .run(&pool)
@@ -44,9 +60,9 @@ async fn open_state_db_lf_stamped(sqlite: &SqliteConfig) -> SqlitePool {
     pool
 }
 
-async fn open_state_db_crlf_stamped(sqlite: &SqliteConfig) -> SqlitePool {
-    let pool = open_state_db_lf_stamped(sqlite).await;
-    stamp_family(&pool, ChecksumFamily::Crlf).await;
+async fn open_state_db_flipped_stamped(sqlite: &SqliteConfig) -> SqlitePool {
+    let pool = open_state_db_embedded_stamped(sqlite).await;
+    stamp_family(&pool, flipped()).await;
     pool
 }
 
@@ -58,14 +74,14 @@ async fn state_checksum_family_fix_dry_run_reports_changes_without_touching() {
         let _ = std::fs::remove_dir_all(p);
     });
     let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
-    let pool = open_state_db_lf_stamped(&sqlite).await;
+    let pool = open_state_db_embedded_stamped(&sqlite).await;
     pool.close().await;
 
-    let report = fix_migration_checksum_families(&sqlite, ChecksumFamily::Crlf, false)
+    let report = fix_migration_checksum_families(&sqlite, flipped(), false)
         .await
         .expect("dry-run should succeed");
     assert!(!report.applied);
-    assert_eq!(report.target_family, "crlf");
+    assert_eq!(report.target_family, flipped().as_str());
     let state = report
         .databases
         .iter()
@@ -74,9 +90,9 @@ async fn state_checksum_family_fix_dry_run_reports_changes_without_touching() {
     assert_eq!(state.status, FixStatus::DryRun);
     assert!(
         !state.rewritten_versions.is_empty(),
-        "LF to CRLF needs work"
+        format!("{} to {} needs work", embedded().as_str(), flipped().as_str())
     );
-    assert_eq!(state.detected_family.as_deref(), Some("lf"));
+    assert_eq!(state.detected_family.as_deref(), Some(embedded().as_str()));
 
     let verify = build_pool(&sqlite).await;
     let stored: Vec<u8> =
@@ -84,13 +100,7 @@ async fn state_checksum_family_fix_dry_run_reports_changes_without_touching() {
             .fetch_one(&verify)
             .await
             .expect("row 1 should load");
-    let expected = STATE_MIGRATOR
-        .migrations
-        .iter()
-        .find(|m| m.version == 1)
-        .unwrap()
-        .checksum
-        .to_vec();
+    let expected = image(&STATE_MIGRATOR.migrations[0], embedded());
     assert_eq!(stored, expected, "dry-run must not modify stored rows");
     verify.close().await;
 }
@@ -103,10 +113,10 @@ async fn state_checksum_family_fix_apply_rewrites_to_target() {
         let _ = std::fs::remove_dir_all(p);
     });
     let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
-    let pool = open_state_db_lf_stamped(&sqlite).await;
+    let pool = open_state_db_embedded_stamped(&sqlite).await;
     pool.close().await;
 
-    let report = fix_migration_checksum_families(&sqlite, ChecksumFamily::Crlf, true)
+    let report = fix_migration_checksum_families(&sqlite, flipped(), true)
         .await
         .expect("apply should succeed");
     assert!(report.applied);
@@ -126,23 +136,23 @@ async fn state_checksum_family_fix_apply_rewrites_to_target() {
                 .fetch_one(&verify)
                 .await
                 .expect("row should load");
-        let image = crlf_checksum(migration).expect("image");
-        assert_eq!(stored, image, "version {} must be CRLF", migration.version);
+        let expected = image(migration, flipped());
+        assert_eq!(stored, expected, "version {} must land the target", migration.version);
     }
     verify.close().await;
 }
 
 #[tokio::test]
 async fn state_checksum_family_fix_rejects_true_drift() {
-    // Precondition 2: a checksum that is neither the embedded nor the CRLF
-    // image means real drift; the offline flip must refuse.
+    // Precondition 2: a checksum that is neither line-ending image of the
+    // embedded SQL means real drift; the offline flip must refuse.
     let sqlite_home = unique_temp_dir();
     tokio::fs::create_dir_all(&sqlite_home).await.expect("home");
     let _cleanup = scopeguard::guard(sqlite_home.clone(), |p| {
         let _ = std::fs::remove_dir_all(p);
     });
     let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
-    let pool = open_state_db_lf_stamped(&sqlite).await;
+    let pool = open_state_db_embedded_stamped(&sqlite).await;
     sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = 1")
         .bind([1_u8, 2, 3, 4].as_slice())
         .execute(&pool)
@@ -150,7 +160,7 @@ async fn state_checksum_family_fix_rejects_true_drift() {
         .expect("corrupt should apply");
     pool.close().await;
 
-    let report = fix_migration_checksum_families(&sqlite, ChecksumFamily::Crlf, true)
+    let report = fix_migration_checksum_families(&sqlite, flipped(), true)
         .await
         .expect("validation returns a report");
     let state = report
@@ -195,7 +205,7 @@ async fn state_checksum_family_fix_rejects_unknown_migration() {
         .expect("insert unknown");
     pool.close().await;
 
-    let report = fix_migration_checksum_families(&sqlite, ChecksumFamily::Crlf, true)
+    let report = fix_migration_checksum_families(&sqlite, flipped(), true)
         .await
         .expect("validation returns a report");
     let state = report
@@ -221,14 +231,14 @@ async fn state_checksum_family_fix_rejects_schema_mismatch() {
         let _ = std::fs::remove_dir_all(p);
     });
     let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
-    let pool = open_state_db_lf_stamped(&sqlite).await;
+    let pool = open_state_db_embedded_stamped(&sqlite).await;
     sqlx::query("DROP TABLE thread_sections")
         .execute(&pool)
         .await
         .expect("drop");
     pool.close().await;
 
-    let report = fix_migration_checksum_families(&sqlite, ChecksumFamily::Crlf, true)
+    let report = fix_migration_checksum_families(&sqlite, flipped(), true)
         .await
         .expect("validation returns a report");
     let state = report
@@ -265,7 +275,7 @@ async fn state_checksum_family_fix_rejects_version_set_mismatch() {
     partial.run(&pool).await.expect("partial");
     pool.close().await;
 
-    let report = fix_migration_checksum_families(&sqlite, ChecksumFamily::Crlf, true)
+    let report = fix_migration_checksum_families(&sqlite, flipped(), true)
         .await
         .expect("validation returns a report");
     let state = report
@@ -275,10 +285,7 @@ async fn state_checksum_family_fix_rejects_version_set_mismatch() {
         .expect("state DB entry");
     assert_eq!(state.status, FixStatus::Rejected);
     let reason = state.reason.as_deref().unwrap_or_default();
-    assert!(
-        reason.contains("version_set_mismatch"),
-        "reason was: {reason}"
-    );
+    assert!(reason.contains("version_set_mismatch"), "reason was: {reason}");
 }
 
 #[tokio::test]
@@ -290,13 +297,16 @@ async fn state_checksum_family_fix_rejects_when_backup_already_exists() {
         let _ = std::fs::remove_dir_all(p);
     });
     let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
-    let _pool = open_state_db_lf_stamped(&sqlite).await;
+    let _pool = open_state_db_embedded_stamped(&sqlite).await;
     let backup = sqlite
         .state_db_path()
-        .with_file_name("state_5.sqlite.pre-checksum-flip-crlf.bak");
+        .with_file_name(format!(
+            "state_5.sqlite.pre-checksum-flip-{}.bak",
+            flipped().as_str()
+        ));
     std::fs::write(&backup, b"existing").expect("write backup");
 
-    let err = fix_migration_checksum_families(&sqlite, ChecksumFamily::Crlf, true)
+    let err = fix_migration_checksum_families(&sqlite, flipped(), true)
         .await
         .expect_err("apply must refuse when backup exists");
     let msg = err.to_string();
@@ -316,14 +326,14 @@ async fn state_checksum_family_fix_rejects_when_concurrent_writer_holds_lock() {
         let _ = std::fs::remove_dir_all(p);
     });
     let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
-    let _pool = open_state_db_lf_stamped(&sqlite).await;
+    let _pool = open_state_db_embedded_stamped(&sqlite).await;
 
     let blocker = build_pool(&sqlite).await;
     let mut conn = blocker.acquire().await.expect("acquire");
     let tx = conn.begin_with("BEGIN IMMEDIATE").await.expect("begin");
 
     let started = std::time::Instant::now();
-    let result = fix_migration_checksum_families(&sqlite, ChecksumFamily::Crlf, true).await;
+    let result = fix_migration_checksum_families(&sqlite, flipped(), true).await;
     let elapsed = started.elapsed();
     tx.rollback().await.expect("rollback");
     // Return the checked-out connection before close(): Pool::close waits
@@ -353,9 +363,9 @@ async fn state_checksum_family_fix_dry_run_on_already_target_family() {
         let _ = std::fs::remove_dir_all(p);
     });
     let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
-    let _pool = open_state_db_crlf_stamped(&sqlite).await;
+    let _pool = open_state_db_flipped_stamped(&sqlite).await;
 
-    let report = fix_migration_checksum_families(&sqlite, ChecksumFamily::Crlf, false)
+    let report = fix_migration_checksum_families(&sqlite, flipped(), false)
         .await
         .expect("dry-run");
     let state = report
@@ -375,13 +385,13 @@ async fn state_checksum_family_fix_apply_idempotent() {
         let _ = std::fs::remove_dir_all(p);
     });
     let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
-    let _pool = open_state_db_lf_stamped(&sqlite).await;
+    let _pool = open_state_db_embedded_stamped(&sqlite).await;
 
-    let first = fix_migration_checksum_families(&sqlite, ChecksumFamily::Crlf, true)
+    let first = fix_migration_checksum_families(&sqlite, flipped(), true)
         .await
         .expect("first apply");
     assert!(first.applied);
-    let second = fix_migration_checksum_families(&sqlite, ChecksumFamily::Crlf, true)
+    let second = fix_migration_checksum_families(&sqlite, flipped(), true)
         .await
         .expect("second apply");
     assert!(second.applied);
@@ -395,20 +405,166 @@ async fn state_checksum_family_fix_apply_idempotent() {
 }
 
 #[tokio::test]
-async fn state_checksum_family_startup_default_auto_heals_crlf_to_lf() {
-    // Config default auto: the runtime self-heal rewrites a CRLF-stamped
-    // database back to the embedded (LF) family on startup.
+async fn state_checksum_family_fix_lf_escape_hatch_flips_and_is_idempotent() {
+    // Ticket 35 (A-025): `--family lf` stays a first-class escape hatch:
+    // repeated applies are safe no-ops and the history lands the LF image
+    // regardless of which family this build embeds.
     let sqlite_home = unique_temp_dir();
     tokio::fs::create_dir_all(&sqlite_home).await.expect("home");
     let _cleanup = scopeguard::guard(sqlite_home.clone(), |p| {
         let _ = std::fs::remove_dir_all(p);
     });
     let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
-    let _pool = open_state_db_crlf_stamped(&sqlite).await;
+    let _pool = open_state_db_embedded_stamped(&sqlite).await;
+
+    for round in 0..2 {
+        let report = fix_migration_checksum_families(&sqlite, ChecksumFamily::Lf, true)
+            .await
+            .expect("lf escape hatch apply");
+        assert!(report.applied, "round {round}");
+        let state = report
+            .databases
+            .iter()
+            .find(|d| d.label == "state DB")
+            .expect("state DB entry");
+        let stored = build_pool(&sqlite).await;
+        for migration in STATE_MIGRATOR.migrations.iter() {
+            let stored_checksum: Vec<u8> = sqlx::query_scalar(
+                "SELECT checksum FROM _sqlx_migrations WHERE version = ?",
+            )
+            .bind(migration.version)
+            .fetch_one(&stored)
+            .await
+            .expect("row should load");
+            assert_eq!(
+                stored_checksum,
+                image(migration, ChecksumFamily::Lf),
+                "round {round}: {} must land the LF image",
+                migration.version
+            );
+        }
+        stored.close().await;
+        if round == 0 {
+            assert_ne!(state.status, FixStatus::Rejected);
+        }
+    }
+    let report = fix_migration_checksum_families(&sqlite, ChecksumFamily::Lf, false)
+        .await
+        .expect("dry-run after flip");
+    let state = report
+        .databases
+        .iter()
+        .find(|d| d.label == "state DB")
+        .expect("state DB entry");
+    assert_eq!(state.status, FixStatus::NoChange);
+}
+
+#[tokio::test]
+async fn state_checksum_family_startup_default_auto_fails_loud_on_drift() {
+    // Ticket 35 (A-021/A-022/A-023): default auto never rewrites. A drifted
+    // database yields a loud error naming both families plus the exact
+    // repair command, records the one-time marker, and leaves the rows
+    // untouched.
+    let sqlite_home = unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home).await.expect("home");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |p| {
+        let _ = std::fs::remove_dir_all(p);
+    });
+    let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let _pool = open_state_db_flipped_stamped(&sqlite).await;
+
+    let err = crate::runtime::StateRuntime::init(sqlite, "test".to_string())
+        .await
+        .expect_err("auto must fail loud on family drift");
+    let msg = err.to_string();
+    assert!(msg.contains("checksum family mismatch"), "msg was: {msg}");
+    assert!(
+        msg.contains(&format!("stored migrations are in the {} family", flipped().as_str())),
+        "msg was: {msg}"
+    );
+    assert!(
+        msg.contains(&format!(
+            "this binary embeds the {} family",
+            embedded().as_str()
+        )),
+        "msg was: {msg}"
+    );
+    assert!(
+        msg.contains(&format!(
+            "codex state fix-checksums --family {} --apply",
+            embedded().as_str()
+        )),
+        "msg was: {msg}"
+    );
+    // One-time marker recorded under the sqlite home (A-023).
+    let marker = sqlite_home.as_path().join(NOTICE_FILE_NAME);
+    assert!(marker.exists(), "one-time notice marker must be persisted");
+    // Zero automatic rewrite: rows still carry the flipped family.
+    let verify = build_pool(&SqliteConfig::new_for_testing(sqlite_home.as_path().abs())).await;
+    for migration in STATE_MIGRATOR.migrations.iter() {
+        let stored: Vec<u8> =
+            sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = ?")
+                .bind(migration.version)
+                .fetch_one(&verify)
+                .await
+                .expect("row");
+        assert_eq!(
+            stored,
+            image(migration, flipped()),
+            "auto must not rewrite version {}",
+            migration.version
+        );
+    }
+    verify.close().await;
+}
+
+#[tokio::test]
+async fn state_checksum_family_startup_default_auto_keeps_tamper_error_verbatim() {
+    // A checksum outside both families is real drift/tampering: no family
+    // guidance, no repair command offered, no marker (A-022 negative arm).
+    let sqlite_home = unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home).await.expect("home");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |p| {
+        let _ = std::fs::remove_dir_all(p);
+    });
+    let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let pool = open_state_db_embedded_stamped(&sqlite).await;
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = 1")
+        .bind([9_u8, 8, 7].as_slice())
+        .execute(&pool)
+        .await
+        .expect("corrupt should apply");
+    pool.close().await;
+
+    let err = crate::runtime::StateRuntime::init(sqlite, "test".to_string())
+        .await
+        .expect_err("tampered history must keep failing loudly");
+    let msg = err.to_string();
+    assert!(msg.contains("previously applied"), "msg was: {msg}");
+    assert!(!msg.contains("checksum family mismatch"), "msg was: {msg}");
+    assert!(!msg.contains("fix-checksums"), "msg was: {msg}");
+    assert!(
+        !sqlite_home.as_path().join(NOTICE_FILE_NAME).exists(),
+        "no one-time notice for a non-family failure"
+    );
+}
+
+#[tokio::test]
+async fn state_checksum_family_startup_explicit_crlf_maintains_crlf_family() {
+    // [state] migration_checksum_family = "crlf" (ticket 31, unchanged):
+    // the runtime keeps the CRLF family at steady state.
+    let sqlite_home = unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home).await.expect("home");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |p| {
+        let _ = std::fs::remove_dir_all(p);
+    });
+    let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs())
+        .with_maintained_checksum_family(Some(ChecksumFamily::Crlf));
+    let _pool = open_state_db_embedded_stamped(&sqlite).await;
 
     let _runtime = crate::runtime::StateRuntime::init(sqlite, "test".to_string())
         .await
-        .expect("init should succeed under default auto");
+        .expect("init should succeed under explicit crlf");
 
     let verify = build_pool(&SqliteConfig::new_for_testing(sqlite_home.as_path().abs())).await;
     for migration in STATE_MIGRATOR.migrations.iter() {
@@ -420,32 +576,32 @@ async fn state_checksum_family_startup_default_auto_heals_crlf_to_lf() {
                 .expect("row");
         assert_eq!(
             stored,
-            migration.checksum.to_vec(),
-            "default auto must land LF"
+            image(migration, ChecksumFamily::Crlf),
+            "explicit crlf must land CRLF"
         );
     }
     verify.close().await;
 }
 
 #[tokio::test]
-async fn state_checksum_family_startup_explicit_crlf_maintains_crlf_family() {
-    // [state] migration_checksum_family = "crlf": the runtime keeps the
-    // CRLF family at steady state.
+async fn state_checksum_family_startup_explicit_lf_maintains_lf_family() {
+    // [state] migration_checksum_family = "lf" (ticket 35): the explicit
+    // LF opt-in lands the history in the LF image on every startup,
+    // including builds whose embedded family is CRLF.
     let sqlite_home = unique_temp_dir();
     tokio::fs::create_dir_all(&sqlite_home).await.expect("home");
     let _cleanup = scopeguard::guard(sqlite_home.clone(), |p| {
         let _ = std::fs::remove_dir_all(p);
     });
     let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs())
-        .with_maintained_checksum_family(Some(ChecksumFamily::Crlf));
-    let _pool = open_state_db_lf_stamped(&sqlite).await;
+        .with_maintained_checksum_family(Some(ChecksumFamily::Lf));
+    let _pool = open_state_db_embedded_stamped(&sqlite).await;
 
     let _runtime = crate::runtime::StateRuntime::init(sqlite, "test".to_string())
         .await
-        .expect("init should succeed under explicit crlf");
+        .expect("init should succeed under explicit lf");
 
-    let verify_path = sqlite_home.as_path().abs();
-    let verify = build_pool(&SqliteConfig::new_for_testing(verify_path)).await;
+    let verify = build_pool(&SqliteConfig::new_for_testing(sqlite_home.as_path().abs())).await;
     for migration in STATE_MIGRATOR.migrations.iter() {
         let stored: Vec<u8> =
             sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = ?")
@@ -453,18 +609,22 @@ async fn state_checksum_family_startup_explicit_crlf_maintains_crlf_family() {
                 .fetch_one(&verify)
                 .await
                 .expect("row");
-        let image = crlf_checksum(migration).expect("image");
-        assert_eq!(stored, image, "explicit crlf must land CRLF");
+        assert_eq!(
+            stored,
+            image(migration, ChecksumFamily::Lf),
+            "explicit lf must land LF"
+        );
     }
     verify.close().await;
 }
 
 #[tokio::test]
 async fn state_checksum_family_startup_explicit_crlf_heals_then_flips() {
-    // The user's DB is currently CRLF (e.g. a fresh official-Windows
-    // install). Explicit-crlf config must: (1) accept the CRLF history, (2)
-    // bring it forward to the embedded LF family, (3) migrate, (4) flip
-    // the whole history back to CRLF. Final state: every row is CRLF.
+    // The user's DB is currently stamped with the CRLF image (e.g. a fresh
+    // official-Windows install). Explicit-crlf config must: (1) accept the
+    // CRLF history, (2) land it in the embedded family to validate,
+    // (3) migrate, (4) flip the whole history to CRLF. Final state: every
+    // row is CRLF.
     let sqlite_home = unique_temp_dir();
     tokio::fs::create_dir_all(&sqlite_home).await.expect("home");
     let _cleanup = scopeguard::guard(sqlite_home.clone(), |p| {
@@ -472,14 +632,15 @@ async fn state_checksum_family_startup_explicit_crlf_heals_then_flips() {
     });
     let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs())
         .with_maintained_checksum_family(Some(ChecksumFamily::Crlf));
-    let _pool = open_state_db_crlf_stamped(&sqlite).await;
+    let pool = open_state_db_embedded_stamped(&sqlite).await;
+    stamp_family(&pool, ChecksumFamily::Crlf).await;
+    pool.close().await;
 
     let _runtime = crate::runtime::StateRuntime::init(sqlite, "test".to_string())
         .await
         .expect("init should succeed: heal then migrate then flip");
 
-    let verify_path = sqlite_home.as_path().abs();
-    let verify = build_pool(&SqliteConfig::new_for_testing(verify_path)).await;
+    let verify = build_pool(&SqliteConfig::new_for_testing(sqlite_home.as_path().abs())).await;
     for migration in STATE_MIGRATOR.migrations.iter() {
         let stored: Vec<u8> =
             sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = ?")
@@ -487,9 +648,9 @@ async fn state_checksum_family_startup_explicit_crlf_heals_then_flips() {
                 .fetch_one(&verify)
                 .await
                 .expect("row");
-        let image = crlf_checksum(migration).expect("image");
         assert_eq!(
-            stored, image,
+            stored,
+            image(migration, ChecksumFamily::Crlf),
             "after heal then migrate then flip every row is CRLF"
         );
     }
@@ -505,7 +666,7 @@ async fn state_checksum_family_fix_dry_run_on_missing_database() {
     });
     let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
 
-    let report = fix_migration_checksum_families(&sqlite, ChecksumFamily::Crlf, false)
+    let report = fix_migration_checksum_families(&sqlite, flipped(), false)
         .await
         .expect("missing DBs are not errors");
     assert!(

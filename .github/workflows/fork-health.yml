@@ -94,33 +94,11 @@ jobs:
       - name: Clippy (seam crates)
         shell: bash
         run: cargo clippy --locked --lib -p codex-api -p codex-core -p codex-model-provider-info -- -D warnings
-      # Ticket 25: sqlx::migrate! embeds the migration .sql bytes and their
-      # SHA-384 checksums at compile time, so a CRLF checkout silently flips
-      # the whole embedded checksum family and locks out every database
-      # written by the other family (the round-4 Windows packaging outage).
-      # .gitattributes pins the six migration directories to LF; this scan
-      # fails loudly if any migration source ever ships a CR byte again.
-      - name: Migration SQL line-ending scan (LF-only, fail-loud)
-        shell: bash
-        # Pin to the repo root: the job default working-directory is
-        # codex-rs, and git pathspecs are relative to the cwd.
-        working-directory: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-          crlf_files=$(git grep -Il $'\r' -- \
-            'codex-rs/state/migrations/*.sql' \
-            'codex-rs/state/logs_migrations/*.sql' \
-            'codex-rs/state/goals_migrations/*.sql' \
-            'codex-rs/state/memory_migrations/*.sql' \
-            'codex-rs/state/queue_migrations/*.sql' \
-            'codex-rs/state/thread_history_migrations/*.sql' || true)
-          if [ -n "$crlf_files" ]; then
-            echo "::error::migration SQL sources contain CR bytes (would flip the sqlx::migrate! embedded checksum family):"
-            printf '%s\n' "$crlf_files" | sed 's/^/::error::  /'
-            exit 1
-          fi
-          file_count=$(git ls-files -- 'codex-rs/state/*_migrations/*.sql' | wc -l)
-          echo "migration SQL EOL scan: $file_count migration sources, all LF-only"
+      # Ticket 35 (A-024): the ticket 25 LF-only scan retired together with
+      # the LF lock itself. The family defense moved to the
+      # platform-family-assert job below (per-platform checkout bytes,
+      # fail-loud) plus the release-binary digest scan in
+      # fork-cli-test-release.yml (authoritative artifact layer).
 
       # The fork seam suites: -p keeps the BUILD surface at the seam crates
       # (without it nextest builds every workspace test binary, pulling
@@ -136,9 +114,11 @@ jobs:
       # lesson); ticket 19 r2 adds the chat-wire tool-adjacency regression
       # test (build_chat_messages_keeps_tool_results_adjacent_to_tool_calls,
       # codex-core lib via client.rs #[path]) so the NIM-500 fix keeps a guard.
-      # Ticket 25 adds -p codex-state for the EOL checksum self-heal unit
-      # tests (repair_eol_checksum_family_*) — they validate the startup
-      # heal that rewrites line-ending-flipped _sqlx_migrations checksums.
+      # Ticket 25 adds -p codex-state for the EOL checksum family unit tests
+      # (repair_eol_checksum_family_*); ticket 35 extends the selection to
+      # the drift detection (detect_checksum_family_*), the fail-loud /
+      # guidance texts (drift_guidance_*, state_checksum_family_*) and the
+      # one-time notice marker (checksum_family_notice_*).
       # Ticket 26 adds -p codex-tools plus the chat/anthropic wire MCP
       # tool-visibility guards: chat_completions_* / anthropic_qualifies /
       # anthropic_keeps_default (tool_spec outbound qualified names),
@@ -146,7 +126,7 @@ jobs:
       # search_tool_enabled_requires_responses_wire (wire gate two-state).
       - name: Test fork seam suites
         shell: bash
-        run: just test -p codex-api -p codex-core -p codex-state -p codex-tools -E 'package(codex-api) or test(chat_wire) or test(anthropic_wire) or test(cross_wire) or test(reasoning_effort) or test(build_chat_messages_keeps_tool_results_adjacent_to_tool_calls) or test(repair_eol_checksum_family) or test(state_checksum_family) or test(chat_completions_) or test(anthropic_qualifies) or test(anthropic_keeps_default) or test(resolve_qualified_fallback) or test(search_tool_enabled_requires_responses_wire) or test(redacted_thinking) or test(thinking_replay) or test(max_tokens::tests) or test(budget_below_max_tokens) or test(metadata_max_tokens) or test(stop_reason)'
+        run: just test -p codex-api -p codex-core -p codex-state -p codex-tools -E 'package(codex-api) or test(chat_wire) or test(anthropic_wire) or test(cross_wire) or test(reasoning_effort) or test(build_chat_messages_keeps_tool_results_adjacent_to_tool_calls) or test(repair_eol_checksum_family) or test(state_checksum_family) or test(detect_checksum_family) or test(drift_guidance) or test(checksum_family_notice) or test(chat_completions_) or test(anthropic_qualifies) or test(anthropic_keeps_default) or test(resolve_qualified_fallback) or test(search_tool_enabled_requires_responses_wire) or test(redacted_thinking) or test(thinking_replay) or test(max_tokens::tests) or test(budget_below_max_tokens) or test(metadata_max_tokens) or test(stop_reason)'
       # Sync watchdog (ticket 12): the advisory drift probe turned into a
       # gating measure + ff-only trial. Semantics per ADR-0006 decision 3①
       # (merge-base 口径; tag 口径 banned — upstream squash-merge makes tags
@@ -223,9 +203,64 @@ jobs:
             exit 1
           fi
 
+  platform-family-assert:
+    # Ticket 35 (A-024): replaces the retired LF-only scan. Since ticket 35
+    # the fork embeds the official platform checksum family: a Windows
+    # checkout (hosted-runner default core.autocrlf=true per actions/
+    # checkout #135) must materialize the six migration directories as
+    # CRLF, a Linux checkout as LF - sqlx::migrate! then embeds exactly
+    # what an official build of the same commit embeds (.gitattributes
+    # section 6: text !eol). Checkout-only job: no cargo, seconds. The
+    # authoritative layer (digests inside the actual release binaries) is
+    # asserted in fork-cli-test-release.yml build jobs.
+    if: github.repository == 'Xxx91n/codex'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Migration SQL checkout family assertion (platform-native, fail-loud)
+        shell: bash
+        run: |
+          set -euo pipefail
+          PY=python3
+          command -v "$PY" >/dev/null 2>&1 || PY=python
+          "$PY" - <<'PY'
+          import glob, os, sys
+          expect_crlf = os.name == "nt"
+          dirs = [
+              "codex-rs/state/migrations",
+              "codex-rs/state/logs_migrations",
+              "codex-rs/state/goals_migrations",
+              "codex-rs/state/memory_migrations",
+              "codex-rs/state/queue_migrations",
+              "codex-rs/state/thread_history_migrations",
+          ]
+          problems = []
+          total = 0
+          for d in dirs:
+              for f in sorted(glob.glob(os.path.join(d, "*.sql"))):
+                  total += 1
+                  raw = open(f, "rb").read()
+                  if expect_crlf and b"\r\n" not in raw:
+                      problems.append(f + ": windows checkout must land the CRLF family")
+                  if (not expect_crlf) and b"\r" in raw:
+                      problems.append(f + ": non-windows checkout must land LF-only")
+          if total < 60:
+              problems.append("only %d migration sources under the six state directories" % total)
+          if problems:
+              for line in problems:
+                  print("::error::" + line)
+              sys.exit(1)
+          label = "CRLF" if expect_crlf else "LF"
+          print("migration SQL checkout family: %d sources, %s native" % (total, label))
+          PY
+
   alert:
-    # Only when seam-check actually failed (skipped or cancelled never alerts).
-    needs: seam-check
+    # Only when an actual check failed (skipped or cancelled never alerts).
+    needs: [seam-check, platform-family-assert]
     if: failure() && !cancelled()
     runs-on: ubuntu-latest
     permissions:

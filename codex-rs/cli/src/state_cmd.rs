@@ -1,11 +1,13 @@
-//! Fork-only local state maintenance subcommands (ticket 31).
+//! Fork-only local state maintenance subcommands (tickets 31/35).
 //!
-//! The single sub-tree today is `codex state fix-checksums`, which
-//! mirrors the in-process self-heal in codex-state for users who want
-//! to switch between the fork runtime and the official Windows CLI of
-//! the same commit (D-015). All write paths are gated by the six
-//! preconditions documented in D-015 and the same gates are enforced
-//! by the runtime startup flip.
+//! The single sub-tree today is `codex state fix-checksums`, the only
+//! sanctioned rewrite entry point under the ticket 35 default (`auto`):
+//! it restores the migration checksum history to any line-ending family
+//! so the fork runtime and the official openai/codex CLI of the same
+//! platform family share one home (D-015, D-004). All write paths are
+//! gated by the six preconditions documented in D-015; the explicit
+//! `[state] migration_checksum_family` startup maintenance enforces the
+//! same gates in-process.
 
 use anyhow::Context;
 use clap::Parser;
@@ -25,22 +27,23 @@ pub(crate) struct StateCommand {
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum StateSubcommand {
     /// Repair or flip the EOL sqlx migration checksum family of the
-    /// local state databases so the official openai/codex CLI of the
-    /// same commit can open them without its own self-heal (and
-    /// vice versa). The six-precondition gate from D-015 is enforced
-    /// across every runtime database before anything is written; dry
-    /// run is the default.
+    /// local state databases (e.g. restore a legacy LF-family database
+    /// to the official platform family this binary embeds, per the
+    /// startup fail-loud message). The six-precondition gate from D-015
+    /// is enforced across every runtime database before anything is
+    /// written; dry run is the default.
     FixChecksums(FixChecksumsCommand),
 }
 
 #[derive(Debug, Parser)]
 pub(crate) struct FixChecksumsCommand {
     /// Target line-ending family. Required so the run never has to
-    /// guess: `crlf` rewrites every row to the CRLF image of the
-    /// embedded SQL (so the official Windows CLI of the same commit
-    /// can open the database without ceremony); `lf` rewrites every
-    /// row to the embedded (LF) checksum (so the fork runtime can
-    /// open a database last touched by the official Windows CLI).
+    /// guess: on the official platform family, `crlf` matches every
+    /// Windows build (fork and official) and `lf` every Linux/macOS
+    /// build; the startup fail-loud message names the family to pass.
+    /// `lf` on Windows is the ticket 35 escape hatch (simulate or
+    /// restore the legacy family; also the pre-state used by the CI
+    /// end-to-end coexistence case).
     #[arg(long, value_enum)]
     pub family: FixChecksumsFamily,
 

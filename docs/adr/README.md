@@ -17,6 +17,7 @@ that supersedes and links the old one, incrementing the `NNNN` counter.
 | [0008](0008-chat-wire-tool-fidelity-protocol.md) | Accepted | Chat wire tool-calling fidelity: adjacency invariant + namespace qualified-name loopback + wire-aware tool exposure (chat/anthropic flatten MCP tools; Responses lazy-load unchanged) |
 | [0009](0009-thinking-drop-conditional-replay.md) | Accepted (supersedes the unconditional unsigned-thinking-drop argument of ADR-0003; signed verbatim replay stays) | Thinking-drop conditional red line: unsigned blocks dispatch on upstream class (first-party drop+warn with G1 pre-flight degrade on manual+tool_use; compatible endpoints verbatim) + guards G1/G3/G6 |
 | [0010](0010-upstream-merge-2026-09-12-rulings.md) | Accepted | Upstream merge 2026-09-12 (behind 710, merge-base 6be2a6ca952a → c4017a87aa): 7-file conflict rulings per FORK_DIVERGENCE adapt entries + IGN-1 legacy-remote-compaction absorbed-by-upstream 1ac689cc7d |
+| [0011](0011-checksum-family-official-default.md) | Accepted (supersedes the ticket-25 six-directory LF-lock ruling part of ADR-0010 row 1) | Checksum family back to the official platform default: retire the LF lock (`text !eol`), auto = follow-embedded-family + fail-loud repair command (zero auto-rewrite), fingerprint-keyed one-time notice, CI platform-family/digest/e2e-official-binary assertions, restore SOP runbook |
 
 Term definitions for vocabulary used across ADRs live in the repo-root
 [CONTEXT.md](../../CONTEXT.md) (single vocabulary authority). Agent-facing

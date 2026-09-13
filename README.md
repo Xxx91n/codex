@@ -216,6 +216,15 @@ To roll back, clear the variable (`reg delete "HKCU\Environment" /v CODEX_CLI_PA
 or System Properties → Environment Variables) and restart the app again. This fork’s
 release packages are built for exactly this workflow — see the Releases page.
 
+**Kernel-swap checksum family (ticket 35 / ADR-0011):** fork builds embed the same
+sqlx migration checksum family as an official build of the same platform (Windows =
+CRLF, Linux/macOS = LF), so swapping `CODEX_CLI_PATH` between this fork and the
+official CLI no longer wall-locks the shared `~/.codex` databases. If a startup
+reports `checksum family mismatch` (typically a database left from the ticket 25
+LF-lock era), run the repair command the error names once —
+`codex state fix-checksums --family crlf --apply` — and cold-start the official CLI
+to verify; the full runbook is [docs/fork-checksum-family.md](./docs/fork-checksum-family.md).
+
 ## Docs
 
 - [**Codex Documentation**](https://developers.openai.com/codex)

@@ -3887,7 +3887,7 @@
               "$ref": "#/definitions/MigrationChecksumFamily"
             }
           ],
-          "description": "Maintenance target for the _sqlx_migrations checksum family. Defaults to auto. The offline flip uses the matching codex state fix-checksums --family ... subcommand; this setting controls the in-process self-heal and the post-migration startup flip."
+          "description": "Maintenance target for the _sqlx_migrations checksum family. Defaults to auto: follow the family this binary embeds, which is the official platform family (CRLF on Windows builds, LF on Linux/macOS). Under auto a family mismatch fails loudly with the repair command and nothing is rewritten automatically. crlf and lf are explicit opt-in maintenance targets applied by the startup flip; the offline flip uses the matching codex state fix-checksums --family ... subcommand."
         }
       },
       "type": "object"
@@ -7187,7 +7187,7 @@
           "$ref": "#/definitions/StateDbSettingsToml"
         }
       ],
-      "description": "Local state database settings (fork-only; ticket 31). Controls the in-process self-heal and the post-migration startup flip of the _sqlx_migrations checksum family. Defaults to auto (one-way LF self-heal, no startup rewrite)."
+      "description": "Local state database settings (fork-only; ticket 31). Controls the _sqlx_migrations checksum family maintenance. Defaults to auto: follow the family this binary embeds (the official platform family); mismatches fail loud with the repair command and nothing is rewritten automatically."
     },
     "sqlite_home": {
       "allOf": [
