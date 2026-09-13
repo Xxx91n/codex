@@ -176,6 +176,17 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
 - **thoughtSignature**：Gemini 术语，仅存于 ADR-0003 重开预案；禁用于 anthropic signature。
 - **EOL checksum 家族**：_sqlx_migrations 校验和字节稳定靠六迁移目录 LF 锁 + 启动自愈
 
+
+### anthropic max_tokens 元数据优先（票 29 / A-007）
+- 本仓用法：Messages wire `max_tokens` 优先级链=显式 `anthropic_max_tokens` > `ModelInfo.max_output_tokens`（目录元数据,机制同 context_window）> `DEFAULT_ANTHROPIC_MAX_TOKENS`(8192,常量保留、语义已由固定默认降级为**回退兜底**,ADR-0002 Ruling 1=防重放删除非语义冻结)；管理性 cap 128_000；未知/别名模型回退时 `warn!` 可见；`stop_reason=max_tokens` 遥测计数（codex.stop_reason）。
+- 禁止用法：删除该常量；绕过 `wire/max_tokens.rs::resolve_max_tokens` 手拼预算；对负数/零元数据不设守卫（r13 教训：clamp(0,cap) 吞负数绕过兑底）。
+- 源：ADR-0010 重放链；D-006 完整方案 b；live 实证 docs/specs/claude-live-acceptance-20260913/。
+
+### state 校验和家族双向切换（票 31 / D-015）
+- 本仓用法：`_sqlx_migrations` 校验和家族（CRLF/LF 字节形态）可双向维持——子命令 `state fix-checksums --family crlf|lf [--dry-run] [--apply]`（默认 dry-run,JSON 报告）+ 配置 `[state] migration_checksum_family = auto|lf|crlf`（默认 auto=维持单向 LF 自愈,显式 crlf 时启动维持库为 CRLF 家族,官方 Windows 版可开）。六条安全前提缺一拒绝（家族判据/归一化 sha384 指纹相等/SchemaReplay 一致/版本集合一致/原子可逆/单二进制并发边界）。
+- 禁止用法：启动时自动反向重写（工业界零先例,xdifu/Flyway repair 均为显式命令）；未过六前提的回写；fork 与官方二进制并发开同一库。
+- 源：D-015；docs/fork-checksum-family.md；xdifu codex-repair 对齐（官方 #23863 同族事故）。
+
 ## 维护
 
 - 变更随其 ADR 入仓（ADR 先于本表）；新 wire/概念先登记再实现。
