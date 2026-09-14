@@ -250,6 +250,16 @@ jobs:
           grep -q "this binary embeds the official platform family crlf" "$SCRATCH/fork_boot2.log" || fail "drift text lacks the binary family"
           grep -q "codex state fix-checksums --family crlf --apply" "$SCRATCH/fork_boot2.log" || fail "drift text lacks the repair command"
           [ -f "$CODEX_HOME/.checksum-family-notices.json" ] || fail "one-time notice marker not persisted"
+          # -- 3b. repeat drift boot: the notice marker now suppresses the
+          #      one-time notice, so the fail-loud error text itself must
+          #      carry the repair command (A-022) --------------------------
+          set +e
+          timeout 120 "$FORK" app-server </dev/null >"$SCRATCH/fork_boot2b.log" 2>&1
+          rc=$?
+          set -e
+          [ $rc -ne 0 ] || fail "repeat drift startup must still fail loud (rc=$rc)"
+          if grep -q "one-time notice" "$SCRATCH/fork_boot2b.log"; then fail "notice was not suppressed on repeat boot"; fi
+          grep -q "codex state fix-checksums --family crlf --apply" "$SCRATCH/fork_boot2b.log" || { cat "$SCRATCH/fork_boot2b.log"; fail "error text lacks the repair command with the notice suppressed"; }
           "$FORK" state fix-checksums --family lf >"$SCRATCH/dry_lf.json" 2>&1
           jq -e '[.databases[] | select(.label == "state DB")][0].status == "no_change"' "$SCRATCH/dry_lf.json" >/dev/null || fail "startup rewrote checksums under auto (drift must survive)"
           # -- 4. restore to the official family + prove idempotency -----
