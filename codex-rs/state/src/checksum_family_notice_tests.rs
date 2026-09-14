@@ -3,7 +3,6 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use super::DriftFingerprint;
-use super::NOTICE_FILE_NAME;
 use super::is_notice_disabled;
 use super::marker_path;
 use super::read_marker;

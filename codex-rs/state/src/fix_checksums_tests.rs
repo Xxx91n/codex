@@ -90,11 +90,9 @@ async fn state_checksum_family_fix_dry_run_reports_changes_without_touching() {
     assert_eq!(state.status, FixStatus::DryRun);
     assert!(
         !state.rewritten_versions.is_empty(),
-        format!(
-            "{} to {} needs work",
-            embedded().as_str(),
-            flipped().as_str()
-        )
+        "{} to {} needs work",
+        embedded().as_str(),
+        flipped().as_str()
     );
     assert_eq!(state.detected_family.as_deref(), Some(embedded().as_str()));
 
@@ -483,6 +481,7 @@ async fn state_checksum_family_startup_default_auto_fails_loud_on_drift() {
 
     let err = crate::runtime::StateRuntime::init(sqlite, "test".to_string())
         .await
+        .map(|_| ())
         .expect_err("auto must fail loud on family drift");
     let msg = err.to_string();
     assert!(msg.contains("checksum family mismatch"), "msg was: {msg}");
@@ -549,6 +548,7 @@ async fn state_checksum_family_startup_default_auto_keeps_tamper_error_verbatim(
 
     let err = crate::runtime::StateRuntime::init(sqlite, "test".to_string())
         .await
+        .map(|_| ())
         .expect_err("tampered history must keep failing loudly");
     let msg = err.to_string();
     assert!(msg.contains("previously applied"), "msg was: {msg}");

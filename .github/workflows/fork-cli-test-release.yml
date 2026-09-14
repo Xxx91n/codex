@@ -233,7 +233,7 @@ jobs:
           wait "$boot_pid" 2>/dev/null || true
           sleep 2
           [ -f "$CODEX_HOME/state_5.sqlite" ] || { cat "$SCRATCH/fork_boot1.log"; fail "fork cold boot did not create state_5.sqlite"; }
-          if grep -qi "checksum family mismatch" "$SCRATCH/fork_boot1.log"; then fail "unexpected family mismatch on fresh boot"; fi
+          if grep -qi "checksum family drift" "$SCRATCH/fork_boot1.log"; then fail "unexpected family drift on fresh boot"; fi
           # -- 2. simulate the legacy LF drift via the escape hatch ------
           "$FORK" state fix-checksums --family lf --apply >"$SCRATCH/flip_lf.json" 2>&1 \
             || { cat "$SCRATCH/flip_lf.json"; fail "escape-hatch lf flip failed"; }
@@ -245,9 +245,9 @@ jobs:
           rc=$?
           set -e
           [ $rc -ne 0 ] || fail "auto startup must fail on a drifted database (rc=$rc)"
-          grep -q "checksum family mismatch" "$SCRATCH/fork_boot2.log" || { cat "$SCRATCH/fork_boot2.log"; fail "fail-loud family mismatch text missing"; }
-          grep -q "stored migrations are in the lf family" "$SCRATCH/fork_boot2.log" || fail "drift text lacks the database family"
-          grep -q "this binary embeds the crlf family" "$SCRATCH/fork_boot2.log" || fail "drift text lacks the binary family"
+          grep -q "checksum family drift" "$SCRATCH/fork_boot2.log" || { cat "$SCRATCH/fork_boot2.log"; fail "fail-loud family drift text missing"; }
+          grep -q "databases carry the lf family" "$SCRATCH/fork_boot2.log" || fail "drift text lacks the database family"
+          grep -q "this binary embeds the official platform family crlf" "$SCRATCH/fork_boot2.log" || fail "drift text lacks the binary family"
           grep -q "codex state fix-checksums --family crlf --apply" "$SCRATCH/fork_boot2.log" || fail "drift text lacks the repair command"
           [ -f "$CODEX_HOME/.checksum-family-notices.json" ] || fail "one-time notice marker not persisted"
           "$FORK" state fix-checksums --family lf >"$SCRATCH/dry_lf.json" 2>&1
@@ -266,7 +266,7 @@ jobs:
           timeout 120 "$FORK" app-server </dev/null >"$SCRATCH/fork_boot3.log" 2>&1
           rc=$?
           set -e
-          if grep -qi "checksum family mismatch\|failed to initialize sqlite state runtime" "$SCRATCH/fork_boot3.log"; then
+          if grep -qi "checksum family drift\|failed to initialize sqlite state runtime" "$SCRATCH/fork_boot3.log"; then
             cat "$SCRATCH/fork_boot3.log"; fail "fork boot still fails after restore"
           fi
           [ $rc -eq 0 ] || [ $rc -eq 124 ] || { cat "$SCRATCH/fork_boot3.log"; fail "fork boot exited rc=$rc after restore"; }
@@ -289,7 +289,7 @@ jobs:
           timeout 120 "$PWD/official/$OFFICIAL" app-server </dev/null >"$SCRATCH/official_boot.log" 2>&1
           rc=$?
           set -e
-          if grep -qi "checksum family mismatch\|failed to initialize sqlite state runtime" "$SCRATCH/official_boot.log"; then
+          if grep -qi "checksum family drift\|failed to initialize sqlite state runtime" "$SCRATCH/official_boot.log"; then
             cat "$SCRATCH/official_boot.log"
             fail "official Windows binary cannot open the fork-restored database"
           fi
