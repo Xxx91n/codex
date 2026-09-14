@@ -114,7 +114,7 @@ pub(crate) fn maybe_show_family_notice(
     fingerprint: &DriftFingerprint,
     notice_block: &str,
 ) {
-    if is_notice_disabled(std::env::var_os(NOTICE_DISABLE_ENV)) {
+    if is_notice_disabled(std::env::var_os(NOTICE_DISABLE_ENV).as_deref()) {
         return;
     }
     if record_family_notice(sqlite_home, fingerprint) {

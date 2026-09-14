@@ -384,8 +384,9 @@ impl SqliteConfig {
                 ChecksumFamily::Lf => "maintain_lf_checksum_family",
             };
             pool.close().await;
-            return Err(RuntimeDbInitError::new(spec.label, operation, path.as_path(), source)
-                .into());
+            return Err(
+                RuntimeDbInitError::new(spec.label, operation, path.as_path(), source).into(),
+            );
         }
         Ok(pool)
     }

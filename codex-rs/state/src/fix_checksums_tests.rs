@@ -90,7 +90,11 @@ async fn state_checksum_family_fix_dry_run_reports_changes_without_touching() {
     assert_eq!(state.status, FixStatus::DryRun);
     assert!(
         !state.rewritten_versions.is_empty(),
-        format!("{} to {} needs work", embedded().as_str(), flipped().as_str())
+        format!(
+            "{} to {} needs work",
+            embedded().as_str(),
+            flipped().as_str()
+        )
     );
     assert_eq!(state.detected_family.as_deref(), Some(embedded().as_str()));
 
@@ -137,7 +141,11 @@ async fn state_checksum_family_fix_apply_rewrites_to_target() {
                 .await
                 .expect("row should load");
         let expected = image(migration, flipped());
-        assert_eq!(stored, expected, "version {} must land the target", migration.version);
+        assert_eq!(
+            stored, expected,
+            "version {} must land the target",
+            migration.version
+        );
     }
     verify.close().await;
 }
@@ -285,7 +293,10 @@ async fn state_checksum_family_fix_rejects_version_set_mismatch() {
         .expect("state DB entry");
     assert_eq!(state.status, FixStatus::Rejected);
     let reason = state.reason.as_deref().unwrap_or_default();
-    assert!(reason.contains("version_set_mismatch"), "reason was: {reason}");
+    assert!(
+        reason.contains("version_set_mismatch"),
+        "reason was: {reason}"
+    );
 }
 
 #[tokio::test]
@@ -298,12 +309,10 @@ async fn state_checksum_family_fix_rejects_when_backup_already_exists() {
     });
     let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
     let _pool = open_state_db_embedded_stamped(&sqlite).await;
-    let backup = sqlite
-        .state_db_path()
-        .with_file_name(format!(
-            "state_5.sqlite.pre-checksum-flip-{}.bak",
-            flipped().as_str()
-        ));
+    let backup = sqlite.state_db_path().with_file_name(format!(
+        "state_5.sqlite.pre-checksum-flip-{}.bak",
+        flipped().as_str()
+    ));
     std::fs::write(&backup, b"existing").expect("write backup");
 
     let err = fix_migration_checksum_families(&sqlite, flipped(), true)
@@ -429,13 +438,12 @@ async fn state_checksum_family_fix_lf_escape_hatch_flips_and_is_idempotent() {
             .expect("state DB entry");
         let stored = build_pool(&sqlite).await;
         for migration in STATE_MIGRATOR.migrations.iter() {
-            let stored_checksum: Vec<u8> = sqlx::query_scalar(
-                "SELECT checksum FROM _sqlx_migrations WHERE version = ?",
-            )
-            .bind(migration.version)
-            .fetch_one(&stored)
-            .await
-            .expect("row should load");
+            let stored_checksum: Vec<u8> =
+                sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = ?")
+                    .bind(migration.version)
+                    .fetch_one(&stored)
+                    .await
+                    .expect("row should load");
             assert_eq!(
                 stored_checksum,
                 image(migration, ChecksumFamily::Lf),
@@ -479,7 +487,10 @@ async fn state_checksum_family_startup_default_auto_fails_loud_on_drift() {
     let msg = err.to_string();
     assert!(msg.contains("checksum family mismatch"), "msg was: {msg}");
     assert!(
-        msg.contains(&format!("stored migrations are in the {} family", flipped().as_str())),
+        msg.contains(&format!(
+            "stored migrations are in the {} family",
+            flipped().as_str()
+        )),
         "msg was: {msg}"
     );
     assert!(

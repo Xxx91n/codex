@@ -35,7 +35,10 @@ fn notice_shows_once_per_fingerprint_and_records_the_marker() {
     assert!(record_family_notice(&home, &fp), "first detection shows");
     let marker = marker_path(&home.as_path());
     assert!(marker.exists(), "marker persisted under the sqlite home");
-    assert!(!record_family_notice(&home, &fp), "repeat detection stays quiet");
+    assert!(
+        !record_family_notice(&home, &fp),
+        "repeat detection stays quiet"
+    );
 
     let stored = read_marker(home.as_path());
     let seen = stored
@@ -53,15 +56,30 @@ fn fingerprint_change_rearms_the_notice() {
     let _cleanup = scopeguard::guard(home.clone(), |home| {
         let _ = std::fs::remove_dir_all(home);
     });
-    assert!(record_family_notice(&home, &fingerprint("lf", "crlf", "windows")));
+    assert!(record_family_notice(
+        &home,
+        &fingerprint("lf", "crlf", "windows")
+    ));
     // Same drift: quiet.
-    assert!(!record_family_notice(&home, &fingerprint("lf", "crlf", "windows")));
+    assert!(!record_family_notice(
+        &home,
+        &fingerprint("lf", "crlf", "windows")
+    ));
     // Database rebuilt into the other family: re-arm.
-    assert!(record_family_notice(&home, &fingerprint("crlf", "crlf", "windows")));
+    assert!(record_family_notice(
+        &home,
+        &fingerprint("crlf", "crlf", "windows")
+    ));
     // Binary family moved (platform cross-compile / different build): re-arm.
-    assert!(record_family_notice(&home, &fingerprint("crlf", "lf", "windows")));
+    assert!(record_family_notice(
+        &home,
+        &fingerprint("crlf", "lf", "windows")
+    ));
     // Same drift on another platform: re-arm.
-    assert!(record_family_notice(&home, &fingerprint("crlf", "lf", "linux")));
+    assert!(record_family_notice(
+        &home,
+        &fingerprint("crlf", "lf", "linux")
+    ));
 }
 
 #[test]

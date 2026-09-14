@@ -193,13 +193,9 @@ async fn repair_eol_checksum_family_rejects_schema_mismatch() {
         .await
         .expect("schema drift should apply");
 
-    let heal_error = repair_eol_checksum_family(
-        &pool,
-        &runtime_state_migrator(),
-        embedded(),
-    )
-    .await
-    .expect_err("schema drift must hard-fail instead of rewriting checksums");
+    let heal_error = repair_eol_checksum_family(&pool, &runtime_state_migrator(), embedded())
+        .await
+        .expect_err("schema drift must hard-fail instead of rewriting checksums");
     assert!(heal_error.to_string().contains("schema"));
 
     // Nothing was rewritten: the history still carries the flipped family.
@@ -240,13 +236,9 @@ async fn repair_eol_checksum_family_rejects_non_eol_checksum() {
         .await
         .expect("corrupted checksum should update");
 
-    let heal_error = repair_eol_checksum_family(
-        &pool,
-        &runtime_state_migrator(),
-        embedded(),
-    )
-    .await
-    .expect_err("checksums outside both line-ending families must hard-fail");
+    let heal_error = repair_eol_checksum_family(&pool, &runtime_state_migrator(), embedded())
+        .await
+        .expect_err("checksums outside both line-ending families must hard-fail");
     assert!(
         heal_error
             .to_string()
@@ -464,8 +456,7 @@ async fn repair_eol_checksum_family_with_flipped_target_rewrites_embedded_histor
                 .expect("stored checksum should load");
         let image = image_checksum(migration, flipped());
         assert_eq!(
-            stored,
-            image,
+            stored, image,
             "version {} must carry the flipped image",
             migration.version
         );
@@ -683,7 +674,10 @@ fn drift_guidance_names_both_families_and_the_command() {
         binary_family: ChecksumFamily::Crlf,
     };
     let guidance = drift.guidance();
-    assert!(guidance.contains("checksum family mismatch"), "guidance: {guidance}");
+    assert!(
+        guidance.contains("checksum family mismatch"),
+        "guidance: {guidance}"
+    );
     assert!(
         guidance.contains("stored migrations are in the lf family"),
         "guidance: {guidance}"
@@ -696,7 +690,10 @@ fn drift_guidance_names_both_families_and_the_command() {
         drift.repair_command(),
         "codex state fix-checksums --family crlf --apply"
     );
-    assert!(guidance.contains(&drift.repair_command()), "guidance: {guidance}");
+    assert!(
+        guidance.contains(&drift.repair_command()),
+        "guidance: {guidance}"
+    );
     let notice = drift.notice_text();
     assert!(notice.contains("one-time notice"), "notice: {notice}");
     assert!(
@@ -715,7 +712,9 @@ fn drift_guidance_names_both_families_and_the_command() {
         binary_family: ChecksumFamily::Lf,
     };
     assert!(
-        mixed.guidance().contains("stored migrations are in the mixed family"),
+        mixed
+            .guidance()
+            .contains("stored migrations are in the mixed family"),
         "guidance: {}",
         mixed.guidance()
     );

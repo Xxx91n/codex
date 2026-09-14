@@ -315,7 +315,10 @@ pub(crate) async fn detect_checksum_family_drift(
         (false, true) => Some(ChecksumFamily::Crlf),
         _ => None,
     };
-    Ok(Some(FamilyDrift { db_family, binary_family }))
+    Ok(Some(FamilyDrift {
+        db_family,
+        binary_family,
+    }))
 }
 
 const LEGACY_RECENCY_APPLIED_VERSION: i64 = 38;
