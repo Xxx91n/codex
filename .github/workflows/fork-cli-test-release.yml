@@ -395,7 +395,7 @@ jobs:
           #     only when it is absent (404 fallback). last-writer-wins replaces
           #     "already exists"; the tag never goes away, so no GC race is seeded.
           ref_err=$(mktemp)
-          if gh api -X PATCH "repos/${{ github.repository }}/git/refs/tags/$tag" -f sha="$GITHUB_SHA" -f force=true >/dev/null 2>"$ref_err"; then
+          if gh api -X PATCH "repos/${{ github.repository }}/git/refs/tags/$tag" -f sha="$GITHUB_SHA" -F force=true >/dev/null 2>"$ref_err"; then
             echo "rolling tag $tag force-moved to ${GITHUB_SHA:0:8}"
           elif grep -qiE 'HTTP 404|Could not resolve|Not Found' "$ref_err"; then
             gh api -X POST "repos/${{ github.repository }}/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" >/dev/null
