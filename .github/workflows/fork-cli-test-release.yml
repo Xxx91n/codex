@@ -314,9 +314,13 @@ jobs:
           OFFICIAL=$(find . -type f -iname "*.exe" | head -1)
           [ -n "$OFFICIAL" ] || fail "official release package has no exe"
           chmod +x "$OFFICIAL"
+          # official/ was created under the workspace checkout, not under
+          # $SCRATCH, so pin the absolute path while still inside it -
+          # rebuilding it after cd "$SCRATCH" yields a path that never exists.
+          OFFICIAL_BIN="$(pwd)/${OFFICIAL#./}"
           cd "$SCRATCH"
           set +e
-          timeout 120 "$PWD/official/$OFFICIAL" app-server </dev/null >"$SCRATCH/official_boot.log" 2>&1
+          timeout 120 "$OFFICIAL_BIN" app-server </dev/null >"$SCRATCH/official_boot.log" 2>&1
           rc=$?
           set -e
           [ -s "$SCRATCH/official_boot.log" ] || fail "official binary produced no output (it must have run)"
