@@ -421,4 +421,4 @@ jobs:
           #     retention policy is stated in the ticket 36 report).
           gh release upload "$tag" dist/*.zip dist/*.tar.gz --repo "${{ github.repository }}" --clobber
           # publish self-evidence: final public state of the rolling release.
-          gh release view "$tag" --repo "${{ github.repository }}" --json tagName,isDraft,prerelease,assets
+          gh release view "$tag" --repo "${{ github.repository }}" --json tagName,isDraft,isPrerelease,assets
