@@ -319,20 +319,47 @@ jobs:
           # rebuilding it after cd "$SCRATCH" yields a path that never exists.
           OFFICIAL_BIN="$(pwd)/${OFFICIAL#./}"
           cd "$SCRATCH"
+          # Coexistence proof = LIVENESS + no family-wall text (r7 ruling). The
+          # official app-server exits silently on stdin EOF with zero output
+          # (run 34933908139), so "log non-empty" was a false premise and rc
+          # carries no information. Keep its stdin open, require 30s of
+          # continuous service on the restored home, and harvest with
+          # taskkill_pid - timeout cannot reliably kill a native exe (see the
+          # helper comment above). Ahead-of-anchor official migrations land
+          # their own CRLF family, which the fork runtime tolerates via
+          # ignore_missing.
+          OFFICIAL_LOG="$SCRATCH/official_boot.log"
+          "$OFFICIAL_BIN" app-server < <(sleep 200) >"$OFFICIAL_LOG" 2>&1 &
+          off_pid=$!
+          elapsed=0
+          while [ "$elapsed" -lt 45 ]; do
+            if grep -qi "checksum family drift\|failed to initialize sqlite state runtime" "$OFFICIAL_LOG"; then
+              set +e; taskkill_pid "$off_pid"; wait "$off_pid"; rc=$?; set -e
+              cat "$OFFICIAL_LOG"; echo "official rc=$rc"
+              fail "official Windows binary cannot open the fork-restored database"
+            fi
+            if ! kill -0 "$off_pid" 2>/dev/null; then
+              set +e; wait "$off_pid"; rc=$?; set -e
+              cat "$OFFICIAL_LOG"; echo "official rc=$rc"
+              fail "official binary exited after ${elapsed}s; it must keep serving the restored home"
+            fi
+            if [ "$elapsed" -ge 30 ]; then break; fi
+            sleep 5
+            elapsed=$((elapsed + 5))
+          done
           set +e
-          timeout 120 "$OFFICIAL_BIN" app-server </dev/null >"$SCRATCH/official_boot.log" 2>&1
+          taskkill_pid "$off_pid"
+          wait "$off_pid"
           rc=$?
           set -e
-          [ -s "$SCRATCH/official_boot.log" ] || fail "official binary produced no output (it must have run)"
-          if grep -qi "checksum family drift\|failed to initialize sqlite state runtime" "$SCRATCH/official_boot.log"; then
-            cat "$SCRATCH/official_boot.log"
-            fail "official Windows binary cannot open the fork-restored database"
+          echo "official binary served the restored home for ${elapsed}s (harvest rc=$rc)"
+          # Second sweep covers wall text flushed during shutdown; every path
+          # above cats the log and prints the rc, so a red run is self-evident.
+          if grep -qi "checksum family drift\|failed to initialize sqlite state runtime" "$OFFICIAL_LOG"; then
+            cat "$OFFICIAL_LOG"; echo "official rc=$rc"
+            fail "official Windows binary hit the family wall while being harvested"
           fi
-          # rc 124 = served until the timeout stopped it (success); anything
-          # else must be a clean exit. Official migrations newer than our
-          # anchor land its own CRLF family and the fork runtime tolerates a
-          # ahead database via ignore_missing.
-          [ $rc -eq 0 ] || [ $rc -eq 124 ] || { cat "$SCRATCH/official_boot.log"; fail "official binary exited rc=$rc"; }
+          cat "$OFFICIAL_LOG"
           echo "e2e coexistence drill: fork-created -> lf drift -> auto fail-loud -> crlf restore -> fork + official cold boots all pass"
 
   release:
