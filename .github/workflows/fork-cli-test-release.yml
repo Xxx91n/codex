@@ -368,6 +368,11 @@ jobs:
     # The green e2e coexistence drill gates publication (ticket 35).
     if: inputs.platforms == 'all'
     needs: [build, e2e-official-coexistence]
+    # (d) serialize publishers (ticket 36): concurrent dispatches queue on
+    #     this group instead of racing the rolling tag; no
+    #     cancel-in-progress, so a publish is never cut mid-flight.
+    concurrency:
+      group: fork-cli-test-release-publish
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -381,11 +386,39 @@ jobs:
         run: |
           tag=tri-wire-test
           title="Tri-wire test build (CLI) — ${GITHUB_SHA:0:8}"
-          gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
-          gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null || true
-          gh release create "$tag" \
-            --repo "${{ github.repository }}" \
-            --title "$title" \
-            --notes "Test build of the tri-wire fork CLI (feat/tri-wire-api). Windows x86_64 / Linux x86_64 / macOS aarch64 (Apple Silicon). Unsigned. Report issues in this repo. Family change (ticket 35): migration checksums follow the official platform family again (Windows=CRLF). If a startup reports a checksum family mismatch, run codex state fix-checksums --family crlf --apply once; runbook: docs/fork-checksum-family.md" \
-            --prerelease \
-            dist/*.zip dist/*.tar.gz
+          # Ticket 36 (A-029, B1 root-cause fix): the old tear-down-and-recreate
+          # publish was never atomic - GitHub async tag GC can replay the late
+          # removal event and force the fresh release back to draft (cli/cli#5024
+          # / #8458): the "run green, download 404" disease. Publish is now an
+          # idempotent upsert; this step performs zero destructive ref ops.
+          # (a) rolling tag: single-request refs-API force-move; create the ref
+          #     only when it is absent (404 fallback). last-writer-wins replaces
+          #     "already exists"; the tag never goes away, so no GC race is seeded.
+          ref_err=$(mktemp)
+          if gh api -X PATCH "repos/${{ github.repository }}/git/refs/tags/$tag" -f sha="$GITHUB_SHA" -f force=true >/dev/null 2>"$ref_err"; then
+            echo "rolling tag $tag force-moved to ${GITHUB_SHA:0:8}"
+          elif grep -qiE 'HTTP 404|Could not resolve|Not Found' "$ref_err"; then
+            gh api -X POST "repos/${{ github.repository }}/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" >/dev/null
+            echo "rolling tag $tag created at ${GITHUB_SHA:0:8}"
+          else
+            cat "$ref_err" >&2
+            exit 1
+          fi
+          # (b) release create-or-heal: edit the existing release in place
+          #     (--draft=false also heals an orphan draft left by the legacy GC
+          #     symptom; prerelease kept; title/notes refreshed). Only a missing
+          #     release is created.
+          notes="Test build of the tri-wire fork CLI (feat/tri-wire-api). Windows x86_64 / Linux x86_64 / macOS aarch64 (Apple Silicon). Unsigned. Report issues in this repo. ROLLING TAG: this prerelease tag is force-moved by every green full run - always download from releases/download/tri-wire-test/<asset>; do not pin a commit SHA or the release id. Family change (ticket 35): migration checksums follow the official platform family again (Windows=CRLF). If a startup reports a checksum family mismatch, run codex state fix-checksums --family crlf --apply once; runbook: docs/fork-checksum-family.md"
+          if gh api "repos/${{ github.repository }}/releases/tags/$tag" >/dev/null 2>&1; then
+            echo "release $tag exists - healing in place"
+            gh release edit "$tag" --repo "${{ github.repository }}" --draft=false --prerelease --title "$title" --notes "$notes"
+          else
+            echo "release $tag absent - creating"
+            gh release create "$tag" --repo "${{ github.repository }}" --title "$title" --notes "$notes" --prerelease
+          fi
+          # (c) same-name assets are overwritten via --clobber; off-name
+          #     leftovers are kept untouched (asset naming is stable per OS; the
+          #     retention policy is stated in the ticket 36 report).
+          gh release upload "$tag" dist/*.zip dist/*.tar.gz --repo "${{ github.repository }}" --clobber
+          # publish self-evidence: final public state of the rolling release.
+          gh release view "$tag" --repo "${{ github.repository }}" --json tagName,isDraft,prerelease,assets
