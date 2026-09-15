@@ -281,16 +281,36 @@ jobs:
           fi
           [ $rc -eq 0 ] || [ $rc -eq 124 ] || { cat "$SCRATCH/fork_boot3.log"; fail "fork boot exited rc=$rc after restore"; }
           # -- 6. official release binary cold-boots the restored home ----
-          ASSET_URL=$(gh api repos/openai/codex/releases/latest \
-            --jq '.assets[] | select(.name | test("win"; "i")) | .browser_download_url' | head -1)
-          [ -n "$ASSET_URL" ] || fail "no windows asset on the latest official release"
+          # Asset forensics resident in the log (r5): full asset list, the
+          # selected URL, and unpacked contents - one CI run can settle naming.
+          REL_JSON=$(gh api repos/openai/codex/releases/latest)
+          echo "official release tag: $(echo "$REL_JSON" | jq -r '.tag_name')"
+          echo "official release assets:"
+          echo "$REL_JSON" | jq -r '.assets[].name'
+          # Explicit selection (r5): windows + x86_64 executable CLI asset only.
+          # The old test("win") glob matched "darwin" substrings and tooling
+          # assets (first hit was argument-comment-lint-*-darwin.tar.gz).
+          # Whitelist extensions .zip/.tar.gz/.tgz/.exe; no guessed downloads.
+          ASSET_NAME=$(echo "$REL_JSON" | jq -r '
+            [ .assets[].name
+              | select(ascii_downcase | test("x86_64") and test("windows"))
+              | select(ascii_downcase | test("\\.(zip|tar\\.gz|tgz|exe)$"))
+              | select(ascii_downcase | test("vsix|ps1|sha256|sha512|checksum|symbols|-package|npm|lint|sandbox|command-runner|code-mode|responses|sdk|app-server") | not)
+            ]
+            | sort_by(if endswith(".zip") then 1 elif endswith(".tar.gz") or endswith(".tgz") then 2 else 0 end)
+            | .[0] // empty')
+          [ -n "$ASSET_NAME" ] || fail "no selectable windows x86_64 asset on the latest official release (full list above)"
+          ASSET_URL=$(echo "$REL_JSON" | jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name == $n) | .browser_download_url')
+          echo "selected official asset: $ASSET_NAME -> $ASSET_URL"
           mkdir -p official && cd official
           curl -fsSL -o pkg "$ASSET_URL"
-          case "$ASSET_URL" in
+          case "$ASSET_NAME" in
             *.zip) 7z x -y pkg >/dev/null ;;
             *.tar.gz|*.tgz) tar xzf pkg ;;
             *) cp pkg codex.exe ;;
           esac
+          echo "official package contents (maxdepth 3):"
+          find . -maxdepth 3 -type f | head -40
           OFFICIAL=$(find . -type f -iname "*.exe" | head -1)
           [ -n "$OFFICIAL" ] || fail "official release package has no exe"
           chmod +x "$OFFICIAL"
@@ -299,6 +319,7 @@ jobs:
           timeout 120 "$PWD/official/$OFFICIAL" app-server </dev/null >"$SCRATCH/official_boot.log" 2>&1
           rc=$?
           set -e
+          [ -s "$SCRATCH/official_boot.log" ] || fail "official binary produced no output (it must have run)"
           if grep -qi "checksum family drift\|failed to initialize sqlite state runtime" "$SCRATCH/official_boot.log"; then
             cat "$SCRATCH/official_boot.log"
             fail "official Windows binary cannot open the fork-restored database"
