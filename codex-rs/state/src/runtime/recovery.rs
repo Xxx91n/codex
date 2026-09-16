@@ -49,29 +49,21 @@ impl RuntimeDbInitError {
 
 impl std::fmt::Display for RuntimeDbInitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if f.alternate() {
-            // `{:#}` renders every link of the error chain, so anyhow
-            // prints the source right after this line. Embedding it here
-            // as well duplicated the whole fail-loud guidance block, help
-            // lines included (ticket 37: the help text must appear exactly
-            // once in the app-server startup error).
-            write!(
-                f,
-                "failed to {} {} at {}",
-                self.operation,
-                self.label,
-                self.path.display()
-            )
-        } else {
-            write!(
-                f,
-                "failed to {} {} at {}: {}",
-                self.operation,
-                self.label,
-                self.path.display(),
-                self.source
-            )
-        }
+        // Ticket 37 r2: never embed `self.source` in the Display output.
+        // Anyhow's `{:#}` chain renderer does not propagate the alternate
+        // flag to source errors it walks via `source()`, so a non-alternate
+        // branch that embeds `{source}` causes the guidance block to appear
+        // twice (once embedded, once as a chain link).  Both branches now
+        // print only the label/path; the source — including the full
+        // fail-loud guidance with its help lines — is rendered exactly once
+        // by the error chain walker.
+        write!(
+            f,
+            "failed to {} {} at {}",
+            self.operation,
+            self.label,
+            self.path.display()
+        )
     }
 }
 

@@ -369,7 +369,10 @@ async fn state_checksum_family_fix_absorbs_pending_migrations_after_restore() {
             .cloned()
             .collect(),
     );
-    behind.run(&pool).await.expect("behind migrations should apply");
+    behind
+        .run(&pool)
+        .await
+        .expect("behind migrations should apply");
     // Drag the existing rows into the other family the way the legacy LF
     // lock did; the R1 database looked exactly like this.
     for migration in behind.migrations.iter() {

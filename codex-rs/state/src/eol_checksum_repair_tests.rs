@@ -730,11 +730,7 @@ fn drift_guidance_prints_each_help_line_once() {
         binary_family: ChecksumFamily::Crlf,
     };
     let guidance = drift.guidance();
-    assert_eq!(
-        guidance.matches("help:").count(),
-        3,
-        "guidance: {guidance}"
-    );
+    assert_eq!(guidance.matches("help:").count(), 3, "guidance: {guidance}");
     let command = drift.repair_command();
     assert_eq!(
         guidance.matches(command.as_str()).count(),
