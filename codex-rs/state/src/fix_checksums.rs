@@ -7,6 +7,12 @@
 //! machine-readable JSON report. Under the ticket 35 default (`auto`) this
 //! subcommand is the only sanctioned rewrite entry point: the startup path
 //! fails loud with the exact command instead of rewriting on its own.
+//!
+//! Ticket 37 (A-030) relaxed precondition 4 from a version-set equality
+//! to stored being a subset of embedded: a database with pending migrations
+//! (the normal upgrade state that deadlocked the R1 restore drill) passes
+//! the gate and reports its pending versions; a database ahead of this
+//! binary is still refused whole with a precise reason.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -80,6 +86,12 @@ pub struct FixChecksumsDb {
     pub detected_family: Option<String>,
     pub applied_version_count: usize,
     pub embedded_version_count: usize,
+    /// Embedded versions that have no applied row yet: the pending
+    /// migrations a database behind this binary absorbs on its next normal
+    /// startup (ticket 37 / A-030). Mirrors pending_versions.len().
+    pub pending_version_count: usize,
+    /// The pending versions themselves, ascending.
+    pub pending_versions: Vec<i64>,
     /// Versions that would be / were rewritten into the target family.
     pub rewritten_versions: Vec<i64>,
     /// Stable reason code for `FixStatus::Rejected`. `None` for other
@@ -181,34 +193,60 @@ fn detect_family(migrator: &Migrator, rows: &[(i64, Vec<u8>)]) -> Option<String>
     }
 }
 
-fn reject_reason_version_set(migrator: &Migrator, applied: &[(i64, Vec<u8>)]) -> Option<String> {
-    let mut embedded: Vec<i64> = migrator.migrations.iter().map(|m| m.version).collect();
-    embedded.sort_unstable();
-    let mut applied_versions: Vec<i64> = applied.iter().map(|(v, _)| *v).collect();
-    applied_versions.sort_unstable();
-    if applied_versions == embedded {
-        return None;
+/// Outcome of the P4 version-set precondition, relaxed by ticket 37 (A-030)
+/// from equality to a subset test.
+///
+/// Tri-state semantics (kept verbatim in sync with item 4 of the "Six
+/// preconditions" section in docs/fork-checksum-family.md):
+///   * stored is a proper subset of embedded - pending migrations, the
+///     normal state of a database that has not yet been migrated by this
+///     binary: allowed. The flip restores the rows that exist and the
+///     embedded-only versions are reported as pending_versions; the next
+///     normal startup absorbs them and stamps them in its own (target)
+///     family, converging on the same steady state as an official binary.
+///   * stored equals embedded - fully migrated: unchanged behavior.
+///   * stored is a strict superset - the database is ahead of this binary.
+///     Rows whose version has no embedded mirror can never prove their
+///     line-ending fingerprint, so the whole database is still refused,
+///     now with the precise db_ahead_unknown_versions reason naming every
+///     unknown version. The asymmetry mirrors upstream codex PR #16924
+///     (startup tolerates a database ahead) and the Flyway/Alembic/Atlas
+///     repair discipline: offline bookkeeping rewrites align the ledger to
+///     migrations the tool actually has, never beyond them.
+enum VersionSetGate {
+    Allowed { pending: Vec<i64> },
+    Rejected(String),
+}
+
+fn version_set_gate(migrator: &Migrator, applied: &[(i64, Vec<u8>)]) -> VersionSetGate {
+    let embedded: BTreeSet<i64> = migrator.migrations.iter().map(|m| m.version).collect();
+    let applied_versions: BTreeSet<i64> = applied.iter().map(|(v, _)| *v).collect();
+    let unknown: Vec<i64> = applied_versions.difference(&embedded).copied().collect();
+    if !unknown.is_empty() {
+        return VersionSetGate::Rejected(format!("db_ahead_unknown_versions unknown={unknown:?}"));
     }
-    let embedded_set: BTreeSet<i64> = embedded.iter().copied().collect();
-    let applied_set: BTreeSet<i64> = applied_versions.iter().copied().collect();
-    let missing: Vec<i64> = embedded_set.difference(&applied_set).copied().collect();
-    let extra: Vec<i64> = applied_set.difference(&embedded_set).copied().collect();
-    let mut reason = String::from("version_set_mismatch");
-    if !missing.is_empty() {
-        reason.push_str(&format!(" missing={missing:?}"));
+    VersionSetGate::Allowed {
+        pending: embedded.difference(&applied_versions).copied().collect(),
     }
-    if !extra.is_empty() {
-        reason.push_str(&format!(" extra={extra:?}"));
-    }
-    Some(reason)
 }
 
 fn reject_reason_schema(
     migrator: &Migrator,
+    applied_versions: &BTreeSet<i64>,
     actual: &BTreeMap<String, ObjectKind>,
 ) -> Option<String> {
     let mut replay = SchemaReplay::default();
-    for migration in migrator.migrations.iter() {
+    // Replay exactly the history recorded as applied (version order, as
+    // sqlx applies it), not the whole embedded set: a database with pending
+    // migrations legitimately lacks the later DDL's objects (ticket 37 /
+    // A-030). The gate itself is unchanged - the inventory must still match
+    // the recorded history object for object; with stored = embedded this
+    // filter replays the identical set.
+    for migration in migrator
+        .migrations
+        .iter()
+        .filter(|migration| applied_versions.contains(&migration.version))
+    {
         replay.apply_migration(migration.sql.as_str());
     }
     replay
@@ -263,6 +301,8 @@ async fn validate_database(
             detected_family: None,
             applied_version_count: 0,
             embedded_version_count: spec.migrator.migrations.len(),
+            pending_version_count: 0,
+            pending_versions: Vec::new(),
             rewritten_versions: Vec::new(),
             reason: None,
         };
@@ -277,6 +317,8 @@ async fn validate_database(
                 detected_family: None,
                 applied_version_count: 0,
                 embedded_version_count: spec.migrator.migrations.len(),
+                pending_version_count: 0,
+                pending_versions: Vec::new(),
                 rewritten_versions: Vec::new(),
                 reason: Some(format!("open_failed: {error}")),
             };
@@ -292,6 +334,8 @@ async fn validate_database(
                 detected_family: None,
                 applied_version_count: 0,
                 embedded_version_count: spec.migrator.migrations.len(),
+                pending_version_count: 0,
+                pending_versions: Vec::new(),
                 rewritten_versions: Vec::new(),
                 reason: None,
             };
@@ -305,6 +349,8 @@ async fn validate_database(
                 detected_family: None,
                 applied_version_count: 0,
                 embedded_version_count: spec.migrator.migrations.len(),
+                pending_version_count: 0,
+                pending_versions: Vec::new(),
                 rewritten_versions: Vec::new(),
                 reason: None,
             };
@@ -319,6 +365,8 @@ async fn validate_database(
                 detected_family: None,
                 applied_version_count: 0,
                 embedded_version_count: spec.migrator.migrations.len(),
+                pending_version_count: 0,
+                pending_versions: Vec::new(),
                 rewritten_versions: Vec::new(),
                 reason: Some(format!("read_applied_failed: {error}")),
             };
@@ -333,11 +381,40 @@ async fn validate_database(
             detected_family: None,
             applied_version_count: 0,
             embedded_version_count: spec.migrator.migrations.len(),
+            pending_version_count: 0,
+            pending_versions: Vec::new(),
             rewritten_versions: Vec::new(),
             reason: None,
         };
     }
-    // P1: applied migration unknown to this binary -> reject.
+    // P4 (ticket 37 / A-030): stored must be a subset of the embedded
+    // versions. Checked before the row gates so a database ahead of this
+    // binary is refused whole with the precise db_ahead_unknown_versions
+    // reason naming every unknown version, while a pending-migrations
+    // database (stored is a proper subset - the R1 deadlock case) proceeds
+    // and reports its embedded-only versions in the entry below.
+    let pending_versions = match version_set_gate(spec.migrator, &applied) {
+        VersionSetGate::Allowed { pending } => pending,
+        VersionSetGate::Rejected(reason) => {
+            pool.close().await;
+            return FixChecksumsDb {
+                label: spec.label.to_string(),
+                path: spec.path.to_string_lossy().into_owned(),
+                status: FixStatus::Rejected,
+                detected_family: None,
+                applied_version_count: applied.len(),
+                embedded_version_count: spec.migrator.migrations.len(),
+                pending_version_count: 0,
+                pending_versions: Vec::new(),
+                rewritten_versions: Vec::new(),
+                reason: Some(reason),
+            };
+        }
+    };
+    // P1 (precondition 1, family criterion): applied migration unknown to
+    // this binary -> reject. The subset gate above already refuses every
+    // unknown version with db_ahead_unknown_versions; this row-level check
+    // stays as its defense-in-depth anchor.
     for (version, _) in &applied {
         if !spec
             .migrator
@@ -353,6 +430,8 @@ async fn validate_database(
                 detected_family: None,
                 applied_version_count: applied.len(),
                 embedded_version_count: spec.migrator.migrations.len(),
+                pending_version_count: 0,
+                pending_versions: Vec::new(),
                 rewritten_versions: Vec::new(),
                 reason: Some(format!("unknown_migration_version_{version}")),
             };
@@ -377,26 +456,14 @@ async fn validate_database(
                 detected_family: None,
                 applied_version_count: applied.len(),
                 embedded_version_count: spec.migrator.migrations.len(),
+                pending_version_count: 0,
+                pending_versions: Vec::new(),
                 rewritten_versions: Vec::new(),
                 reason: Some(format!("not_an_eol_only_difference_at_version_{version}")),
             };
         }
     }
-    // P4: version set match (checked before the schema gate so a partial
-    // history reports the version-set reason, not the full-replay drift).
-    if let Some(reason) = reject_reason_version_set(spec.migrator, &applied) {
-        pool.close().await;
-        return FixChecksumsDb {
-            label: spec.label.to_string(),
-            path: spec.path.to_string_lossy().into_owned(),
-            status: FixStatus::Rejected,
-            detected_family: None,
-            applied_version_count: applied.len(),
-            embedded_version_count: spec.migrator.migrations.len(),
-            rewritten_versions: Vec::new(),
-            reason: Some(reason),
-        };
-    }
+    let applied_versions: BTreeSet<i64> = applied.iter().map(|(version, _)| *version).collect();
     // P3: schema gate (SchemaReplay vs actual inventory).
     let actual = match actual_schema_inventory(&pool).await {
         Ok(actual) => actual,
@@ -409,12 +476,14 @@ async fn validate_database(
                 detected_family: None,
                 applied_version_count: applied.len(),
                 embedded_version_count: spec.migrator.migrations.len(),
+                pending_version_count: 0,
+                pending_versions: Vec::new(),
                 rewritten_versions: Vec::new(),
                 reason: Some(format!("schema_inventory_failed: {error}")),
             };
         }
     };
-    if let Some(reason) = reject_reason_schema(spec.migrator, &actual) {
+    if let Some(reason) = reject_reason_schema(spec.migrator, &applied_versions, &actual) {
         pool.close().await;
         return FixChecksumsDb {
             label: spec.label.to_string(),
@@ -423,6 +492,8 @@ async fn validate_database(
             detected_family: None,
             applied_version_count: applied.len(),
             embedded_version_count: spec.migrator.migrations.len(),
+            pending_version_count: 0,
+            pending_versions: Vec::new(),
             rewritten_versions: Vec::new(),
             reason: Some(reason),
         };
@@ -452,6 +523,8 @@ async fn validate_database(
         detected_family: detected,
         applied_version_count: applied.len(),
         embedded_version_count: spec.migrator.migrations.len(),
+        pending_version_count: pending_versions.len(),
+        pending_versions,
         rewritten_versions,
         reason: None,
     };
@@ -472,6 +545,8 @@ async fn apply_to_database(
             detected_family: None,
             applied_version_count: 0,
             embedded_version_count: spec.migrator.migrations.len(),
+            pending_version_count: 0,
+            pending_versions: Vec::new(),
             rewritten_versions: Vec::new(),
             reason: None,
         });
@@ -561,6 +636,8 @@ async fn apply_to_database(
         detected_family: detected,
         applied_version_count: spec.migrator.migrations.len(),
         embedded_version_count: spec.migrator.migrations.len(),
+        pending_version_count: 0,
+        pending_versions: Vec::new(),
         rewritten_versions: rewritten,
         reason: None,
     })
@@ -575,6 +652,8 @@ fn rejected_db(spec: &DatabaseSpec, reason: &str) -> FixChecksumsDb {
         detected_family: None,
         applied_version_count: 0,
         embedded_version_count: spec.migrator.migrations.len(),
+        pending_version_count: 0,
+        pending_versions: Vec::new(),
         rewritten_versions: Vec::new(),
         reason: Some(reason.to_string()),
     }
@@ -610,7 +689,13 @@ pub async fn fix_migration_checksum_families(
             // run stays idempotent.
             continue;
         }
-        let outcome = apply_to_database(sqlite, spec, target).await?;
+        let mut outcome = apply_to_database(sqlite, spec, target).await?;
+        // The flip only rewrites checksums: the applied row count and the
+        // pending versions validated above survive it untouched - the next
+        // normal startup absorbs the pending migrations (ticket 37 / A-030).
+        outcome.applied_version_count = prior.applied_version_count;
+        outcome.pending_version_count = prior.pending_version_count;
+        outcome.pending_versions = std::mem::take(&mut prior.pending_versions);
         *prior = outcome;
     }
     Ok(FixChecksumsReport {

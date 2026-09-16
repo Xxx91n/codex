@@ -719,3 +719,102 @@ fn drift_guidance_names_both_families_and_the_command() {
         mixed.guidance()
     );
 }
+
+#[test]
+fn drift_guidance_prints_each_help_line_once() {
+    // Ticket 37: the fail-loud block is composed exactly once here (the
+    // app-server renders the error chain with {:#}; the wrapper Display
+    // fix keeps the whole block - help lines included - single).
+    let drift = FamilyDrift {
+        db_family: Some(ChecksumFamily::Lf),
+        binary_family: ChecksumFamily::Crlf,
+    };
+    let guidance = drift.guidance();
+    assert_eq!(
+        guidance.matches("help:").count(),
+        3,
+        "guidance: {guidance}"
+    );
+    let command = drift.repair_command();
+    assert_eq!(
+        guidance.matches(command.as_str()).count(),
+        1,
+        "guidance: {guidance}"
+    );
+    assert_eq!(
+        drift.notice_text().matches(command.as_str()).count(),
+        1,
+        "notice: {}",
+        drift.notice_text()
+    );
+}
+
+#[tokio::test]
+async fn repair_eol_checksum_family_repairs_behind_database_and_startup_absorbs() {
+    // Ticket 37 (A-030), engine arm of the tri-state matrix: stored is a
+    // proper subset of embedded (pending migrations, the R1 field shape)
+    // heals row by row like any other EOL drift, the repair itself does
+    // NOT apply the missing migrations, and the startup migrator absorbs
+    // them into the embedded (target) family afterwards.
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let state_path = sqlite.state_db_path();
+    let pool = sqlite
+        .open_read_write_pool(&state_path)
+        .await
+        .expect("sqlite database should open");
+    let keep = STATE_MIGRATOR.migrations.len() - 3;
+    let behind = Migrator::with_migrations(
+        STATE_MIGRATOR
+            .migrations
+            .iter()
+            .take(keep)
+            .cloned()
+            .collect(),
+    );
+    behind
+        .run(&pool)
+        .await
+        .expect("behind migrations should apply");
+    for migration in behind.migrations.iter() {
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
+            .bind(image_checksum(migration, flipped()).as_slice())
+            .bind(migration.version)
+            .execute(&pool)
+            .await
+            .expect("flipped stamp should apply");
+    }
+
+    // The embedded-family startup rejects the drifted subset database -
+    // this is the VersionMismatch whose fail-loud text pointed at the
+    // repair command in the R1 rehearsal.
+    let strict_error = STATE_MIGRATOR
+        .run(&pool)
+        .await
+        .expect_err("embedded-family migrator must reject the flipped history");
+    assert!(matches!(strict_error, MigrateError::VersionMismatch(_)));
+
+    repair_eol_checksum_family(&pool, &runtime_state_migrator(), embedded())
+        .await
+        .expect("a behind database must be repairable");
+
+    // Checksums only: the pending versions are still unapplied.
+    assert_eq!(stored_history(&pool).await.len(), keep);
+
+    STATE_MIGRATOR
+        .run(&pool)
+        .await
+        .expect("startup must absorb the pending migrations");
+    assert_eq!(
+        stored_history(&pool).await,
+        embedded_history(&STATE_MIGRATOR)
+    );
+
+    pool.close().await;
+}

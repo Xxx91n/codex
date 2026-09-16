@@ -124,12 +124,30 @@ same gates apply to the explicit opt-in startup maintenance.
    byte-identical modulo line endings.
 3. Schema consistency gate. The SchemaReplay DDL walker covers all six
    runtime databases; the actual sqlite_master inventory must match the
-   replayed expectations (missing or mistyped objects fail).
-4. Version set match. The applied version set must equal the embedded
-   version set: a database behind the binary or ahead of it is refused.
-   (The startup migrator tolerates a database ahead via
-   `ignore_missing`; the flip is stricter because the goal is to make a
-   paired official binary of the same commit open the database.)
+   replayed expectations (missing or mistyped objects fail). The replay
+   walks the history recorded as applied - not the whole embedded set -
+   so a database with pending migrations is judged against its own
+   subset's expectations (ticket 37 / A-030).
+4. Version set inclusion (relaxed from equality by ticket 37 / A-030).
+   The applied version set must be a subset of the embedded set. Three
+   states, kept verbatim in sync with the P4 gate comment in
+   `codex-rs/state/src/fix_checksums.rs`:
+   * stored a proper subset of embedded - pending migrations, the
+     normal upgrade state (the R1 field shape) - allowed. The flip
+     restores the rows that exist, the JSON report names the
+     embedded-only versions as `pending_version_count` /
+     `pending_versions`, and the next normal startup absorbs them,
+     stamping them in its own family - converging on the same steady
+     state as an official binary.
+   * stored equals embedded - fully migrated: behavior unchanged.
+   * stored a strict superset - the database is ahead of this binary:
+     refused whole, with the precise reason `db_ahead_unknown_versions`
+     listing every unknown version, because a row with no embedded
+     mirror can never prove its line-ending fingerprint. (The startup
+     migrator tolerates a database ahead via `ignore_missing` -
+     upstream codex PR #16924 - while an offline bookkeeping rewrite,
+     like Flyway/Alembic/Atlas repair, aligns the ledger only to
+     migrations it actually has.)
 5. Atomic and reversible. Apply creates a backup file next to the
    database; an existing backup file at that name is refused (never
    overwriting a previous pre-flip snapshot). The row updates run in a
@@ -204,16 +222,18 @@ its own and no bridge config is needed.
   Never. WAL contention aside, keep the same-instant-one-kernel rule;
   the family regression made it less dangerous, not optional.
 * The flip refuses with `not_an_eol_only_difference_at_version_N` or
-  `unknown_migration_version_N`?
-  That is the tamper/real-drift gate protecting you, not a bug to
-  route around: restore from the pre-flip backup and investigate
-  before re-running.
+  `db_ahead_unknown_versions unknown=[...]`?
+  That is the tamper/real-drift gate protecting you (the second one
+  means the database was migrated by a newer binary than the one
+  running the flip), not a bug to route around: restore from the
+  pre-flip backup and investigate before re-running.
 
 ## What is out of scope
 
 * Running migrations: the flip only rewrites checksums. A database
-  behind the binary refuses with `version_set_mismatch`; run any Codex
-  binary normally first, then re-run the flip.
+  behind the binary is restorable as-is (ticket 37); its pending
+  versions stay unapplied and the next normal startup of any Codex
+  binary absorbs them (see precondition 4).
 * Moving the schema: a fork-only schema migration not in the official
   set fails the `schema_drift` gate by design.
 * Automatic family rewrites under `auto`: retired by ADR-0011; drift

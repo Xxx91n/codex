@@ -191,6 +191,10 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
 > 2026-09-14 修订（票 35，依据 D-001~D-004 与 research/35）：auto 默认语义由「维持单向 LF
 > 自愈」翻转为「跟随二进制内嵌家族（=官方平台家族），漂移 fail-loud + 显式命令、零自动
 > 改写」；原条目全文下沉 superseded 留痕，六前提与禁止用法主体继续有效。
+> 2026-09-16 修订（票 37 / A-030，依据 D-009 R1 取证）：六前提之「版本集合」由等式放宽为
+> stored⊆embedded——pending migrations（库落后于二进制）常态放行并在 JSON 报告新增
+> pending_versions 计数/列表；库新于二进制（embedded 无镜像不可证指纹）维持整库拒绝，
+> reason=db_ahead_unknown_versions 列明未知版本号；其余五前提门不变。
 - 本仓用法（票 35 后）：`[state] migration_checksum_family = auto|lf|crlf`。默认 auto =
   跟随本二进制内嵌家族（官方平台家族：Windows 构建 CRLF、Linux/macOS 构建 LF）；启动家族
   不匹配时做只读诊断→fail-loud 错误（文案含「库=X 家族 / 二进制=Y 家族 / codex state
@@ -201,7 +205,8 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
   命令）。显式 crlf/lf = 票 31 启动维持行为不变（先重定位到内嵌家族过验证→迁移→落配置
   家族）。离线 `codex state fix-checksums --family <lf|crlf> [--apply]`（默认 dry-run,
   JSON 报告；六条安全前提缺一拒绝——家族判据/归一化 sha384 指纹相等/SchemaReplay 一致/
-  版本集合一致/原子可逆/单二进制并发边界）；`--family lf` 保留为应急逃生口（A-025）。
+  版本集合 stored⊆embedded——待迁移常态放行并上报 pending_versions，库新于二进制整库拒绝
+  reason=db_ahead_unknown_versions（票 37）/原子可逆/单二进制并发边界）；`--family lf` 保留为应急逃生口（A-025）。
 - 禁止用法：auto 下启动隐式自动改写（「启动自动反向重写无公开先例」约束持续有效，#38528
   未合并佐证；xdifu/Flyway repair 均为显式命令）；未过六前提的回写；fork 与官方二进制并发
   开同一库；给篡改校验和的失败提供修复命令；给六迁移目录重新钉 eol=lf。

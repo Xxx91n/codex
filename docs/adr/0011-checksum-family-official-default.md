@@ -31,3 +31,17 @@
 ## 验证 Validation
 
 重放验证只认 CI：fork-health（platform-family-assert 双平台 + seam 套件含新增家族测试）与 fork-cli-test-release（digest 断言 + e2e 官方二进制共存演练）双绿 run 号见 .scratch/architecture-recovery/reports/35-checksum-family-official-default-report.md；本机零构建（CI-only 纪律）。
+
+## 更正条款（append-only 追加，2026-09-16，票 37 / A-030；原文不回溯编辑）
+
+决策 3 中「六前提门不变」与六前提之第 4 条「版本集合一致」表述，就 P4 予以更正。R1 副本先验现场取证（dual-cli 账本 D-009：state missing=[53,54,55]、memories missing=[2]）证明「库落后于二进制」（pending migrations）是迁移演进的常态：等式门使 fail-loud 指路的修复命令在真实 home 上拒执，形成 deadlock。
+
+更正为三态（与 codex-rs/state/src/fix_checksums.rs 的 P4 门注释及 docs/fork-checksum-family.md 六前提第 4 条逐字一致）：
+
+1. stored ⊂ embedded（pending migrations，常态）→ 放行恢复；JSON 报告每库新增 pending_version_count / pending_versions；pending 由恢复后的下一次正常启动按 sqlx 自身家族应用，与官方家族稳态收敛一致。（A-030）
+2. stored = embedded → 现行为零变化（回归保护，测试锚）。
+3. stored ⊃ embedded（库新于二进制：未知版本行无 embedded 镜像、归一化指纹不可证）→ 维持整库拒绝，新增精确 reason=db_ahead_unknown_versions 并列明未知版本号。
+
+其余五前提门（家族判据/归一化 sha384 指纹/schema 回放/原子可逆/并发边界）语义不变；schema 回放门的期望集随 recorded applied history 取子集（stored = embedded 态下与原行为逐字等价）。此不对称与上游 codex PR #16924（启动容忍库超前、已知版本 checksum 仍严校验）及 Flyway/Alembic/Atlas/xdifu repair 纪律一致：离线账本改写只向工具实际持有的迁移对齐。
+
+同票附带清理：app-server 以 `{err:#}` 渲染整条启动错误链，RuntimeDbInitError::Display 此前在自身行内嵌 source 导致 fail-loud 块（含全部 help 行）重复打印两次；更正为 alternate 形态只输出自身上下文行，help 文案恰出现一次（非 alternate Display 不变）。e2e 断言补 help 行唯一性 grep -c 检查。

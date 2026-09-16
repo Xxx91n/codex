@@ -95,6 +95,13 @@ async fn state_checksum_family_fix_dry_run_reports_changes_without_touching() {
         flipped().as_str()
     );
     assert_eq!(state.detected_family.as_deref(), Some(embedded().as_str()));
+    // Tri-state matrix, stored = embedded arm (ticket 37 / A-030): a
+    // fully migrated database changes behavior not one bit.
+    assert_eq!(state.pending_version_count, 0);
+    assert!(
+        state.pending_versions.is_empty(),
+        "a fully migrated database has no pending versions"
+    );
 
     let verify = build_pool(&sqlite).await;
     let stored: Vec<u8> =
@@ -185,8 +192,10 @@ async fn state_checksum_family_fix_rejects_true_drift() {
 
 #[tokio::test]
 async fn state_checksum_family_fix_rejects_unknown_migration() {
-    // Precondition 1: an applied row whose version is not in the embedded
-    // set is unknown to this binary; refuse.
+    // Tri-state matrix, stored is a strict superset (ticket 37 / A-030):
+    // a row whose version is unknown to this binary has no embedded mirror,
+    // so no line-ending fingerprint can be proven and the whole database
+    // is refused with the precise reason naming every unknown version.
     let sqlite_home = unique_temp_dir();
     tokio::fs::create_dir_all(&sqlite_home).await.expect("home");
     let _cleanup = scopeguard::guard(sqlite_home.clone(), |p| {
@@ -222,8 +231,12 @@ async fn state_checksum_family_fix_rejects_unknown_migration() {
     assert_eq!(state.status, FixStatus::Rejected);
     let reason = state.reason.as_deref().unwrap_or_default();
     assert!(
-        reason.contains("unknown_migration_version_9999"),
+        reason.contains("db_ahead_unknown_versions"),
         "reason was: {reason}"
+    );
+    assert!(
+        reason.contains("unknown=[9999]"),
+        "the rejection must list the unknown versions; reason was: {reason}"
     );
     assert!(!report.applied);
 }
@@ -261,8 +274,12 @@ async fn state_checksum_family_fix_rejects_schema_mismatch() {
 }
 
 #[tokio::test]
-async fn state_checksum_family_fix_rejects_version_set_mismatch() {
-    // Precondition 4: version set match.
+async fn state_checksum_family_fix_allows_pending_migrations_and_reports_them() {
+    // Tri-state matrix, stored is a proper subset (ticket 37 / A-030): a
+    // database behind this binary carries pending migrations - the normal
+    // upgrade state and the R1 deadlock case (state missing=[53,54,55],
+    // memories missing=[2]). The flip must restore it instead of refusing,
+    // and the JSON entry must carry the pending count and list.
     let sqlite_home = unique_temp_dir();
     tokio::fs::create_dir_all(&sqlite_home).await.expect("home");
     let _cleanup = scopeguard::guard(sqlite_home.clone(), |p| {
@@ -283,18 +300,170 @@ async fn state_checksum_family_fix_rejects_version_set_mismatch() {
 
     let report = fix_migration_checksum_families(&sqlite, flipped(), true)
         .await
-        .expect("validation returns a report");
+        .expect("a behind database must no longer be refused");
     let state = report
         .databases
         .iter()
         .find(|d| d.label == "state DB")
         .expect("state DB entry");
-    assert_eq!(state.status, FixStatus::Rejected);
-    let reason = state.reason.as_deref().unwrap_or_default();
-    assert!(
-        reason.contains("version_set_mismatch"),
-        "reason was: {reason}"
+    assert!(report.applied, "the behind-database flip must apply");
+    assert_eq!(state.status, FixStatus::Rewritten);
+    let expected_pending: Vec<i64> = STATE_MIGRATOR
+        .migrations
+        .iter()
+        .map(|m| m.version)
+        .filter(|v| *v > 5)
+        .collect();
+    assert!(!expected_pending.is_empty());
+    assert_eq!(state.pending_version_count, expected_pending.len());
+    assert_eq!(state.pending_versions, expected_pending);
+    let expected_applied = state.embedded_version_count - state.pending_version_count;
+    assert_eq!(state.applied_version_count, expected_applied);
+
+    // The flip rewrites checksums only: the pending versions stay
+    // unapplied until a normal startup absorbs them.
+    let verify = build_pool(&sqlite).await;
+    let row_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+        .fetch_one(&verify)
+        .await
+        .expect("count should load");
+    assert_eq!(row_count as usize, partial.migrations.len());
+    for migration in partial.migrations.iter() {
+        let stored: Vec<u8> =
+            sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = ?")
+                .bind(migration.version)
+                .fetch_one(&verify)
+                .await
+                .expect("row should load");
+        assert_eq!(stored, image(migration, flipped()));
+    }
+    verify.close().await;
+}
+
+#[tokio::test]
+async fn state_checksum_family_fix_absorbs_pending_migrations_after_restore() {
+    // Ticket 37 acceptance (replays the R1 field shape): a filtered
+    // migrator builds the stored = first-k database, the restore lands it
+    // in the target family, and the next normal startup absorbs the
+    // pending versions - the row count reaches the full embedded set and
+    // every newly added row carries the target family's image.
+    let sqlite_home = unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home).await.expect("home");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |p| {
+        let _ = std::fs::remove_dir_all(p);
+    });
+    let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let keep = STATE_MIGRATOR.migrations.len() - 3;
+    let expected_pending: Vec<i64> = STATE_MIGRATOR
+        .migrations
+        .iter()
+        .skip(keep)
+        .map(|m| m.version)
+        .collect();
+    let pool = build_pool(&sqlite).await;
+    let behind = Migrator::with_migrations(
+        STATE_MIGRATOR
+            .migrations
+            .iter()
+            .take(keep)
+            .cloned()
+            .collect(),
     );
+    behind.run(&pool).await.expect("behind migrations should apply");
+    // Drag the existing rows into the other family the way the legacy LF
+    // lock did; the R1 database looked exactly like this.
+    for migration in behind.migrations.iter() {
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
+            .bind(image(migration, flipped()).as_slice())
+            .bind(migration.version)
+            .execute(&pool)
+            .await
+            .expect("flip stamp should apply");
+    }
+    pool.close().await;
+
+    let report = fix_migration_checksum_families(&sqlite, embedded(), true)
+        .await
+        .expect("the pending-migrations restore must be allowed");
+    assert!(
+        report.applied,
+        "restoring a behind database must not deadlock"
+    );
+    let state = report
+        .databases
+        .iter()
+        .find(|d| d.label == "state DB")
+        .expect("state DB entry");
+    assert_eq!(state.status, FixStatus::Rewritten);
+    assert_eq!(state.applied_version_count, keep);
+    assert_eq!(state.pending_version_count, expected_pending.len());
+    assert_eq!(state.pending_versions, expected_pending);
+
+    // Startup applies the pending versions like the app-server does and
+    // stamps them in this binary's (target) family.
+    let verify = build_pool(&sqlite).await;
+    STATE_MIGRATOR
+        .run(&verify)
+        .await
+        .expect("startup must absorb the pending migrations");
+    let row_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+        .fetch_one(&verify)
+        .await
+        .expect("count should load");
+    assert_eq!(row_count as usize, STATE_MIGRATOR.migrations.len());
+    for migration in STATE_MIGRATOR.migrations.iter() {
+        let stored: Vec<u8> =
+            sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = ?")
+                .bind(migration.version)
+                .fetch_one(&verify)
+                .await
+                .expect("row should load");
+        assert_eq!(
+            stored,
+            image(migration, embedded()),
+            "version {} must carry the target image after absorption",
+            migration.version
+        );
+    }
+    verify.close().await;
+}
+
+#[tokio::test]
+async fn state_checksum_family_fail_loud_guidance_prints_once_in_the_chain() {
+    // Ticket 37 help-line cleanup: the app-server renders the startup
+    // error with {:#}, which prints the whole anyhow chain. The wrapper
+    // Display used to embed the source in its own line as well,
+    // duplicating every help: line of the guidance block; the fail-loud
+    // text must appear exactly once in both renderings.
+    let sqlite_home = unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home).await.expect("home");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |p| {
+        let _ = std::fs::remove_dir_all(p);
+    });
+    let sqlite = SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let _pool = open_state_db_flipped_stamped(&sqlite).await;
+
+    let err = crate::runtime::StateRuntime::init(sqlite, "test".to_string())
+        .await
+        .map(|_| ())
+        .expect_err("auto must fail loud on family drift");
+    let command = format!(
+        "codex state fix-checksums --family {} --apply",
+        embedded().as_str()
+    );
+    let chain = format!("{err:#}");
+    assert_eq!(
+        chain.matches("help:").count(),
+        3,
+        "each help line must appear exactly once; chain was: {chain}"
+    );
+    assert_eq!(
+        chain.matches(command.as_str()).count(),
+        1,
+        "the repair command must appear exactly once; chain was: {chain}"
+    );
+    assert_eq!(err.to_string().matches(command.as_str()).count(), 1);
+    assert!(chain.contains("checksum family mismatch"));
 }
 
 #[tokio::test]
