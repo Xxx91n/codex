@@ -97,3 +97,6 @@ __pycache__/
 
 # Codegraph local index (agent exploration, not source)
 .codegraph/
+
+# Scratch working area (workspace-level, outside this repo; defense-in-depth)
+.scratch/

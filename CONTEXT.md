@@ -10,23 +10,11 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
 
 ## 如何读本仓库（导航）
 
-按序读到能干活为止；层间只指路不复述（link, don't copy）：
+入口链（只指路不复述）：`README.md`「Fork documentation map」→ 根 `AGENTS.md`
+「Fork delta: tri-wire-api」→ `docs/adr/`（索引 `docs/adr/README.md`，append-only，
+新裁决递增编号）→ 嵌套 `codex-rs/AGENTS.md` → `core/src/client/wire/AGENTS.md`。
+版本控制 = GitButler；upstream 同步 merge 不 rebase（ADR-0001）。
 
-1. `README.md` — 人类入口：三 wire 用法与 fork 心智模型；其「Fork documentation
-   map」一节是本导航链的根。
-2. `AGENTS.md` — 代理约束总入口；「Fork delta: tri-wire-api」段是 fork 红线
-   （三注册点 / 构建 / 同步）。
-3. `docs/adr/` — append-only 决策记录（索引：`docs/adr/README.md`）：0001 基线与
-   同步、0002 merge rulings、0003 Gemini 裁决、0004 reasoning_content 透传、
-   0005 reasoning_effort 翻译、0006 语义补丁队列、0007 1.0 预案、0008 chat wire
-   保真、0009 thinking 条件回传、0010 2026-09-12 merge 裁决、0011 checksum 家族
-   回归官方默认；新裁决递增编号，新词随其 ADR 入本表。
-4. 嵌套 AGENTS 链（就近优先）：`codex-rs/AGENTS.md`（Rust workspace 纪律）→
-   `core/src/client/wire/AGENTS.md`（per-wire 协议红线）。
-5. `.github/workflows/fork-health.yml` — 每日 fork seam 看门狗（seam crates
-   clippy + wiremock 三件套 + drift probe）；构建/测试只跑 CI，本地零构建。
-6. 版本控制 = GitButler（每票一个 lane）；upstream 同步 merge 不 rebase
-   （ADR-0001）。
 
 ## 核心词汇
 
@@ -224,7 +212,5 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
 
 ## 维护
 
-- 变更随其 ADR 入仓（ADR 先于本表）；新 wire/概念先登记再实现。
-- 票 09 fixture / 票 10 ReasoningPart 命名以本表为准。
-- 每次 upstream merge 后 grep 词条与 docs/adr/ 校验一致性。
-- 每次 upstream merge 后刷新 FORK_DIVERGENCE.md 清单（adapt 重放刷新日期、新分歧先登记），per ADR-0006 决策 3。
+- 变更随其 ADR 入仓（ADR 先于本表）；新词随其 ADR 入表。
+- merge 流程与台账刷新纪律唯一权威：`docs/fork-divergence/README.md`（同步纪律节）。
