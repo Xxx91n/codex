@@ -210,6 +210,13 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
   未过六前提的回写；fork 与官方二进制并发开同一库。源：D-015；docs/fork-checksum-family.md；
   xdifu codex-repair 对齐（官方 #23863 同族事故）。
 
+### 发行分支（tri/vX.Y.Z）
+- 本仓用法：fork 对某个上游稳定版的完整发行线，从该 tag 提交切出，承载 fork 改动。
+- 禁止用法：从 upstream/main 切发行分支；把发行分支称为 release。
+
+### 发行标签（tri-vX.Y.Z-tri.N）
+- 本仓用法：发行分支上的版本标记，N 从 1 起递增不复用；用 prerelease 形式，不用 build metadata。
+- 禁止用法：使用 rust-v 前缀（会触发上游发布流程）。
 ## 维护
 
 - 变更随其 ADR 入仓（ADR 先于本表）；新词随其 ADR 入表。
