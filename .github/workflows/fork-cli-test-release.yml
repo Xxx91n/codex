@@ -21,17 +21,17 @@ jobs:
         id: t1
         continue-on-error: true
         shell: bash
-        run: cargo test --locked --no-fail-fast --lib -p codex-api files
+        run: cargo test --no-fail-fast --lib -p codex-api files
       - name: codex-core exec full-buffer capture
         id: t2
         continue-on-error: true
         shell: bash
-        run: cargo test --locked --no-fail-fast --lib -p codex-core full_buffer_capture
+        run: cargo test --no-fail-fast --lib -p codex-core full_buffer_capture
       - name: codex-core managed_network_proxy
         id: t3
         continue-on-error: true
         shell: bash
-        run: cargo test --locked --no-fail-fast --lib -p codex-core managed_network_proxy
+        run: cargo test --no-fail-fast --lib -p codex-core managed_network_proxy
       - name: Outcome summary
         shell: bash
         run: |
