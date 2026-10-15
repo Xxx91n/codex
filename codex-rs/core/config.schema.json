@@ -2645,6 +2645,14 @@
       ],
       "description": "Selected microphone inputs. Scalars preserve existing single-channel configuration."
     },
+    "MigrationChecksumFamily": {
+      "enum": [
+        "auto",
+        "lf",
+        "crlf"
+      ],
+      "type": "string"
+    },
     "ModelAvailabilityNuxConfig": {
       "additionalProperties": {
         "format": "uint32",
@@ -7946,14 +7954,6 @@
       ],
       "description": "User-level skill config entries keyed by SKILL.md path."
     },
-    "state": {
-      "allOf": [
-        {
-          "$ref": "#/definitions/StateDbSettingsToml"
-        }
-      ],
-      "description": "Local state database settings (fork-only; ticket 31). Controls the _sqlx_migrations checksum family maintenance. Defaults to auto: follow the family this binary embeds (the official platform family); mismatches fail loud with the repair command and nothing is rewritten automatically."
-    },
     "sqlite_home": {
       "allOf": [
         {
@@ -7961,6 +7961,14 @@
         }
       ],
       "description": "Directory where Codex stores the SQLite state DB. Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_HOME`."
+    },
+    "state": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/StateDbSettingsToml"
+        }
+      ],
+      "description": "Local state database settings (fork-only; ticket 31). Controls the _sqlx_migrations checksum family maintenance. Defaults to auto: follow the family this binary embeds (the official platform family); mismatches fail loud with the repair command and nothing is rewritten automatically."
     },
     "suppress_unstable_features_warning": {
       "description": "Suppress warnings about unstable (under development) features.",
