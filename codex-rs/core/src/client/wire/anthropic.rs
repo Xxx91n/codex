@@ -27,6 +27,7 @@ use tracing::warn;
 use super::content_items_to_text;
 use crate::client::ANTHROPIC_MESSAGES_ENDPOINT;
 use crate::client::AuthRequestTelemetryContext;
+use crate::client::ClientRouting;
 use crate::client::DEFAULT_ANTHROPIC_MAX_TOKENS;
 use crate::client::ModelClientSession;
 use crate::client::PendingUnauthorizedRetry;
@@ -158,10 +159,15 @@ impl ModelClientSession {
         // 400s on the thinking replay itself (thinking_400_recovery_class).
         let mut thinking_degraded = false;
         loop {
-            let client_setup = self.client.current_client_setup().await?;
-            let transport = self
+            let client_setup = self
                 .client
-                .build_api_transport(&client_setup.api_provider, ANTHROPIC_MESSAGES_ENDPOINT)?;
+                .current_client_setup(ClientRouting::Workspace)
+                .await?;
+            let transport = self.client.build_api_transport(
+                &client_setup.api_provider,
+                ANTHROPIC_MESSAGES_ENDPOINT,
+                client_setup.redirect_policy,
+            )?;
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
@@ -203,6 +209,13 @@ impl ModelClientSession {
             inference_trace_attempt.add_request_headers(&mut options.extra_headers);
             inference_trace_attempt.record_started(&request);
 
+            let interceptors = crate::model_request::prepare(
+                &self.client.request_contributors,
+                &self.client.state.thread_id.to_string(),
+                &model_info.slug,
+                codex_extension_api::ModelRequestKind::Generation,
+                &mut None,
+            );
             match client.stream_request(request, options).await {
                 Ok(stream) => {
                     let (stream, _) = map_response_stream(
@@ -210,6 +223,7 @@ impl ModelClientSession {
                         session_telemetry.clone(),
                         inference_trace_attempt,
                         Arc::clone(&self.client.state.provider),
+                        interceptors,
                     );
                     return Ok(stream);
                 }
@@ -714,7 +728,11 @@ fn content_items_to_image_blocks(
 ) -> Vec<serde_json::Value> {
     let mut blocks = Vec::new();
     for item in content {
-        let codex_protocol::models::ContentItem::InputImage { image_url, .. } = item else {
+        let codex_protocol::models::ContentItem::InputImage { image, .. } = item else {
+            continue;
+        };
+        let codex_protocol::models::ImageReference::Inline { image_url } = image else {
+            debug!("anthropic replay: file-id image dropped");
             continue;
         };
         let Some(rest) = image_url.strip_prefix("data:") else {

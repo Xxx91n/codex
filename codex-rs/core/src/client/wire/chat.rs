@@ -23,6 +23,7 @@ use serde_json::json;
 use super::content_items_to_text;
 use crate::client::AuthRequestTelemetryContext;
 use crate::client::CHAT_COMPLETIONS_ENDPOINT;
+use crate::client::ClientRouting;
 use crate::client::ModelClientSession;
 use crate::client::PendingUnauthorizedRetry;
 use crate::client::RequestRouteTelemetry;
@@ -55,10 +56,15 @@ impl ModelClientSession {
         let mut provider_auth_recovery_attempted = false;
         let mut pending_retry = PendingUnauthorizedRetry::default();
         loop {
-            let client_setup = self.client.current_client_setup().await?;
-            let transport = self
+            let client_setup = self
                 .client
-                .build_api_transport(&client_setup.api_provider, CHAT_COMPLETIONS_ENDPOINT)?;
+                .current_client_setup(ClientRouting::Workspace)
+                .await?;
+            let transport = self.client.build_api_transport(
+                &client_setup.api_provider,
+                CHAT_COMPLETIONS_ENDPOINT,
+                client_setup.redirect_policy,
+            )?;
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
@@ -98,6 +104,13 @@ impl ModelClientSession {
             inference_trace_attempt.add_request_headers(&mut options.extra_headers);
             inference_trace_attempt.record_started(&request);
 
+            let interceptors = crate::model_request::prepare(
+                &self.client.request_contributors,
+                &self.client.state.thread_id.to_string(),
+                &model_info.slug,
+                codex_extension_api::ModelRequestKind::Generation,
+                &mut None,
+            );
             match client.stream_request(request, options).await {
                 Ok(stream) => {
                     let (stream, _) = map_response_stream(
@@ -105,6 +118,7 @@ impl ModelClientSession {
                         session_telemetry.clone(),
                         inference_trace_attempt,
                         Arc::clone(&self.client.state.provider),
+                        interceptors,
                     );
                     return Ok(stream);
                 }
