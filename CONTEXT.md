@@ -228,6 +228,11 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
 - 禁止用法：伪造成功结果；按工具名定制文案。
 - 源：ADR-0013；spec S-06。
 
+### pending IR 快照
+- 本仓用法：preempt 关流时 chat/messages 入站状态机交回的"仍在大块中"的 IR（未收尾文字段、缓冲的 tool call / tool_use、未闭合 thinking 块），交同文件的 `reconcile_preempted` 决定去留。
+- 禁止用法：在状态机里判定取舍或修补字节（补签名、造参数对象）；把它当作已收完成事件的条目重复入史。
+- 源：ADR-0013；spec S-03、S-08、S-10、S-11。
+
 ### 中断标记
 - 本仓用法：写入历史的模型可见中断提示，写入与否由 `agent_interrupt_message_enabled` 控制。
 - 禁止用法：以它替代合成 tool result；开关关闭时仍写入。
