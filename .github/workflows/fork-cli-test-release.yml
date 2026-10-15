@@ -27,10 +27,12 @@ jobs:
         continue-on-error: true
         shell: bash
         run: cargo test --no-fail-fast --lib -p codex-core full_buffer_capture
-      - name: codex-core managed_network_proxy
+      - name: codex-core managed_network_proxy (RUST_MIN_STACK as in just test)
         id: t3
         continue-on-error: true
         shell: bash
+        env:
+          RUST_MIN_STACK: "8388608"
         run: cargo test --no-fail-fast --lib -p codex-core managed_network_proxy
       - name: Outcome summary
         shell: bash
