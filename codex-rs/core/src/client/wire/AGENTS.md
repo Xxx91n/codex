@@ -28,12 +28,15 @@ non-Responses wires on one internal representation (`ResponseItem`).
 
 ## File map
 
-- `mod.rs` — module docs + shared helpers (`content_items_to_text`).
+- `mod.rs` — module docs + shared helpers (`content_items_to_text`, the
+  preemption seam: `reconcile_preempted` dispatch, `PREEMPTED_TOOL_CALL_RESULT`,
+  `preempted_tool_call_result`).
 - `chat.rs` — `stream_chat_completions`, `build_chat_request`,
-  `build_chat_messages`, `map_chat_role`.
+  `build_chat_messages`, `map_chat_role`, `reconcile_preempted`.
 - `anthropic.rs` — `stream_anthropic_messages`, `build_messages_request`,
   `build_messages_messages`, `anthropic_tool_use_block`,
-  `push_anthropic_tool_result`, `content_items_to_image_blocks`.
+  `push_anthropic_tool_result`, `push_anthropic_user_blocks`,
+  `content_items_to_image_blocks`, `reconcile_preempted`.
 - `reasoning_effort.rs` — pure effort→wire-parameter translation:
   `chat_reasoning_effort`, `budget_tokens_for_effort`, `adaptive_effort_value`,
   `clamp_thinking_budget`, `anthropic_thinking_from_effort` (ticket 11).

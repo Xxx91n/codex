@@ -25,6 +25,7 @@ use tracing::debug;
 use tracing::warn;
 
 use super::content_items_to_text;
+use super::preempted_tool_call_result;
 use crate::client::ANTHROPIC_MESSAGES_ENDPOINT;
 use crate::client::AuthRequestTelemetryContext;
 use crate::client::ClientRouting;
@@ -521,10 +522,7 @@ pub(crate) fn build_messages_messages(
                         blocks.push(json!({"type": "text", "text": text}));
                     }
                     blocks.extend(image_blocks);
-                    messages.push(json!({
-                        "role": "user",
-                        "content": blocks,
-                    }));
+                    push_anthropic_user_blocks(&mut messages, blocks);
                 }
             }
             // Defect ① (ticket 27 / A-002): a redacted_thinking block
@@ -719,6 +717,28 @@ fn push_anthropic_tool_result(messages: &mut Vec<serde_json::Value>, call_id: &s
     }));
 }
 
+/// Coalesces consecutive non-assistant items into the user message already at
+/// the end of the list, the same alternation duty [`push_anthropic_tool_result`]
+/// serves: the Messages API rejects two consecutive user messages, and a
+/// reconciled preemption legitimately leaves a tool result, the interrupt marker
+/// and the new user message adjacent (spec S-04).
+fn push_anthropic_user_blocks(
+    messages: &mut Vec<serde_json::Value>,
+    blocks: Vec<serde_json::Value>,
+) {
+    if let Some(last) = messages.last_mut()
+        && last["role"] == "user"
+        && let Some(content) = last["content"].as_array_mut()
+    {
+        content.extend(blocks);
+        return;
+    }
+    messages.push(json!({
+        "role": "user",
+        "content": blocks,
+    }));
+}
+
 /// Converts Responses `input_image` content items to Anthropic
 /// `image` blocks. Only base64 data-URIs are accepted — the Messages API
 /// has no URL-fetch variant, so plain http(s) URLs degrade to being dropped
@@ -817,3 +837,78 @@ fn thinking_400_text(err: &ApiError) -> Option<&str> {
         _ => None,
     }
 }
+
+/// Reconciles the blocks the Messages stream still held in flight when the user
+/// preempted it into the set that may enter history (spec S-03, S-04, S-06,
+/// S-08, S-10).
+///
+/// Same pairing rule as the chat wire — a tool_use whose `input_json_delta`
+/// arrived whole is kept and paired with the synthetic "never ran" result, a
+/// truncated one is dropped whole, received text is kept — plus the thinking
+/// family rule this wire owns: an unsigned block was cut off inside the block,
+/// so it goes, and a signature is never fabricated to save it (wire red lines 3
+/// and 4, ADR-0009 G1).
+pub(crate) fn reconcile_preempted(pending: Vec<ResponseItem>) -> Vec<ResponseItem> {
+    let mut retained = Vec::new();
+    for item in pending {
+        match &item {
+            ResponseItem::FunctionCall {
+                call_id, arguments, ..
+            } => {
+                if serde_json::from_str::<serde_json::Value>(arguments).is_ok() {
+                    let result = preempted_tool_call_result(call_id);
+                    retained.push(item);
+                    retained.push(result);
+                    continue;
+                }
+                debug!("messages preemption: dropping truncated tool_use {call_id}");
+            }
+            ResponseItem::Message { role, content, .. } => {
+                if role.as_str() == "assistant" && content_items_to_text(content).is_some() {
+                    retained.push(item);
+                }
+            }
+            ResponseItem::Reasoning {
+                content,
+                encrypted_content,
+                ..
+            } => {
+                if thinking_block_reached_completion(content.as_ref(), encrypted_content.as_deref())
+                {
+                    retained.push(item);
+                } else {
+                    debug!("messages preemption: dropping unfinished thinking block");
+                }
+            }
+            _ => {}
+        }
+    }
+    retained
+}
+
+/// Decides whether a block that never reached `content_block_stop` is still
+/// faithful enough to replay.
+///
+/// `signature_delta` closes a thinking block's text, so a signed pending block
+/// is text-complete and replays verbatim; an unsigned one was cut off mid-block
+/// and has no signature to send back. A `redacted_thinking` block round-trips
+/// only when both its opaque payload and its signature arrived, because the
+/// outbound half rebuilds the native block from the fork-internal
+/// `data\0signature` encoding and a half-delivered pair is not the block the
+/// server sent.
+fn thinking_block_reached_completion(
+    content: Option<&Vec<ReasoningItemContent>>,
+    encrypted_content: Option<&str>,
+) -> bool {
+    match (content, encrypted_content) {
+        (Some(_), Some(signature)) => !signature.is_empty(),
+        (None, Some(combined)) => combined
+            .split_once('\0')
+            .is_some_and(|(data, signature)| !data.is_empty() && !signature.is_empty()),
+        (Some(_), None) | (None, None) => false,
+    }
+}
+
+#[cfg(test)]
+#[path = "anthropic_tests.rs"]
+mod tests;

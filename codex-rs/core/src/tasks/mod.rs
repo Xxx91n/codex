@@ -102,15 +102,40 @@ impl InterruptedTurnHistoryMarker {
 pub(crate) fn interrupted_turn_history_marker(
     marker: InterruptedTurnHistoryMarker,
 ) -> Option<ResponseItem> {
+    turn_history_marker(
+        marker,
+        crate::context::TurnAborted::INTERRUPTED_GUIDANCE,
+        crate::context::TurnAborted::INTERRUPTED_DEVELOPER_GUIDANCE,
+    )
+}
+
+/// Marker for a Chat/Messages stream preempted by a new user message
+/// (spec S-02, S-05, S-07). It reuses the same switch and the same rendering as
+/// the user-initiated interrupt and differs only in the sentence: a preemption
+/// is not the user cancelling the turn, and no tool may be described as having
+/// partially run.
+pub(crate) fn preempted_turn_history_marker(
+    marker: InterruptedTurnHistoryMarker,
+) -> Option<ResponseItem> {
+    turn_history_marker(
+        marker,
+        crate::context::TurnAborted::PREEMPTED_GUIDANCE,
+        crate::context::TurnAborted::PREEMPTED_GUIDANCE,
+    )
+}
+
+fn turn_history_marker(
+    marker: InterruptedTurnHistoryMarker,
+    user_guidance: &'static str,
+    developer_guidance: &'static str,
+) -> Option<ResponseItem> {
     match marker {
         InterruptedTurnHistoryMarker::Disabled => None,
         InterruptedTurnHistoryMarker::ContextualUser => Some(ContextualUserFragment::into(
-            crate::context::TurnAborted::new(crate::context::TurnAborted::INTERRUPTED_GUIDANCE),
+            crate::context::TurnAborted::new(user_guidance),
         )),
         InterruptedTurnHistoryMarker::Developer => {
-            let marker = crate::context::TurnAborted::new(
-                crate::context::TurnAborted::INTERRUPTED_DEVELOPER_GUIDANCE,
-            );
+            let marker = crate::context::TurnAborted::new(developer_guidance);
             let (_, content) = marker.render_fragment().into_parts();
             Some(RenderedFragment::new("developer", content).into())
         }

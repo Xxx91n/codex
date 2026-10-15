@@ -19,8 +19,10 @@ use codex_response_debug_context::extract_response_debug_context_from_api_error;
 use codex_rollout_trace::InferenceTraceContext;
 use codex_tools::create_tools_json_for_chat_completions;
 use serde_json::json;
+use tracing::debug;
 
 use super::content_items_to_text;
+use super::preempted_tool_call_result;
 use crate::client::AuthRequestTelemetryContext;
 use crate::client::CHAT_COMPLETIONS_ENDPOINT;
 use crate::client::ClientRouting;
@@ -402,3 +404,57 @@ pub(crate) fn map_chat_role(role: &str) -> &str {
         _ => "user",
     }
 }
+
+/// Reconciles the items the chat stream still held in flight when the user
+/// preempted it into the set that may enter history (spec S-03, S-04, S-06,
+/// S-08, S-11).
+///
+/// Text that was received is kept as received; the interrupt marker tells the
+/// model the last segment may be incomplete. A tool call whose argument JSON
+/// arrived whole is kept and paired with the synthetic "never ran" result,
+/// because an unpaired call makes every later replay a 400; a call cut
+/// mid-JSON is dropped whole, since a fabricated argument object would corrupt
+/// the agent loop. An open `reasoning_content` segment is dropped: chat has no
+/// block boundary to prove it finished, and nothing may be sent back as if it
+/// were complete.
+pub(crate) fn reconcile_preempted(pending: Vec<ResponseItem>) -> Vec<ResponseItem> {
+    let mut retained = Vec::new();
+    for item in pending {
+        match &item {
+            ResponseItem::FunctionCall {
+                call_id, arguments, ..
+            } => {
+                if chat_arguments_reached_completion(arguments) {
+                    let result = preempted_tool_call_result(call_id);
+                    retained.push(item);
+                    retained.push(result);
+                    continue;
+                }
+                debug!("chat preemption: dropping truncated tool call {call_id}");
+            }
+            ResponseItem::Message { role, content, .. } => {
+                if role.as_str() == "assistant" && content_items_to_text(content).is_some() {
+                    retained.push(item);
+                }
+            }
+            ResponseItem::Reasoning { .. } => {
+                debug!("chat preemption: dropping unfinished reasoning_content");
+            }
+            _ => {}
+        }
+    }
+    retained
+}
+
+/// Chat Completions sends the argument JSON in pieces with no per-call end
+/// marker, so parseability is the only completeness oracle available. An empty
+/// buffer is a call that never received arguments — the same shape a finished
+/// turn produces — while a non-empty buffer that fails to parse was cut off
+/// mid-JSON.
+fn chat_arguments_reached_completion(arguments: &str) -> bool {
+    arguments.is_empty() || serde_json::from_str::<serde_json::Value>(arguments).is_ok()
+}
+
+#[cfg(test)]
+#[path = "chat_tests.rs"]
+mod tests;

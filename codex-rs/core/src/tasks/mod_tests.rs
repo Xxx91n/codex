@@ -1,9 +1,12 @@
+use super::InterruptedTurnHistoryMarker;
 use super::SessionTask;
 use super::SessionTaskResult;
 use super::TASK_COMPACT_METRIC;
 use super::emit_compact_metric;
 use super::emit_turn_memory_metric;
 use super::emit_turn_network_proxy_metric;
+use super::interrupted_turn_history_marker;
+use super::preempted_turn_history_marker;
 use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::tests::make_session_and_context_with_rx;
@@ -19,6 +22,7 @@ use codex_otel::TURN_TOOL_CALL_METRIC;
 use codex_otel::TURN_UNIFIED_EXEC_RUNNING_PROCESSES_METRIC;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::TokenUsage;
 use opentelemetry::KeyValue;
@@ -491,5 +495,62 @@ fn emit_compact_metric_records_auto_local() {
             ("manual".to_string(), "false".to_string()),
             ("type".to_string(), "local".to_string()),
         ])
+    );
+}
+
+/// Spec S-05/S-09 at the marker seam: the switch gates the marker and nothing
+/// else, so with the switch off there is no marker to write at all.
+#[test]
+fn preempted_marker_writes_only_when_the_switch_enables_it() {
+    assert_eq!(
+        preempted_turn_history_marker(InterruptedTurnHistoryMarker::Disabled),
+        None
+    );
+    assert!(
+        preempted_turn_history_marker(InterruptedTurnHistoryMarker::ContextualUser).is_some(),
+        "an enabled switch must write the marker on every preemption"
+    );
+}
+
+/// Spec S-02/S-07: preemption carries its own sentence, never the one written
+/// for the user's Esc, and it may not claim a deliberate cancel or a partially
+/// executed tool.
+#[test]
+fn preempted_marker_renders_the_spec_sentence_and_not_the_esc_wording() {
+    // Quoted from docs/specs/chat-messages-preempt/README.md S-07 on purpose:
+    // `TurnAborted::PREEMPTED_GUIDANCE` is the thing under test, so asserting
+    // against it would only prove the constant equals itself.
+    const SPEC_SENTENCE: &str = "The previous response was interrupted by a new user message before it finished. Text that was fully received has been kept; the last text segment may be incomplete. Unfinished tool calls were not executed. Continue from the new user message.";
+
+    let contextual = preempted_turn_history_marker(InterruptedTurnHistoryMarker::ContextualUser)
+        .expect("contextual-user preempt marker must be enabled");
+    let developer = preempted_turn_history_marker(InterruptedTurnHistoryMarker::Developer)
+        .expect("developer preempt marker must be enabled");
+
+    for (marker, role) in [(&contextual, "user"), (&developer, "developer")] {
+        let ResponseItem::Message { role: actual, .. } = marker else {
+            panic!("the preempt marker must reach the model as a message item");
+        };
+        assert_eq!(actual.as_str(), role);
+        let rendered = serde_json::to_string(marker).expect("serialize marker");
+        assert!(
+            rendered.contains(SPEC_SENTENCE),
+            "the spec sentence must be verbatim: {rendered}"
+        );
+        assert!(
+            !rendered.contains("on purpose"),
+            "a preemption is not the user cancelling the turn: {rendered}"
+        );
+        assert!(
+            !rendered.contains("partially executed"),
+            "an interrupted call never partially executed: {rendered}"
+        );
+    }
+
+    assert_ne!(
+        contextual,
+        interrupted_turn_history_marker(InterruptedTurnHistoryMarker::ContextualUser)
+            .expect("the Esc marker stays available"),
+        "preemption must not inherit the wording written for the user's Esc"
     );
 }

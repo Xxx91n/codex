@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use crate::client::ModelClientSession;
+use crate::client::reconcile_preempted;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::compact::run_inline_auto_compact_task;
@@ -49,7 +50,9 @@ use crate::stream_events_utils::last_assistant_message_from_item;
 use crate::stream_events_utils::mark_thread_memory_mode_polluted_if_external_context;
 use crate::stream_events_utils::raw_assistant_output_text_from_item;
 use crate::stream_events_utils::record_completed_response_item_with_finalized_facts;
+use crate::tasks::InterruptedTurnHistoryMarker;
 use crate::tasks::emit_compact_metric;
+use crate::tasks::preempted_turn_history_marker;
 use crate::tools::ToolRouter;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::parallel::ToolCallRuntime;
@@ -2642,7 +2645,51 @@ async fn try_run_sampling_request(
                     needs_follow_up = true;
                     continue;
                 }
-                // TODO: Reconcile any response item already being presented to the client.
+                if let Some(preempt_handle) = stream.preempt.take() {
+                    // Chat and Messages have no interrupt frame: close the HTTP read
+                    // now instead of draining it, then reconcile what was already
+                    // received so the next request replays a legal turn (ADR-0013).
+                    let pending = preempt_handle.preempt().await;
+                    let mut retained = Vec::new();
+                    // Events the wire had already handed over but this loop had not
+                    // processed. On these two wires only reasoning blocks reach the
+                    // consumer before the terminal frame — calls and text are emitted
+                    // at completion — so nothing buffered here can be an unpaired tool
+                    // call, and none of it was dispatched, which is why the reconciler
+                    // does not need to run over it.
+                    while let Some(event) = stream.next().await {
+                        match event {
+                            Ok(ResponseEvent::OutputItemDone(item)) => retained.push(item),
+                            Ok(_) => {}
+                            Err(_) => break,
+                        }
+                    }
+                    drop(stream);
+                    retained.extend(reconcile_preempted(
+                        turn_context.provider.info().wire_api,
+                        pending,
+                    ));
+                    if let Some(marker) = preempted_turn_history_marker(
+                        InterruptedTurnHistoryMarker::from_config_and_version(
+                            turn_context.config.as_ref(),
+                            turn_context.multi_agent_version,
+                        ),
+                    ) {
+                        retained.push(marker);
+                    }
+                    sess.record_conversation_items(
+                        &turn_context,
+                        &step_context.settings.model_info,
+                        &retained,
+                    )
+                    .await;
+                    break Ok(SamplingRequestResult {
+                        needs_follow_up: true,
+                        last_agent_message,
+                    });
+                }
+                // Responses SSE asks for nothing here: the reconcile seam exists
+                // only for the Chat and Messages wires (spec N-02).
                 drop(stream);
                 break Ok(SamplingRequestResult {
                     needs_follow_up: true,
