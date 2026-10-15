@@ -188,7 +188,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: codex-rs
-          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feat/tri-wire-api' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/tri-wire-api' }}
       - name: Check formatting
         shell: bash
         run: cargo fmt -- --config imports_granularity=Item --check
@@ -445,7 +445,7 @@ jobs:
           #     (--draft=false also heals an orphan draft left by the legacy GC
           #     symptom; prerelease kept; title/notes refreshed). Only a missing
           #     release is created.
-          notes="Test build of the tri-wire fork CLI (feat/tri-wire-api). Windows x86_64 / Linux x86_64 / macOS aarch64 (Apple Silicon). Unsigned. Report issues in this repo. ROLLING TAG: this prerelease tag is force-moved by every green full run - always download from releases/download/tri-wire-test/<asset>; do not pin a commit SHA or the release id. Family change (ticket 35): migration checksums follow the official platform family again (Windows=CRLF). If a startup reports a checksum family mismatch, run codex state fix-checksums --family crlf --apply once; runbook: docs/fork-checksum-family.md"
+          notes="Test build of the tri-wire fork CLI (tri-wire-api). Windows x86_64 / Linux x86_64 / macOS aarch64 (Apple Silicon). Unsigned. Report issues in this repo. ROLLING TAG: this prerelease tag is force-moved by every green full run - always download from releases/download/tri-wire-test/<asset>; do not pin a commit SHA or the release id. Family change (ticket 35): migration checksums follow the official platform family again (Windows=CRLF). If a startup reports a checksum family mismatch, run codex state fix-checksums --family crlf --apply once; runbook: docs/fork-checksum-family.md"
           if gh api "repos/${{ github.repository }}/releases/tags/$tag" >/dev/null 2>&1; then
             echo "release $tag exists - healing in place"
             gh release edit "$tag" --repo "${{ github.repository }}" --draft=false --prerelease --title "$title" --notes "$notes"
