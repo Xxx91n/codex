@@ -205,6 +205,28 @@ jobs:
         shell: bash
         run: cargo test --locked --lib -p codex-api -p codex-model-provider-info
 
+  config-schema:
+    # Pilot-only: regenerate codex-rs/core/config.schema.json (upstream copy
+    # is stale against the fork ModelProviderInfo fields) and upload it so the
+    # regenerated file can be committed back. Not part of the release path.
+    if: ${{ contains(inputs.platforms, 'windows') || inputs.platforms == 'all' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: codex-rs
+      - name: Regenerate config schema
+        run: cargo run --locked -p codex-config-schema --bin codex-write-config-schema
+      - uses: actions/upload-artifact@v4
+        with:
+          name: config-schema
+          path: codex-rs/core/config.schema.json
+
   e2e-official-coexistence:
     # Ticket 35 (A-024): the family wall must not silently return. Full
     # restore drill on a throwaway CODEX_HOME (real user homes untouched;
