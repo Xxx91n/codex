@@ -194,6 +194,11 @@ fn amazon_bedrock_test_codex() -> TestCodexBuilder {
         .with_model(AMAZON_BEDROCK_GPT_5_5_MODEL_ID)
         .with_config(|config| {
             config.model_provider = ModelProviderInfo {
+                anthropic_max_tokens: None,
+
+                anthropic_thinking_budget: None,
+
+                anthropic_prompt_caching: None,
                 base_url: config.model_provider.base_url.clone(),
                 ..ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None)
             };

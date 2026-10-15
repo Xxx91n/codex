@@ -157,6 +157,8 @@ use codex_response_debug_context::extract_response_debug_context_from_api_error;
 use codex_response_debug_context::telemetry_api_error_message;
 use codex_response_debug_context::telemetry_transport_error_message;
 
+mod wire;
+
 pub const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
 pub const X_CODEX_INSTALLATION_ID_HEADER: &str = "x-codex-installation-id";
 pub const X_CODEX_ROUTING_HINT_HEADER: &str = "x-codex-routing-hint";
@@ -176,6 +178,15 @@ const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=20
 const X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER: &str =
     "x-openai-internal-codex-responses-lite";
 const REALTIME_CALLS_ENDPOINT: &str = "/realtime/calls";
+const CHAT_COMPLETIONS_ENDPOINT: &str = "/chat/completions";
+/// `/messages` is a streaming endpoint, so the idle timeout applies per event.
+const ANTHROPIC_MESSAGES_ENDPOINT: &str = "/messages";
+/// Built-in fallback budget used when neither the provider config nor the
+/// model-catalog metadata can tell us a max; the Messages API requires
+/// max_tokens on every request. Kept (not deleted) per ADR-0002 Ruling 1:
+/// ticket 29 demoted it from the fixed default to the last-resort fallback,
+/// and the wire warns when it applies (unknown/alias model, no metadata).
+const DEFAULT_ANTHROPIC_MAX_TOKENS: u32 = 8_192;
 const MEMORIES_SUMMARIZE_ENDPOINT: &str = "/memories/trace_summarize";
 #[cfg(test)]
 pub(crate) const WEBSOCKET_CONNECT_TIMEOUT: Duration =
@@ -2284,6 +2295,28 @@ impl ModelClientSession {
                 )
                 .await
             }
+            WireApi::Chat => {
+                self.stream_chat_completions(
+                    prompt,
+                    effort.clone(),
+                    model_info,
+                    session_telemetry,
+                    responses_metadata,
+                    inference_trace,
+                )
+                .await
+            }
+            WireApi::Anthropic => {
+                self.stream_anthropic_messages(
+                    prompt,
+                    effort.clone(),
+                    model_info,
+                    session_telemetry,
+                    responses_metadata,
+                    inference_trace,
+                )
+                .await
+            }
         }
     }
 
@@ -2903,6 +2936,16 @@ impl SseTelemetry for ApiTelemetry {
     ) {
         self.session_telemetry.log_sse_event(result, duration);
     }
+
+    /// Ticket 29 / A-007 step 0: forward the terminal `stop_reason` the
+    /// Anthropic wire observed (emitted at the same code position that
+    /// handles `message_delta.stop_reason`, ticket 27 defect ④) into the
+    /// session telemetry counter + output-token histogram. Model/provider
+    /// dimensions ride the session metadata tags.
+    fn on_stop_reason(&self, stop_reason: &str, output_tokens: Option<i64>) {
+        self.session_telemetry
+            .record_stop_reason(stop_reason, output_tokens);
+    }
 }
 
 impl WebsocketTelemetry for ApiTelemetry {
@@ -2955,6 +2998,21 @@ impl WebsocketTelemetry for ApiTelemetry {
             .record_websocket_event(result, duration);
     }
 }
+
+#[cfg(test)]
+use wire::anthropic::AnthropicUpstreamKind;
+#[cfg(test)]
+use wire::anthropic::ThinkingEmission;
+#[cfg(test)]
+use wire::anthropic::UnsignedReplay;
+#[cfg(test)]
+use wire::anthropic::build_messages_messages;
+#[cfg(test)]
+use wire::anthropic::thinking_400_recovery_class;
+#[cfg(test)]
+use wire::chat::build_chat_messages;
+#[cfg(test)]
+use wire::chat::map_chat_role;
 
 #[cfg(test)]
 #[path = "client_tests.rs"]

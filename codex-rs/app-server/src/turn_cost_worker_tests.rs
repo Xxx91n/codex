@@ -68,6 +68,11 @@ async fn handle_observes_only_matching_model_provider() {
         .await
         .expect("test config");
     let model_provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         name: "provider-a".to_string(),
         base_url: Some("https://provider-a.example/v1".to_string()),
         ..Default::default()
@@ -98,6 +103,11 @@ async fn handle_observes_only_matching_model_provider() {
     };
     let mut mismatched_config = config.as_ref().clone();
     mismatched_config.model_provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         base_url: Some("https://provider-b.example/v1".to_string()),
         ..model_provider
     };
@@ -194,6 +204,11 @@ async fn custom_provider_auth_failure_retries_without_auth_changes() {
         .await
         .expect("test config");
     config.model_provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         name: "custom-provider".to_string(),
         base_url: Some(server.uri()),
         requires_openai_auth: true,
@@ -242,6 +257,11 @@ async fn custom_provider_does_not_send_chatgpt_auth_for_turn_costs() {
         .await
         .expect("test config");
     config.model_provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         name: "custom-provider".to_string(),
         base_url: Some(server.uri()),
         requires_openai_auth: true,

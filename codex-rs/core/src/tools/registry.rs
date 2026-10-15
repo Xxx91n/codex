@@ -31,6 +31,7 @@ use codex_extension_api::ToolCallOutcome;
 use codex_extension_api::ToolPolicy;
 use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
+use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::parse_command::ParsedCommand;
@@ -43,6 +44,8 @@ use futures::future::BoxFuture;
 use indexmap::IndexMap;
 use indexmap::map::Entry;
 use serde_json::Value;
+
+const MCP_TOOL_NAME_DELIMITER: &str = "__";
 
 pub(crate) type ToolTelemetryTags = Vec<(&'static str, String)>;
 
@@ -500,6 +503,57 @@ impl ToolRegistry {
             .map(|tool| Arc::clone(&tool.runtime))
     }
 
+    /// Resolves a chat-wire qualified tool name against known registry
+    /// namespaces. Chat Completions has no namespace concept, so namespace
+    /// tools are advertised flat as `<namespace>__<name>`; the inbound
+    /// `FunctionCall` carries `namespace: None` and misses exact lookup.
+    /// Re-splitting on `__` is not an option (`mcp__1mcp__tool_invoke`
+    /// contains multiple delimiter runs), so match against the namespaces
+    /// this registry actually knows, longest prefix first, and only accept a
+    /// candidate whose remainder resolves to a registered tool.
+    fn resolve_qualified_fallback(&self, name: &ToolName) -> Option<ToolName> {
+        // Chat wire ingests `FunctionCall { namespace: None }` through
+        // `build_tool_call`, which applies the default namespace — real
+        // misses therefore arrive as `Some(DEFAULT_FUNCTION_NAMESPACE)`, not
+        // `None`. Treat both shapes as "no explicit namespace"; an explicit
+        // non-default namespace that missed exact lookup stays unsupported.
+        match name.namespace.as_deref() {
+            // An explicit non-default namespace that missed exact lookup
+            // stays unsupported; `None` and the default namespace both mean
+            // "no explicit namespace" and qualify for resolution.
+            Some(namespace) if namespace != DEFAULT_FUNCTION_NAMESPACE => return None,
+            _ => {}
+        }
+        let mut namespaces = self
+            .tools
+            .keys()
+            .filter_map(|tool_name| tool_name.namespace.as_deref())
+            .filter(|namespace| !namespace.is_empty() && *namespace != DEFAULT_FUNCTION_NAMESPACE)
+            .collect::<Vec<_>>();
+        namespaces.sort_by_key(|namespace| std::cmp::Reverse(namespace.len()));
+        namespaces.dedup();
+        for namespace in namespaces {
+            // The chat wire joins namespace and tool name with `__`, but some
+            // namespace identities already end with the delimiter; accept both
+            // shapes and only report a hit whose remainder is a registered tool.
+            let Some(rest) = name.name.strip_prefix(namespace) else {
+                continue;
+            };
+            let rest = if let Some(rest) = rest.strip_prefix(MCP_TOOL_NAME_DELIMITER) {
+                rest
+            } else if namespace.ends_with(MCP_TOOL_NAME_DELIMITER) {
+                rest
+            } else {
+                continue;
+            };
+            let resolved = ToolName::namespaced(namespace, rest);
+            if self.tools.contains_key(&resolved) {
+                return Some(resolved);
+            }
+        }
+        None
+    }
+
     #[cfg(test)]
     pub(crate) fn tool_names_for_test(&self) -> Vec<ToolName> {
         let mut names = self.tools.keys().cloned().collect::<Vec<_>>();
@@ -555,6 +609,18 @@ impl ToolRegistry {
         }
 
         let dispatch_trace = ToolDispatchTrace::start(&invocation);
+        // Chat wire sends qualified `<namespace>__<name>` names back without a
+        // namespace field; re-resolve bare misses against known namespaces
+        // before reporting the call as unsupported.
+        let tool_name = if self.tool(&tool_name).is_none() {
+            self.resolve_qualified_fallback(&tool_name)
+                .map_or(tool_name, |resolved| {
+                    invocation.tool_name = resolved.clone();
+                    resolved
+                })
+        } else {
+            tool_name
+        };
         let tool = match self.tool(&tool_name) {
             Some(tool) => tool,
             None => {

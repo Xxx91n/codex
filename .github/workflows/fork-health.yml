@@ -1,0 +1,318 @@
+# fork-health.yml — upstream-drift watchdog for the tri-wire fork seam.
+# Fork-only (NOT upstream-shipped). Runs daily on the default branch (which is
+# tri-wire-api, the branch that carries the seam) plus on demand via
+# workflow_dispatch. Verifies the fork seam — the three registration points
+# (WireApi / ModelProviderInfo.wire_api / client.rs dispatch) and the per-wire
+# modules — with fmt, clippy over all three seam crates, and the full wiremock
+# suites; runs the ticket-12 sync watchdog (ff-only trial + ahead/behind + release listen) on the high-frequency seam surface; opens or
+# refreshes a `fork-health` issue on failure. It never builds release binaries
+# and never publishes — that stays in fork-cli-test-release.yml.
+name: fork-health
+
+on:
+  schedule:
+    # Daily 06:00 UTC (the how2.sh template's cadence). GitHub schedules are
+    # best-effort (typically 5-45 min late) and fire on the DEFAULT branch
+    # only — this fork's default branch carries the seam, so the daily run
+    # always exercises tri-wire-api. workflow_dispatch stays as the
+    # always-immediate fallback for post-merge and incident reruns.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: Ref to health-check (defaults to the ref you dispatch from)
+        type: string
+        required: false
+        default: ''
+      full_matrix:
+        description: Run the seam suites on all three OSes (cron is ubuntu-only)
+        type: boolean
+        required: false
+        default: false
+      upstream_url:
+        description: Override upstream repo URL (artificial-divergence drill for the ff-only trial, ticket 12)
+        type: string
+        required: false
+        default: ''
+
+concurrency:
+  group: fork-health-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  seam-check:
+    # Skip when this repo itself is forked downstream, so the inherited cron
+    # does not burn minutes and spam notifications there (quarto-cli#10235).
+    if: github.repository == 'Xxx91n/codex'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ (inputs.full_matrix == true) && fromJSON('["ubuntu-latest", "macos-latest", "windows-latest"]') || fromJSON('["ubuntu-latest"]') }}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history: the drift-probe diff needs a merge-base
+          ref: ${{ inputs.target_ref || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # `just test` is the repo-mandated test entrypoint and shells out to
+      # cargo-nextest (NEXTEST_PROFILE=local) — same install path the repo's
+      # own rust-ci-full nextest jobs use.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-nextest
+      # Deterministic per-OS key shared across daily runs (add-job-id-key:
+      # false) so each cron hit restores the previous day's artifacts; writes
+      # are gated to long-lived branches exactly like fork-cli-test-release.yml's
+      # check job (measured 3-5x incremental speedup, key v0-rust-*<lock-hash>);
+      # cache-on-failure keeps a red seam debuggable without cold rebuilds.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: codex-rs
+          shared-key: fork-health-${{ matrix.os }}
+          add-job-id-key: false
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/tri-wire-api' }}
+      - name: Check formatting
+        shell: bash
+        run: cargo fmt -- --config imports_granularity=Item --check
+      # Clippy covers the whole seam surface — upstream's high-frequency
+      # collision files (sse/responses.rs, endpoint/responses*.rs, client.rs)
+      # live in these three crates. codex-core is included because
+      # wire-module-extraction landed and fixed its collapsible_match debt,
+      # so the leaf-crate-only scoping in fork-cli-test-release.yml is no
+      # longer forced on this daily job.
+      - name: Clippy (seam crates)
+        shell: bash
+        run: cargo clippy --locked --lib -p codex-api -p codex-core -p codex-model-provider-info -- -D warnings
+      # Ticket 35 (A-024): the ticket 25 LF-only scan retired together with
+      # the LF lock itself. The family defense moved to the
+      # platform-family-assert job below (per-platform checkout bytes,
+      # fail-loud) plus the release-binary digest scan in
+      # fork-cli-test-release.yml (authoritative artifact layer).
+
+      # The fork seam suites: -p keeps the BUILD surface at the seam crates
+      # (without it nextest builds every workspace test binary, pulling
+      # rusty_v8 whose linux-gnu ptrcomp prebuilt 404s — run 33964746502);
+      # -E then narrows the RUN selection because the full codex-core
+      # integration suite has unrelated suite::* tests (agents_md/approvals/
+      # apply_patch_cli, fs sandbox) that SIGABRT under the debug profile
+      # (fork-health runs 33946093566/33948129889), and the
+      # RUST_MIN_STACK=8388608 that `just` sets does not fix them — so per
+      # ticket 17 the daily watchdog runs the wiremock trio (chat_wiremock /
+      # anthropic_wiremock / cross_wire), the codex-api SSE unit tests, and
+      # the reasoning_effort translation unit tests (WORKFLOW §6 ticket-10
+      # lesson); ticket 19 r2 adds the chat-wire tool-adjacency regression
+      # test (build_chat_messages_keeps_tool_results_adjacent_to_tool_calls,
+      # codex-core lib via client.rs #[path]) so the NIM-500 fix keeps a guard.
+      # Ticket 25 adds -p codex-state for the EOL checksum family unit tests
+      # (repair_eol_checksum_family_*); ticket 35 extends the selection to
+      # the drift detection (detect_checksum_family_*), the fail-loud /
+      # guidance texts (drift_guidance_*, state_checksum_family_*) and the
+      # one-time notice marker (checksum_family_notice_*).
+      # Ticket 26 adds -p codex-tools plus the chat/anthropic wire MCP
+      # tool-visibility guards: chat_completions_* / anthropic_qualifies /
+      # anthropic_keeps_default (tool_spec outbound qualified names),
+      # resolve_qualified_fallback (registry inbound longest-prefix match),
+      # search_tool_enabled_requires_responses_wire (wire gate two-state).
+      - name: Test fork seam suites
+        shell: bash
+        run: just test -p codex-api -p codex-core -p codex-state -p codex-tools -E 'package(codex-api) or test(chat_wire) or test(anthropic_wire) or test(cross_wire) or test(reasoning_effort) or test(build_chat_messages_keeps_tool_results_adjacent_to_tool_calls) or test(repair_eol_checksum_family) or test(state_checksum_family) or test(detect_checksum_family) or test(drift_guidance) or test(checksum_family_notice) or test(chat_completions_) or test(anthropic_qualifies) or test(anthropic_keeps_default) or test(resolve_qualified_fallback) or test(search_tool_enabled_requires_responses_wire) or test(redacted_thinking) or test(thinking_replay) or test(max_tokens::tests) or test(budget_below_max_tokens) or test(metadata_max_tokens) or test(stop_reason)'
+      # Sync watchdog (ticket 12): the advisory drift probe turned into a
+      # gating measure + ff-only trial. Semantics per ADR-0006 decision 3①
+      # (merge-base 口径; tag 口径 banned — upstream squash-merge makes tags
+      # unreliable for anchoring) and the ruling in
+      # .scratch/architecture-recovery/research/12-upstream-sync-automation-20260905.md:
+      #  1. Measure ahead/behind vs upstream/main (merge-base 口径) plus the
+      #     upstream latest release tag into the run summary — drift must be
+      #     loud; the sync cadence is weekly or per release (ADR-0001).
+      #  2. ff-only trial FROM THE RECORDED SYNC ANCHOR: the anchor must stay
+      #     an ancestor of upstream/main (upstream did not rewrite the history
+      #     the fork tracks) AND of HEAD (the fork was not rebased off its
+      #     sync point — merge-never-rebase, ADR-0001). A literal
+      #     git merge --ff-only upstream/main can never succeed on this branch
+      #     by design (the fork keeps divergent commits), so the trial is
+      #     expressed as the anchor-ancestry invariant it guards. Anchor break
+      #     = the FORK_DIVERGENCE.md merge-base 锚点 is invalid → red light
+      #     (exit 1); the alert issue points at the adjudication checklist.
+      #     Normal drift (behind > 0) stays green: release-train lag is
+      #     measured, not gated (issue 12 evidence plan: 正常 run 绿).
+      #  3. Release listen (监听或 dispatch 路径 per issue 12): the latest
+      #     upstream stable tag is surfaced every run and never gates — tag
+      #     口径 is advisory only. Sync when it moves or weekly, per ADR-0001.
+      #  Never merges, never pushes, never mutates git state: the five-step
+      #  adjudication (ADR-0006 decision 3) stays human.
+      - name: Sync watchdog vs upstream/main (ff-only trial + drift metrics + release listen)
+        shell: bash
+        env:
+          # The fork's recorded sync anchor (merge-base 口径; FORK_DIVERGENCE.md
+          # header). Refresh to the new merge-base in the same adjudication
+          # round as the FORK_DIVERGENCE.md refresh after EVERY five-step merge.
+          SYNC_ANCHOR: 'd52478c52e'
+          # Dispatch override for the artificial-divergence drill (issue 12
+          # red-path evidence): point it at a scratch repo whose main was
+          # force-rewritten past the anchor, dispatch, expect the red light.
+          UPSTREAM_URL: ${{ inputs.upstream_url || 'https://github.com/openai/codex.git' }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git remote get-url upstream >/dev/null 2>&1 || git remote add upstream "$UPSTREAM_URL"
+          git fetch upstream main --filter=blob:none
+          UPSTREAM_REPO=$(sed -E "s#https://github\\.com/##; s#\\.git\$##" <<<"$UPSTREAM_URL")
+          read -r AHEAD BEHIND < <(git rev-list --left-right --count HEAD...upstream/main)
+          LATEST_TAG=$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$UPSTREAM_REPO/releases/latest" \
+            | jq -r '.tag_name // empty' 2>/dev/null || true)
+          {
+            echo "## Upstream sync watchdog (merge-base 口径)"
+            echo "upstream/main: $(git rev-parse --short upstream/main)"
+            echo "sync anchor (last five-step merge point): $SYNC_ANCHOR"
+            echo "ahead by $AHEAD commit(s) — fork-only commits, expected > 0 (managed divergence per ADR-0006)"
+            echo "behind by $BEHIND commit(s) — awaiting the ADR-0006 five-step merge"
+            echo "upstream latest release: ${LATEST_TAG:-unknown} — cadence per ADR-0001 (weekly or per release, whichever first)"
+            echo
+            echo "### Upstream touched on the seam surface"
+            if git merge-base HEAD upstream/main >/dev/null 2>&1; then
+              git diff --name-only HEAD...upstream/main -- \
+                codex-rs/codex-api/src/sse/responses.rs \
+                codex-rs/codex-api/src/endpoint/responses_websocket.rs \
+                codex-rs/codex-api/src/endpoint/responses.rs \
+                codex-rs/core/src/client.rs \
+                codex-rs/model-provider-info/src/lib.rs
+            else
+              echo "(no common ancestor with upstream/main)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          # ff-only trial from the recorded sync anchor (see the step comment
+          # for why this is the fork-shaped form of git merge --ff-only).
+          if ! git merge-base --is-ancestor "$SYNC_ANCHOR" upstream/main; then
+            echo "::error::ff-only trial FAILED (upstream side): upstream/main no longer contains sync anchor $SYNC_ANCHOR — upstream rewrote history the fork tracks; the FORK_DIVERGENCE.md merge-base 锚点 is invalid. Follow the ADR-0006 five-step adjudication with .scratch/architecture-recovery/FORK_DIVERGENCE.md (merge-base 口径, 禁 tag 口径)."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$SYNC_ANCHOR" HEAD; then
+            echo "::error::ff-only trial FAILED (fork side): HEAD no longer contains sync anchor $SYNC_ANCHOR — the fork branch was rebased off its sync point (merge-never-rebase violation, ADR-0001). Follow the ADR-0006 five-step adjudication with .scratch/architecture-recovery/FORK_DIVERGENCE.md."
+            exit 1
+          fi
+
+  platform-family-assert:
+    # Ticket 35 (A-024): replaces the retired LF-only scan. Since ticket 35
+    # the fork embeds the official platform checksum family: a Windows
+    # checkout (hosted-runner default core.autocrlf=true per actions/
+    # checkout #135) must materialize the six migration directories as
+    # CRLF, a Linux checkout as LF - sqlx::migrate! then embeds exactly
+    # what an official build of the same commit embeds (.gitattributes
+    # section 6: text !eol). Checkout-only job: no cargo, seconds. The
+    # authoritative layer (digests inside the actual release binaries) is
+    # asserted in fork-cli-test-release.yml build jobs.
+    if: github.repository == 'Xxx91n/codex'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Migration SQL checkout family assertion (platform-native, fail-loud)
+        shell: bash
+        run: |
+          set -euo pipefail
+          PY=python3
+          command -v "$PY" >/dev/null 2>&1 || PY=python
+          "$PY" - <<'PY'
+          import glob, os, sys
+          expect_crlf = os.name == "nt"
+          dirs = [
+              "codex-rs/state/migrations",
+              "codex-rs/state/logs_migrations",
+              "codex-rs/state/goals_migrations",
+              "codex-rs/state/memory_migrations",
+              "codex-rs/state/queue_migrations",
+              "codex-rs/state/thread_history_migrations",
+          ]
+          problems = []
+          total = 0
+          for d in dirs:
+              for f in sorted(glob.glob(os.path.join(d, "*.sql"))):
+                  total += 1
+                  raw = open(f, "rb").read()
+                  if expect_crlf and b"\r\n" not in raw:
+                      problems.append(f + ": windows checkout must land the CRLF family")
+                  if (not expect_crlf) and b"\r" in raw:
+                      problems.append(f + ": non-windows checkout must land LF-only")
+          if total < 60:
+              problems.append("only %d migration sources under the six state directories" % total)
+          if problems:
+              for line in problems:
+                  print("::error::" + line)
+              sys.exit(1)
+          label = "CRLF" if expect_crlf else "LF"
+          print("migration SQL checkout family: %d sources, %s native" % (total, label))
+          PY
+
+  alert:
+    # Only when an actual check failed (skipped or cancelled never alerts).
+    needs: [seam-check, platform-family-assert]
+    if: failure() && !cancelled()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or refresh the fork-health failure issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            // Idempotently ensure the label exists so the issue below always
+            // carries it, even on a repo where it was never created manually.
+            await github.rest.issues.createLabel({
+              owner, repo, name: 'fork-health', color: 'd93f0b',
+              description: 'Daily fork-seam health check failure',
+            }).catch(() => {});
+            const title = `fork-health failed on ${context.ref} @ ${context.sha.slice(0, 8)}`;
+            const body = [
+              'Daily fork-seam health check **failed**.',
+              '',
+              `- Run: ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
+              `- Branch: ${context.ref}`,
+              '- Fix path: open the run log; the "Sync watchdog" step summary lists',
+              '  ahead/behind (merge-base 口径), the seam-surface files upstream touched,',
+              '  and the upstream latest release tag.',
+              '- If the failed step is "Sync watchdog vs upstream/main": the ff-only trial',
+              '  failed — upstream and/or this branch no longer contains the recorded sync',
+              '  anchor (history rewritten or rebased). Adjudicate with the',
+              '  FORK_DIVERGENCE.md ruling list',
+              '  (.scratch/architecture-recovery/FORK_DIVERGENCE.md) per the ADR-0006',
+              '  five-step flow: fetch + merge-base 口径 metrics → merge (never rebase) →',
+              '  per-entry replay on the list → new ADR if rulings change → CI green',
+              '  before push. Release tag moves are report-only (tag 口径 stays out of',
+              '  anchoring; sync cadence per ADR-0001: weekly or per release, whichever',
+              '  first).',
+              '',
+              '_Auto-opened by fork-health.yml. Resolve and close; the next daily run re-checks._',
+            ].join('\n');
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner, repo, state: 'open', labels: 'fork-health',
+            });
+            const existing = open.find((i) => i.title.startsWith('fork-health failed'));
+            if (existing) {
+              await github.rest.issues.update({ owner, repo, issue_number: existing.number, body });
+            } else {
+              await github.rest.issues.create({ owner, repo, title, body, labels: ['fork-health'] });
+            }
+      - name: Notify Slack if a webhook is configured
+        if: env.SLACK_WEBHOOK != ''
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+        run: |
+          curl -fsS -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"fork-health failed on $GITHUB_REF — $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"}" \
+            "$SLACK_WEBHOOK" || true

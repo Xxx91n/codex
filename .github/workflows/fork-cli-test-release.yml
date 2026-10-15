@@ -1,0 +1,461 @@
+# fork-only workflow: build tri-wire test binaries for Windows/macOS/Linux and
+# publish one public rolling prerelease with per-OS assets. NOT upstream-shipped.
+name: fork-cli-test-release
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Platforms to build: comma list (windows,ubuntu,macos) or all. check+release run only on all.'
+        required: false
+        default: 'all'
+
+permissions:
+  contents: write
+
+jobs:
+  # Resolve the build matrix from the platforms input so a single-platform
+  # dispatch (e.g. windows-only test build) skips the other runners' minutes
+  # instead of burning the full 3-OS matrix (quota: windows 2x, macos 10x).
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.sel.outputs.build }}
+    steps:
+      - id: sel
+        shell: bash
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+        # Pure-bash selection (no jq: two jq syntax bugs already bit runs
+        # 34376975626/34378510877; this logic is byte-tested locally).
+        run: |
+          W='{"os":"windows-latest","platform":"windows","target":"x86_64-pc-windows-msvc","asset":"codex-win-x86_64-pc-windows-msvc.zip","bin":"codex.exe"}'
+          U='{"os":"ubuntu-latest","platform":"ubuntu","target":"x86_64-unknown-linux-gnu","asset":"codex-linux-x86_64-unknown-linux-gnu.tar.gz","bin":"codex"}'
+          M='{"os":"macos-latest","platform":"macos","target":"aarch64-apple-darwin","asset":"codex-mac-aarch64-apple-darwin.tar.gz","bin":"codex"}'
+          p=",${PLATFORMS},"
+          if [[ -z "$PLATFORMS" || "$PLATFORMS" == "all" ]]; then
+            echo "build={\"include\":[$W,$U,$M]}" >> "$GITHUB_OUTPUT"
+          else
+            parts=()
+            [[ "$p" == *",windows,"* ]] && parts+=("$W")
+            [[ "$p" == *",ubuntu,"*  ]] && parts+=("$U")
+            [[ "$p" == *",macos,"*   ]] && parts+=("$M")
+            if [[ ${#parts[@]} -eq 0 ]]; then
+              echo "::error::no valid platform in '$PLATFORMS' (use comma list: windows,ubuntu,macos or all)"
+              exit 1
+            fi
+            IFS=,
+            echo "build={\"include\":[${parts[*]}]}" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: matrix
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.build) }}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: codex-rs
+      - name: Build codex-cli (release)
+        shell: bash
+        run: |
+          export RUST_MIN_STACK=16777216
+          cargo build --release --locked -p codex-cli --bin codex --target ${{ matrix.target }}
+      - name: Verify binary
+        shell: bash
+        run: ./target/${{ matrix.target }}/release/${{ matrix.bin }} --version
+      # Liveness: cold-boot the built binary on a throwaway CODEX_HOME and
+      # require /readyz and /healthz to answer 200 (acceptance: started AND probed).
+      - name: Liveness probe (app-server readyz/healthz)
+        shell: bash
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          SCRATCH="$(mktemp -d)"
+          export CODEX_HOME="$SCRATCH/home"
+          mkdir -p "$CODEX_HOME"
+          PORT=4517
+          pid=""
+          cleanup() {
+            if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; taskkill //F //PID "$pid" >/dev/null 2>&1 || true; fi
+          }
+          trap cleanup EXIT
+          ./target/${{ matrix.target }}/release/${{ matrix.bin }} app-server --listen "ws://127.0.0.1:$PORT" </dev/null >"$SCRATCH/app-server.log" 2>&1 &
+          pid=$!
+          ready=0
+          for i in $(seq 1 90); do
+            if curl -fsS --max-time 3 "http://127.0.0.1:$PORT/readyz" >/dev/null 2>&1; then ready=1; break; fi
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+          done
+          if [[ $ready -ne 1 ]]; then cat "$SCRATCH/app-server.log"; echo "::error::readyz did not answer 200"; exit 1; fi
+          curl -fsS --max-time 5 "http://127.0.0.1:$PORT/healthz" >/dev/null || { cat "$SCRATCH/app-server.log"; echo "::error::healthz did not answer 200"; exit 1; }
+          echo "readyz and healthz answered 200"
+      # Ticket 35 (A-019/A-024, authoritative layer): sqlx::migrate! embeds
+      # SHA384(migration file bytes) verbatim, so the checked-out .sql bytes
+      # must be the official platform family (CRLF on the Windows runner,
+      # LF on Linux/macOS - runner git defaults per actions/checkout #135,
+      # .gitattributes section 6 text !eol) AND their digests must be found
+      # verbatim inside the release binary. Byte-scan, no disassembly:
+      # constant data survives strip/LTO. Catches the failure mode the
+      # ticket 25 LF lock could not: wrong bytes reaching the artifact.
+      - name: Assert embedded checksum family (official platform default)
+        shell: bash
+        run: |
+          set -euo pipefail
+          PY=python3
+          command -v "$PY" >/dev/null 2>&1 || PY=python
+          "$PY" - "target/${{ matrix.target }}/release/${{ matrix.bin }}" <<'PY'
+          import hashlib, sys, glob, os
+
+          binary = sys.argv[1]
+          data = open(binary, "rb").read()
+          expected_crlf = os.name == "nt"
+          dirs = [
+              "state/migrations",
+              "state/logs_migrations",
+              "state/goals_migrations",
+              "state/memory_migrations",
+              "state/queue_migrations",
+              "state/thread_history_migrations",
+          ]
+          problems = []
+          total = 0
+          for d in dirs:
+              for f in sorted(glob.glob(os.path.join(d, "*.sql"))):
+                  total += 1
+                  raw = open(f, "rb").read()
+                  if expected_crlf and b"\r\n" not in raw:
+                      problems.append(f + ": windows checkout must be CRLF family")
+                  if (not expected_crlf) and b"\r" in raw:
+                      problems.append(f + ": non-windows checkout must be LF-only")
+                  digest = hashlib.sha384(raw).digest()
+                  if digest not in data:
+                      problems.append(f + ": SHA-384 of the checked-out bytes is absent from the binary")
+          if problems:
+              print("\n".join(problems), file=sys.stderr)
+              sys.exit(1)
+          label = "CRLF" if expected_crlf else "LF"
+          print(f"embedded checksum family assertion: {total} migration sources, digests present, {label} native")
+          PY
+      - name: Package artifact
+        shell: bash
+        run: |
+          mkdir -p out
+          cd target/${{ matrix.target }}/release
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            7z a ../../../out/${{ matrix.asset }} ${{ matrix.bin }}
+          else
+            tar czf ../../../out/${{ matrix.asset }} ${{ matrix.bin }}
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}
+          path: codex-rs/out/${{ matrix.asset }}
+          retention-days: 14
+
+  check:
+    # fmt + clippy + fork-scoped tests on the same three platforms as `build`.
+    # Independent of the release path and never touches its artifacts.
+    # Runs the full 3-OS matrix on `all`, and the windows leg alone on a
+    # windows-only dispatch (no release path either way). Still skipped for
+    # linux/macos-only builds.
+    if: inputs.platforms == 'all' || contains(inputs.platforms, 'windows')
+    name: check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ inputs.platforms == 'all' && fromJSON('["ubuntu-latest","macos-latest","windows-latest"]') || fromJSON('["windows-latest"]') }}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # rust-cache keys off codex-rs/Cargo.lock (lock hash included) and only
+      # writes the cache on long-lived branches; every other run just reads it.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: codex-rs
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/tri-wire-api' }}
+      - name: Check formatting
+        shell: bash
+        run: cargo fmt -- --config imports_granularity=Item --check
+      # Clippy covers the fork's leaf wire crates (codex-api SSE state machines
+      # and model-provider-info registration). codex-core's client.rs is being
+      # refactored separately (wire-module-extraction), so it is not linted here.
+      - name: Clippy (fork packages)
+        shell: bash
+        run: cargo clippy --locked --lib -p codex-api -p codex-model-provider-info -- -D warnings
+      # Unit tests only: the fork's wiremock integration suites live in
+      # codex-core's single `all` test binary, too heavy to compile in this job
+      # (the repo shards that binary via nextest in rust-ci-full instead).
+      - name: Test (fork packages)
+        shell: bash
+        run: cargo test --locked --lib -p codex-api -p codex-model-provider-info
+
+  e2e-official-coexistence:
+    # Ticket 35 (A-024): the family wall must not silently return. Full
+    # restore drill on a throwaway CODEX_HOME (real user homes untouched;
+    # CI-only, mirrors the completion-def copy exercise):
+    #   1. fork cold boot (app-server, the D-012 incident surface) creates
+    #      the databases in the embedded official platform family (CRLF);
+    #   2. --family lf (the ticket 35 escape hatch) simulates the legacy
+    #      LF drift on the same copy;
+    #   3. default auto startup must fail LOUD naming both families and the
+    #      exact repair command, write the one-time marker, touch no row;
+    #   4. --family crlf --apply restores; a follow-up dry run proves
+    #      landing + idempotency (A-025);
+    #   5. fork boot passes again;
+    #   6. the OFFICIAL openai/codex Windows release binary from GitHub
+    #      Releases cold-boots the same home - the inverse of the incident
+    #      turned regression gate.
+    name: e2e official+fork coexistence (windows)
+    if: ${{ github.repository == 'Xxx91n/codex' && (inputs.platforms == 'all' || contains(inputs.platforms, 'windows')) }}
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - name: Download fork CLI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-x86_64-pc-windows-msvc
+          path: fork-cli
+      - name: End-to-end family coexistence drill
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          # git-bash $! and the Windows PID namespace usually agree, but not
+          # guaranteed for native exes: kill first (bash-owned job), then
+          # taskkill by PID, then reap so no server holds the WAL when
+          # fix-checksums takes the concurrency gate below.
+          taskkill_pid() { kill "$1" 2>/dev/null || true; taskkill //F //PID "$1" >/dev/null 2>&1 || true; }
+          7z x -y -ofork-bin fork-cli/codex-win-x86_64-pc-windows-msvc.zip >/dev/null
+          FORK="$PWD/fork-bin/codex.exe"
+          "$FORK" --version
+          SCRATCH="$(mktemp -d)"
+          export CODEX_HOME="$SCRATCH/home"
+          mkdir -p "$CODEX_HOME"
+          # -- 1. fork cold boot creates the databases -------------------
+          "$FORK" app-server </dev/null >"$SCRATCH/fork_boot1.log" 2>&1 &
+          boot_pid=$!
+          for i in $(seq 1 90); do
+            [ -f "$CODEX_HOME/state_5.sqlite" ] && break
+            sleep 1
+          done
+          sleep 3
+          taskkill_pid $boot_pid
+          wait "$boot_pid" 2>/dev/null || true
+          sleep 2
+          [ -f "$CODEX_HOME/state_5.sqlite" ] || { cat "$SCRATCH/fork_boot1.log"; fail "fork cold boot did not create state_5.sqlite"; }
+          if grep -qi "checksum family drift" "$SCRATCH/fork_boot1.log"; then fail "unexpected family drift on fresh boot"; fi
+          # -- 2. simulate the legacy LF drift via the escape hatch ------
+          "$FORK" state fix-checksums --family lf --apply >"$SCRATCH/flip_lf.json" 2>&1 \
+            || { cat "$SCRATCH/flip_lf.json"; fail "escape-hatch lf flip failed"; }
+          jq -e '.applied == true' "$SCRATCH/flip_lf.json" >/dev/null || fail "escape-hatch flip not applied"
+          jq -e '[.databases[] | select(.label == "state DB")][0].status == "rewritten"' "$SCRATCH/flip_lf.json" >/dev/null || fail "state DB was not flipped to lf"
+          # -- 3. default auto startup fails loud, rewrites nothing ------
+          set +e
+          timeout 120 "$FORK" app-server </dev/null >"$SCRATCH/fork_boot2.log" 2>&1
+          rc=$?
+          set -e
+          [ $rc -ne 0 ] || fail "auto startup must fail on a drifted database (rc=$rc)"
+          grep -q "checksum family drift" "$SCRATCH/fork_boot2.log" || { cat "$SCRATCH/fork_boot2.log"; fail "fail-loud family drift text missing"; }
+          grep -q "databases carry the lf family" "$SCRATCH/fork_boot2.log" || fail "drift text lacks the database family"
+          grep -q "this binary embeds the official platform family crlf" "$SCRATCH/fork_boot2.log" || fail "drift text lacks the binary family"
+          grep -q "codex state fix-checksums --family crlf --apply" "$SCRATCH/fork_boot2.log" || fail "drift text lacks the repair command"
+          [ -f "$CODEX_HOME/.checksum-family-notices.json" ] || fail "one-time notice marker not persisted"
+          # -- 3b. repeat drift boot: the notice marker now suppresses the
+          #      one-time notice, so the fail-loud error text itself must
+          #      carry the repair command (A-022) --------------------------
+          set +e
+          timeout 120 "$FORK" app-server </dev/null >"$SCRATCH/fork_boot2b.log" 2>&1
+          rc=$?
+          set -e
+          [ $rc -ne 0 ] || fail "repeat drift startup must still fail loud (rc=$rc)"
+          if grep -q "one-time notice" "$SCRATCH/fork_boot2b.log"; then fail "notice was not suppressed on repeat boot"; fi
+          grep -q "codex state fix-checksums --family crlf --apply" "$SCRATCH/fork_boot2b.log" || { cat "$SCRATCH/fork_boot2b.log"; fail "error text lacks the repair command with the notice suppressed"; }
+          # Ticket 37: the fail-loud block must render exactly once. The
+          # app-server prints the error chain with {:#}, and the wrapper
+          # Display used to embed the source in its own line too - every
+          # help: line showed up twice. The one-time notice is suppressed
+          # on this boot, so the guidance block is the single source of
+          # these lines in the log.
+          [ "$(grep -c 'codex state fix-checksums --family crlf --apply' "$SCRATCH/fork_boot2b.log")" -eq 1 ] || { cat "$SCRATCH/fork_boot2b.log"; fail "fail-loud repair command line duplicated in the startup error"; }
+          [ "$(grep -c 'help: re-stamp the databases' "$SCRATCH/fork_boot2b.log")" -eq 1 ] || { cat "$SCRATCH/fork_boot2b.log"; fail "fail-loud help block duplicated"; }
+          [ "$(grep -c 'help:' "$SCRATCH/fork_boot2b.log")" -eq 3 ] || { cat "$SCRATCH/fork_boot2b.log"; fail "fail-loud help lines must appear exactly once (3 lines)"; }
+          "$FORK" state fix-checksums --family lf >"$SCRATCH/dry_lf.json" 2>&1
+          jq -e '[.databases[] | select(.label == "state DB")][0].status == "no_change"' "$SCRATCH/dry_lf.json" >/dev/null || fail "startup rewrote checksums under auto (drift must survive)"
+          # -- 4. restore to the official family + prove idempotency -----
+          "$FORK" state fix-checksums --family crlf --apply >"$SCRATCH/restore.json" 2>&1 \
+            || { cat "$SCRATCH/restore.json"; fail "crlf restore failed"; }
+          jq -e '.applied == true' "$SCRATCH/restore.json" >/dev/null || fail "restore not applied"
+          "$FORK" state fix-checksums --family crlf >"$SCRATCH/verify.json" 2>&1
+          jq -e '[.databases[] | select(.label == "state DB")][0] | (.status == "no_change" and .detected_family == "crlf")' "$SCRATCH/verify.json" >/dev/null || { cat "$SCRATCH/verify.json"; fail "restored database did not land the crlf family"; }
+          # (every row byte-equals the CRLF image of the embedded SQL via the
+          #  flip gate; the build-job digest assertion proves embedded ==
+          #  official bytes => per-row official-family baseline parity)
+          # -- 5. fork boot passes again ----------------------------------
+          set +e
+          timeout 120 "$FORK" app-server </dev/null >"$SCRATCH/fork_boot3.log" 2>&1
+          rc=$?
+          set -e
+          if grep -qi "checksum family drift\|failed to initialize sqlite state runtime" "$SCRATCH/fork_boot3.log"; then
+            cat "$SCRATCH/fork_boot3.log"; fail "fork boot still fails after restore"
+          fi
+          [ $rc -eq 0 ] || [ $rc -eq 124 ] || { cat "$SCRATCH/fork_boot3.log"; fail "fork boot exited rc=$rc after restore"; }
+          # -- 6. official release binary cold-boots the restored home ----
+          # Asset forensics resident in the log (r5): full asset list, the
+          # selected URL, and unpacked contents - one CI run can settle naming.
+          REL_JSON=$(gh api repos/openai/codex/releases/latest)
+          echo "official release tag: $(echo "$REL_JSON" | jq -r '.tag_name')"
+          echo "official release assets:"
+          echo "$REL_JSON" | jq -r '.assets[].name'
+          # Explicit selection (r5): windows + x86_64 executable CLI asset only.
+          # The old test("win") glob matched "darwin" substrings and tooling
+          # assets (first hit was argument-comment-lint-*-darwin.tar.gz).
+          # Whitelist extensions .zip/.tar.gz/.tgz/.exe; no guessed downloads.
+          ASSET_NAME=$(echo "$REL_JSON" | jq -r '
+            [ .assets[].name
+              | select(ascii_downcase | test("x86_64") and test("windows"))
+              | select(ascii_downcase | test("\\.(zip|tar\\.gz|tgz|exe)$"))
+              | select(ascii_downcase | test("vsix|ps1|sha256|sha512|checksum|symbols|-package|npm|lint|sandbox|command-runner|code-mode|responses|sdk|app-server") | not)
+            ]
+            | sort_by(if endswith(".zip") then 1 elif endswith(".tar.gz") or endswith(".tgz") then 2 else 0 end)
+            | .[0] // empty')
+          [ -n "$ASSET_NAME" ] || fail "no selectable windows x86_64 asset on the latest official release (full list above)"
+          ASSET_URL=$(echo "$REL_JSON" | jq -r --arg n "$ASSET_NAME" '.assets[] | select(.name == $n) | .browser_download_url')
+          echo "selected official asset: $ASSET_NAME -> $ASSET_URL"
+          mkdir -p official && cd official
+          curl -fsSL -o pkg "$ASSET_URL"
+          case "$ASSET_NAME" in
+            *.zip) 7z x -y pkg >/dev/null ;;
+            *.tar.gz|*.tgz) tar xzf pkg ;;
+            *) cp pkg codex.exe ;;
+          esac
+          echo "official package contents (maxdepth 3):"
+          find . -maxdepth 3 -type f | head -40
+          OFFICIAL=$(find . -type f -iname "*.exe" | head -1)
+          [ -n "$OFFICIAL" ] || fail "official release package has no exe"
+          chmod +x "$OFFICIAL"
+          # official/ was created under the workspace checkout, not under
+          # $SCRATCH, so pin the absolute path while still inside it -
+          # rebuilding it after cd "$SCRATCH" yields a path that never exists.
+          OFFICIAL_BIN="$(pwd)/${OFFICIAL#./}"
+          cd "$SCRATCH"
+          # Coexistence proof = LIVENESS + no family-wall text (r7 ruling). The
+          # official app-server exits silently on stdin EOF with zero output
+          # (run 34933908139), so "log non-empty" was a false premise and rc
+          # carries no information. Keep its stdin open, require 30s of
+          # continuous service on the restored home, and harvest with
+          # taskkill_pid - timeout cannot reliably kill a native exe (see the
+          # helper comment above). Ahead-of-anchor official migrations land
+          # their own CRLF family, which the fork runtime tolerates via
+          # ignore_missing.
+          OFFICIAL_LOG="$SCRATCH/official_boot.log"
+          "$OFFICIAL_BIN" app-server < <(sleep 200) >"$OFFICIAL_LOG" 2>&1 &
+          off_pid=$!
+          elapsed=0
+          while [ "$elapsed" -lt 45 ]; do
+            if grep -qi "checksum family drift\|failed to initialize sqlite state runtime" "$OFFICIAL_LOG"; then
+              set +e; taskkill_pid "$off_pid"; wait "$off_pid"; rc=$?; set -e
+              cat "$OFFICIAL_LOG"; echo "official rc=$rc"
+              fail "official Windows binary cannot open the fork-restored database"
+            fi
+            if ! kill -0 "$off_pid" 2>/dev/null; then
+              set +e; wait "$off_pid"; rc=$?; set -e
+              cat "$OFFICIAL_LOG"; echo "official rc=$rc"
+              fail "official binary exited after ${elapsed}s; it must keep serving the restored home"
+            fi
+            if [ "$elapsed" -ge 30 ]; then break; fi
+            sleep 5
+            elapsed=$((elapsed + 5))
+          done
+          set +e
+          taskkill_pid "$off_pid"
+          wait "$off_pid"
+          rc=$?
+          set -e
+          echo "official binary served the restored home for ${elapsed}s (harvest rc=$rc)"
+          # Second sweep covers wall text flushed during shutdown; every path
+          # above cats the log and prints the rc, so a red run is self-evident.
+          if grep -qi "checksum family drift\|failed to initialize sqlite state runtime" "$OFFICIAL_LOG"; then
+            cat "$OFFICIAL_LOG"; echo "official rc=$rc"
+            fail "official Windows binary hit the family wall while being harvested"
+          fi
+          cat "$OFFICIAL_LOG"
+          echo "e2e coexistence drill: fork-created -> lf drift -> auto fail-loud -> crlf restore -> fork + official cold boots all pass"
+
+  release:
+    # Publish only the full 3-OS run; single-platform test builds deliver via
+    # build artifacts (the rolling tag race bit run 34317047952 already).
+    # The green e2e coexistence drill gates publication (ticket 35).
+    if: inputs.platforms == 'all'
+    needs: [build, e2e-official-coexistence]
+    # (d) serialize publishers (ticket 36): concurrent dispatches queue on
+    #     this group instead of racing the rolling tag; no
+    #     cancel-in-progress, so a publish is never cut mid-flight.
+    concurrency:
+      group: fork-cli-test-release-publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*
+          merge-multiple: true
+          path: dist
+      - name: Publish rolling prerelease (public download)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=tri-wire-test
+          title="Tri-wire test build (CLI) — ${GITHUB_SHA:0:8}"
+          # Ticket 36 (A-029, B1 root-cause fix): the old tear-down-and-recreate
+          # publish was never atomic - GitHub async tag GC can replay the late
+          # removal event and force the fresh release back to draft (cli/cli#5024
+          # / #8458): the "run green, download 404" disease. Publish is now an
+          # idempotent upsert; this step performs zero destructive ref ops.
+          # (a) rolling tag: single-request refs-API force-move; create the ref
+          #     only when it is absent (404 fallback). last-writer-wins replaces
+          #     "already exists"; the tag never goes away, so no GC race is seeded.
+          ref_err=$(mktemp)
+          if gh api -X PATCH "repos/${{ github.repository }}/git/refs/tags/$tag" -f sha="$GITHUB_SHA" -F force=true >/dev/null 2>"$ref_err"; then
+            echo "rolling tag $tag force-moved to ${GITHUB_SHA:0:8}"
+          elif grep -qiE 'HTTP 404|Could not resolve|Not Found' "$ref_err"; then
+            gh api -X POST "repos/${{ github.repository }}/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" >/dev/null
+            echo "rolling tag $tag created at ${GITHUB_SHA:0:8}"
+          else
+            cat "$ref_err" >&2
+            exit 1
+          fi
+          # (b) release create-or-heal: edit the existing release in place
+          #     (--draft=false also heals an orphan draft left by the legacy GC
+          #     symptom; prerelease kept; title/notes refreshed). Only a missing
+          #     release is created.
+          notes="Test build of the tri-wire fork CLI (tri-wire-api). Windows x86_64 / Linux x86_64 / macOS aarch64 (Apple Silicon). Unsigned. Report issues in this repo. ROLLING TAG: this prerelease tag is force-moved by every green full run - always download from releases/download/tri-wire-test/<asset>; do not pin a commit SHA or the release id. Family change (ticket 35): migration checksums follow the official platform family again (Windows=CRLF). If a startup reports a checksum family mismatch, run codex state fix-checksums --family crlf --apply once; runbook: docs/fork-checksum-family.md"
+          if gh api "repos/${{ github.repository }}/releases/tags/$tag" >/dev/null 2>&1; then
+            echo "release $tag exists - healing in place"
+            gh release edit "$tag" --repo "${{ github.repository }}" --draft=false --prerelease --title "$title" --notes "$notes"
+          else
+            echo "release $tag absent - creating"
+            gh release create "$tag" --repo "${{ github.repository }}" --title "$title" --notes "$notes" --prerelease
+          fi
+          # (c) same-name assets are overwritten via --clobber; off-name
+          #     leftovers are kept untouched (asset naming is stable per OS; the
+          #     retention policy is stated in the ticket 36 report).
+          gh release upload "$tag" dist/*.zip dist/*.tar.gz --repo "${{ github.repository }}" --clobber
+          # publish self-evidence: final public state of the rolling release.
+          gh release view "$tag" --repo "${{ github.repository }}" --json tagName,isDraft,isPrerelease,assets

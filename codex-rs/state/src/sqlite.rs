@@ -7,6 +7,11 @@
 )]
 
 use crate::DbTelemetry;
+use crate::checksum_family_notice::maybe_show_family_notice;
+use crate::eol_checksum_repair::ChecksumFamily;
+use crate::eol_checksum_repair::detect_checksum_family_drift;
+use crate::eol_checksum_repair::migrator_embedded_family;
+use crate::eol_checksum_repair::repair_eol_checksum_family;
 use crate::migrations::repair_legacy_recency_migration_version;
 use crate::runtime::recovery::RuntimeDbInitError;
 use crate::telemetry;
@@ -16,6 +21,7 @@ use log::LevelFilter;
 use sqlx::ConnectOptions;
 use sqlx::Error;
 use sqlx::SqlitePool;
+use sqlx::migrate::MigrateError;
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::sqlite::SqlitePoolOptions;
@@ -154,6 +160,18 @@ pub struct RuntimeDbPath {
 pub struct SqliteConfig {
     sqlite_home: AbsolutePathBuf,
     quick_check_manager: SqliteQuickCheckManager,
+    /// Explicit checksum-family maintenance opt-in (ticket 31, re-targeted
+    /// by ticket 35). `Some(Crlf)` keeps every database in the CRLF family
+    /// and `Some(Lf)` in the LF family across startups: on a startup
+    /// `VersionMismatch` the runtime first rewrites the stored history to
+    /// this binary's embedded family so sqlx can validate and migrate, then
+    /// rewrites it again to the configured family after the migration run.
+    /// `None` is the default `auto` behavior since ticket 35: follow the
+    /// family this binary embeds (the official platform family), and a
+    /// family drift fails loudly with the repair command instead of
+    /// rewriting anything. The user-facing knob is
+    /// `[state] migration_checksum_family` in `config.toml` (see the docs).
+    maintained_checksum_family: Option<ChecksumFamily>,
 }
 
 // Validation history is operational state, not part of configuration equality.
@@ -170,11 +188,25 @@ impl SqliteConfig {
         Self {
             sqlite_home,
             quick_check_manager: SqliteQuickCheckManager::new(),
+            maintained_checksum_family: None,
         }
     }
 
     pub fn new_for_testing(sqlite_home: AbsolutePathBuf) -> Self {
         Self::from_sqlite_home(sqlite_home)
+    }
+
+    /// Set the maintained checksum family (see the field doc). `None` is the
+    /// default `auto` behavior; `Some(..)` marks the explicit ticket-31
+    /// opt-in maintenance families (D-015, re-targeted by ticket 35).
+    pub fn with_maintained_checksum_family(mut self, family: Option<ChecksumFamily>) -> Self {
+        self.maintained_checksum_family = family;
+        self
+    }
+
+    /// The checksum family the runtime maintains across startups.
+    pub fn maintained_checksum_family(&self) -> Option<ChecksumFamily> {
+        self.maintained_checksum_family
     }
 
     pub fn home(&self) -> &Path {
@@ -319,7 +351,48 @@ impl SqliteConfig {
             if matches!(spec.kind, DbKind::State) {
                 repair_legacy_recency_migration_version(&pool, migrator).await?;
             }
-            migrator.run(&pool).await.map_err(anyhow::Error::from)
+            if let Err(error) = migrator.run(&pool).await.map_err(anyhow::Error::from) {
+                let version_mismatch = matches!(
+                    error.downcast_ref::<MigrateError>(),
+                    Some(MigrateError::VersionMismatch(_))
+                );
+                if !version_mismatch {
+                    return Err(error);
+                }
+                let binary_family = embedded_binary_family(migrator);
+                if self.maintained_checksum_family.is_none() {
+                    // Ticket 35 (A-021/A-022/A-023): default `auto` follows
+                    // the embedded (official platform) family and rewrites
+                    // nothing. A pure family drift fails loudly with both
+                    // families and the explicit repair command; anything the
+                    // read-only probe cannot certify as EOL-only keeps
+                    // sqlx's own VersionMismatch error verbatim.
+                    let drift = detect_checksum_family_drift(&pool, migrator, binary_family)
+                        .await
+                        .unwrap_or(None);
+                    return match drift {
+                        Some(drift) => {
+                            let fingerprint = drift.fingerprint();
+                            maybe_show_family_notice(
+                                self.home(),
+                                &fingerprint,
+                                &drift.notice_text(),
+                            );
+                            Err(anyhow::anyhow!(drift.guidance()))
+                        }
+                        None => Err(error),
+                    };
+                };
+                // Ticket 31 explicit opt-in (crlf/lf): when every applied
+                // checksum is a pure line-ending image of the embedded SQL
+                // and the schema still matches, rewrite the stored checksums
+                // into the embedded family in one transaction, retry the
+                // migration, then land the history in the configured family
+                // below. Anything else keeps failing loudly.
+                repair_eol_checksum_family(&pool, migrator, binary_family).await?;
+                migrator.run(&pool).await.map_err(anyhow::Error::from)?;
+            }
+            Ok(())
         }
         .await;
         telemetry::record_init_result(
@@ -333,6 +406,28 @@ impl SqliteConfig {
             pool.close().await;
             return Err(
                 RuntimeDbInitError::new(spec.label, "migrate", path.as_path(), source).into(),
+            );
+        }
+        // Land the history in the configured maintenance family when the user
+        // opted in via `[state] migration_checksum_family = "crlf" | "lf"`.
+        // The embedded-family migrator just stamped the new rows, so on a
+        // different maintenance target every row needs one rewrite: the same
+        // gates as the offline `codex state fix-checksums` subcommand apply,
+        // and at steady state the schema matches by construction. The
+        // transaction is atomic; a startup on the next run sees
+        // VersionMismatch, re-validates into the embedded family, and flips
+        // back, which is the documented maintenance loop.
+        if let Some(target) = self.maintained_checksum_family
+            && target != embedded_binary_family(migrator)
+            && let Err(source) = repair_eol_checksum_family(&pool, migrator, target).await
+        {
+            let operation = match target {
+                ChecksumFamily::Crlf => "maintain_crlf_checksum_family",
+                ChecksumFamily::Lf => "maintain_lf_checksum_family",
+            };
+            pool.close().await;
+            return Err(
+                RuntimeDbInitError::new(spec.label, operation, path.as_path(), source).into(),
             );
         }
         Ok(pool)
@@ -470,3 +565,9 @@ impl SqliteConfig {
 #[cfg(test)]
 #[path = "sqlite_tests.rs"]
 mod tests;
+/// The checksum family this binary embeds for a runtime migrator: the
+/// official platform default family since ticket 35 (CRLF on Windows
+/// checkouts, LF on Linux/macOS checkouts).
+fn embedded_binary_family(migrator: &Migrator) -> ChecksumFamily {
+    migrator_embedded_family(migrator)
+}

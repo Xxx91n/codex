@@ -67,6 +67,7 @@ use codex_features::SleepToolMode;
 use codex_login::AuthManager;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_prompts::ResolvedModelMessages;
+use codex_model_provider_info::WireApi;
 use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
 use codex_protocol::account::PlanType;
 use codex_protocol::config_types::WebSearchMode;
@@ -155,7 +156,7 @@ pub(crate) fn build_tool_router(
         &turn_context.config,
         apps_enabled,
         &mcp.config().mcp_server_catalog,
-        model_info.supports_search_tool,
+        search_tool_enabled(turn_context, model_info),
         &mut registry,
     );
     apply_mcp_tool_exposure_policy(
@@ -264,7 +265,7 @@ fn apply_mcp_tool_exposure_policy(
             exposures = exposures.difference(ToolExposures::DEFERRED | ToolExposures::CODE_MODE);
         }
 
-        exposures = if model_info.supports_search_tool
+        exposures = if search_tool_enabled(turn_context, model_info)
             && exposures.contains(ToolExposures::DEFERRED)
             && (effective_tool_mode(turn_context, model_info) != ToolMode::CodeModeOnly
                 || exposures.contains(ToolExposures::CODE_MODE))
@@ -390,7 +391,7 @@ pub(crate) fn finalize_tool_router(
         }
     }
     let tool_search_name = ToolName::plain(TOOL_SEARCH_TOOL_NAME);
-    if model_info.supports_search_tool
+    if search_tool_enabled(turn_context, model_info)
         && registry.entries().any(|tool| {
             tool.runtime.tool_name() != tool_search_name
                 && tool.exposure.is_deferred()
@@ -705,6 +706,14 @@ fn hosted_model_tool_specs(
     specs
 }
 
+pub(crate) fn search_tool_enabled(turn_context: &TurnContext, model_info: &ModelInfo) -> bool {
+    // Deferred tool loading (tool_search) is only available on the Responses wire.
+    // On Chat / Anthropic wires, MCP tools must be exposed as Direct flat-listed
+    // functions because the wire has no lazy-loading protocol surface.
+    turn_context.provider.info().wire_api == WireApi::Responses
+        && model_info.supports_search_tool
+}
+
 pub(crate) fn tool_suggest_enabled(turn_context: &TurnContext) -> bool {
     let features = turn_context.config.features.get();
     features.enabled(Feature::ToolSuggest)
@@ -876,7 +885,7 @@ fn register_code_mode_executors(
     let mut exec_prompt_tool_specs = Vec::new();
     let mut deferred_exec_prompt_tool_specs = Vec::new();
     let mut included_deferred_mcp_output_schema = false;
-    let deferred_tools_guidance_enabled = model_info.supports_search_tool;
+    let deferred_tools_guidance_enabled = search_tool_enabled(turn_context, model_info);
     for tool in registry.entries() {
         let exposure = tool.exposure;
         if !exposure.is_available_in_code_mode() {
@@ -1473,7 +1482,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
         } else {
             let agent_type_description =
                 agent_type_description(turn_context, context.default_agent_type_description);
-            let exposure = if context.model_info.supports_search_tool {
+            let exposure = if search_tool_enabled(turn_context, &context.model_info) {
                 ToolExposure::Deferred
             } else {
                 ToolExposure::Direct

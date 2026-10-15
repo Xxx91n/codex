@@ -1,0 +1,15 @@
+{
+  "meta": {
+    "semantic": "cache_control",
+    "wire": "chat",
+    "scenario": "usage_missing_fields",
+    "verified_at": "2026-09-11",
+    "source": "codex-api/src/sse/chat_completions.rs (ticket 27 def-③)"
+  },
+  "stream_body": "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}],\"usage\":{\"prompt_tokens\":2}}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":2}}\n\ndata: [DONE]\n\n",
+  "expect_ir": [
+    "OutputTextDelta(\"hello\")",
+    "Completed{token_usage:{input_tokens:2, output_tokens:0, total_tokens:0, cached_input_tokens:0, cache_write_input_tokens:0}}"
+  ],
+  "expect_no_chunk_drop": true
+}

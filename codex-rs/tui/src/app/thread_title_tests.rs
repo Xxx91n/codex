@@ -244,6 +244,11 @@ async fn check_thread_title_generation(scenario: TitleScenario) -> color_eyre::R
     app.config.model = Some("gpt-5.2".to_string());
     app.config.model_provider_id = provider_id.to_string();
     app.config.model_provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         name: "Thread title test".to_string(),
         base_url: Some(format!("{}/v1", server.uri())),
         request_max_retries: Some(0),

@@ -181,6 +181,11 @@ async fn remote_models_get_model_info_uses_longest_matching_prefix() -> Result<(
 
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         base_url: Some(format!("{}/v1", server.uri())),
         ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
     };
@@ -616,6 +621,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
         auto_compact_token_limit: None,
         comp_hash: None,
         effective_context_window_percent: 95,
+        max_output_tokens: None,
         experimental_supported_tools: Vec::new(),
     };
 
@@ -894,6 +900,7 @@ async fn remote_models_apply_legacy_instructions(auth: CodexAuth) -> Result<()> 
         auto_compact_token_limit: None,
         comp_hash: None,
         effective_context_window_percent: 95,
+        max_output_tokens: None,
         experimental_supported_tools: Vec::new(),
     };
     let mut models_response = serde_json::to_value(ModelsResponse {
@@ -1045,6 +1052,11 @@ async fn remote_models_do_not_append_removed_builtin_presets() -> Result<()> {
 
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         base_url: Some(format!("{}/v1", server.uri())),
         ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
     };
@@ -1111,6 +1123,11 @@ async fn remote_models_merge_adds_new_high_priority_first() -> Result<()> {
 
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         base_url: Some(format!("{}/v1", server.uri())),
         ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
     };
@@ -1163,6 +1180,11 @@ async fn remote_models_merge_replaces_overlapping_model() -> Result<()> {
 
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         base_url: Some(format!("{}/v1", server.uri())),
         ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
     };
@@ -1212,6 +1234,11 @@ async fn remote_models_merge_preserves_bundled_models_on_empty_response() -> Res
 
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         base_url: Some(format!("{}/v1", server.uri())),
         ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
     };
@@ -1259,6 +1286,11 @@ async fn remote_models_request_times_out_after_5s() -> Result<()> {
 
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         base_url: Some(format!("{}/v1", server.uri())),
         ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
     };
@@ -1334,6 +1366,11 @@ async fn remote_models_hide_picker_only_models() -> Result<()> {
 
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+
+        anthropic_prompt_caching: None,
         base_url: Some(format!("{}/v1", server.uri())),
         ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
     };
@@ -1480,6 +1517,7 @@ fn test_remote_model_with_policy(
         auto_compact_token_limit: None,
         comp_hash: None,
         effective_context_window_percent: 95,
+        max_output_tokens: None,
         experimental_supported_tools: Vec::new(),
     }
 }

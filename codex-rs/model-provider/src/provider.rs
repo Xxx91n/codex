@@ -14,6 +14,7 @@ use codex_login::GatewayAuthManager;
 use codex_login::WorkspaceRoutingRequest;
 use codex_login::default_client::ClientRedirectPolicy;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_model_provider_info::WireApi;
 use codex_models_manager::cache::ModelsCache;
 use codex_models_manager::manager::OpenAiModelsManager;
 use codex_models_manager::manager::SharedModelsManager;
@@ -426,7 +427,15 @@ impl ModelProvider for ConfiguredModelProvider {
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities::from_config(&self.info)
+        let mut capabilities = ProviderCapabilities::from_config(&self.info);
+        // Remote compaction is only available on the Responses wire protocol.
+        // A provider on a non-Responses wire (chat/anthropic) would otherwise
+        // claim V2 support and fail at runtime on /responses/compact; it must
+        // fall back to local summarize instead (CONTEXT.md degradation table).
+        if self.info.wire_api != WireApi::Responses {
+            capabilities.remote_compaction = RemoteCompactionSupport::Unsupported;
+        }
+        capabilities
     }
 
     fn approval_review_preferred_model(&self) -> &'static str {
@@ -588,7 +597,6 @@ mod tests {
     use codex_model_provider_info::AwsAuthRefreshConfig;
     use codex_model_provider_info::AwsCredentialExportConfig;
     use codex_model_provider_info::ModelProviderAwsAuthInfo;
-    use codex_model_provider_info::WireApi;
     use codex_model_provider_info::create_oss_provider_with_base_url;
     use codex_models_manager::ModelsManagerConfig;
     use codex_models_manager::manager::RefreshStrategy;
@@ -613,6 +621,11 @@ mod tests {
 
     fn provider_info_with_command_auth() -> ModelProviderInfo {
         ModelProviderInfo {
+            anthropic_max_tokens: None,
+
+            anthropic_thinking_budget: None,
+
+            anthropic_prompt_caching: None,
             auth: Some(ModelProviderAuthInfo {
                 command: "print-token".to_string(),
                 args: Vec::new(),
@@ -634,6 +647,11 @@ mod tests {
 
     fn provider_for(base_url: String) -> ModelProviderInfo {
         ModelProviderInfo {
+            anthropic_max_tokens: None,
+
+            anthropic_thinking_budget: None,
+
+            anthropic_prompt_caching: None,
             name: "mock".into(),
             base_url: Some(base_url),
             model_catalog_url: None,
@@ -734,6 +752,11 @@ mod tests {
             ),
             (
                 ModelProviderInfo {
+                    anthropic_max_tokens: None,
+
+                    anthropic_thinking_budget: None,
+
+                    anthropic_prompt_caching: None,
                     name: "Azure".to_string(),
                     base_url: Some("https://example.com/openai".to_string()),
                     ..ModelProviderInfo::default()
@@ -742,6 +765,11 @@ mod tests {
             ),
             (
                 ModelProviderInfo {
+                    anthropic_max_tokens: None,
+
+                    anthropic_thinking_budget: None,
+
+                    anthropic_prompt_caching: None,
                     name: "Custom".to_string(),
                     base_url: Some("https://example.openai.azure.com/openai/v1".to_string()),
                     ..ModelProviderInfo::default()
@@ -1163,6 +1191,11 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
     fn custom_non_openai_provider_returns_no_account_state() {
         let provider = create_model_provider(
             ModelProviderInfo {
+                anthropic_max_tokens: None,
+
+                anthropic_thinking_budget: None,
+
+                anthropic_prompt_caching: None,
                 name: "Custom".to_string(),
                 base_url: Some("http://localhost:1234/v1".to_string()),
                 wire_api: WireApi::Responses,
@@ -1402,5 +1435,29 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
                 );
             }
         }
+    }
+
+    #[test]
+    fn capabilities_remote_compaction_follows_wire_api() {
+        // Non-responses wires have no /responses/compact endpoint: even an
+        // OpenAI-named provider must degrade to the local summarize fallback.
+        for wire_api in [WireApi::Chat, WireApi::Anthropic] {
+            let mut info = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+            info.wire_api = wire_api;
+            let provider = ConfiguredModelProvider::new(info, /*auth_manager*/ None);
+            assert_eq!(
+                provider.capabilities().remote_compaction,
+                RemoteCompactionSupport::Unsupported,
+                "wire_api={wire_api} must not claim remote compaction"
+            );
+        }
+
+        let responses_info = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+        let responses_provider =
+            ConfiguredModelProvider::new(responses_info, /*auth_manager*/ None);
+        assert_eq!(
+            responses_provider.capabilities().remote_compaction,
+            RemoteCompactionSupport::V2
+        );
     }
 }

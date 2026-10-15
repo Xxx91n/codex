@@ -1679,6 +1679,12 @@ async fn amazon_bedrock_proxy_uses_command_auth_and_custom_headers() {
 /// reaches `Completed` without surfacing an auth or transport error to the client.
 async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuthInfo) {
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
+
+        anthropic_prompt_caching: None,
         name: "corp".into(),
         base_url: Some(format!("{}/v1", server.uri())),
         model_catalog_url: None,
@@ -1946,6 +1952,12 @@ async fn prefers_apikey_when_config_prefers_apikey_even_with_chatgpt_tokens() {
         .await;
 
     let model_provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
+
+        anthropic_prompt_caching: None,
         base_url: Some(format!("{}/v1", server.uri())),
         supports_websockets: false,
         ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
@@ -3182,6 +3194,12 @@ async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids(
     let resp_mock = mount_sse_once(&server, sse_body.to_string()).await;
 
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
+
+        anthropic_prompt_caching: None,
         name: "azure".into(),
         base_url: Some(format!("{}/openai", server.uri())),
         model_catalog_url: None,
@@ -3811,6 +3829,12 @@ async fn azure_overrides_assign_properties_used_for_responses_url() {
         .await;
 
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
+
+        anthropic_prompt_caching: None,
         name: "custom".to_string(),
         base_url: Some(format!("{}/openai", server.uri())),
         model_catalog_url: None,
@@ -3899,6 +3923,12 @@ async fn env_var_overrides_loaded_auth() {
         .await;
 
     let provider = ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
+
+        anthropic_prompt_caching: None,
         name: ModelProviderInfo::create_openai_provider(/*base_url*/ None).name,
         base_url: Some(format!("{}/openai", server.uri())),
         model_catalog_url: None,

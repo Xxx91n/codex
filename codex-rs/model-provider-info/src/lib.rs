@@ -97,7 +97,6 @@ pub const AMAZON_BEDROCK_DEFAULT_BASE_URL: &str =
     "https://bedrock-mantle.us-east-1.api.aws/openai/v1";
 const AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_HEADER: &str = "x-amzn-mantle-client-agent";
 const AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_VALUE: &str = "codex";
-const CHAT_WIRE_API_REMOVED_ERROR: &str = "`wire_api = \"chat\"` is no longer supported.\nHow to fix: set `wire_api = \"responses\"` in your provider config.\nMore info: https://github.com/openai/codex/discussions/7782";
 pub const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
 pub const OLLAMA_CHAT_PROVIDER_REMOVED_ERROR: &str = "`ollama-chat` is no longer supported.\nHow to fix: replace `ollama-chat` with `ollama` in `model_provider`, `oss_provider`, or `--local-provider`.\nMore info: https://github.com/openai/codex/discussions/7782";
 
@@ -108,12 +107,25 @@ pub enum WireApi {
     /// The Responses API exposed by OpenAI at `/v1/responses`.
     #[default]
     Responses,
+    /// The classic Chat Completions API at `/v1/chat/completions`.
+    ///
+    /// Removed upstream; restored in this fork with a full in-process
+    /// transport so OpenAI-compatible chat-only upstreams work without an
+    /// external translation layer.
+    Chat,
+    /// The Anthropic Messages API at `/v1/messages`.
+    ///
+    /// Fork addition (goose-blueprint transport) so anthropic-native upstreams
+    /// work in-process without an external translation layer.
+    Anthropic,
 }
 
 impl fmt::Display for WireApi {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
             Self::Responses => "responses",
+            Self::Chat => "chat",
+            Self::Anthropic => "anthropic",
         };
         f.write_str(value)
     }
@@ -127,8 +139,12 @@ impl<'de> Deserialize<'de> for WireApi {
         let value = String::deserialize(deserializer)?;
         match value.as_str() {
             "responses" => Ok(Self::Responses),
-            "chat" => Err(serde::de::Error::custom(CHAT_WIRE_API_REMOVED_ERROR)),
-            _ => Err(serde::de::Error::unknown_variant(&value, &["responses"])),
+            "chat" => Ok(Self::Chat),
+            "anthropic" => Ok(Self::Anthropic),
+            _ => Err(serde::de::Error::unknown_variant(
+                &value,
+                &["responses", "chat", "anthropic"],
+            )),
         }
     }
 }
@@ -187,6 +203,30 @@ pub struct ModelProviderInfo {
     /// Maximum time (in milliseconds) to wait for a websocket connection attempt before treating
     /// it as failed.
     pub websocket_connect_timeout_ms: Option<u64>,
+    /// `max_tokens` budget sent on the "anthropic" (messages) wire. When unset, the
+    /// client falls back to its built-in default (8192).
+    pub anthropic_max_tokens: Option<u32>,
+
+    /// Thinking budget (in tokens) requested on the "anthropic" (messages)
+    /// wire. When set, the client sends `thinking: { type: "enabled",
+    /// budget_tokens }`. Values below 1024 are clamped up; Anthropic rejects
+    /// budgets >= `max_tokens`, so the effective value is clamped below
+    /// `max_tokens` as well.
+    pub anthropic_thinking_budget: Option<u32>,
+
+    /// Speak the adaptive thinking track on the "anthropic" (messages) wire:
+    /// `thinking: { type: "adaptive" }` plus `output_config.effort`
+    /// (Claude 4.6+ deployments; manual `budget_tokens` is deprecated there
+    /// and rejected outright by 4.7+ models). When false (the default), the
+    /// manual track applies and a session reasoning effort is bucketed into
+    /// `budget_tokens`.
+    #[serde(default)]
+    pub anthropic_adaptive_thinking: bool,
+
+    /// When true, the "anthropic" (messages) wire marks the system prompt
+    /// and the last tool definition with `cache_control: {"type":
+    /// "ephemeral"}` breakpoints for prompt caching.
+    pub anthropic_prompt_caching: Option<bool>,
     /// Does this provider require an OpenAI API key or ChatGPT login token? If true,
     /// the user is presented with a login screen on first run, and credentials are
     /// stored using the backend selected by `cli_auth_credentials_store`.
@@ -525,6 +565,12 @@ other non-default provider fields are not supported"
 
     pub fn create_openai_provider(base_url: Option<String>) -> ModelProviderInfo {
         ModelProviderInfo {
+            anthropic_max_tokens: None,
+
+            anthropic_thinking_budget: None,
+            anthropic_adaptive_thinking: false,
+
+            anthropic_prompt_caching: None,
             name: OPENAI_PROVIDER_NAME.into(),
             base_url,
             model_catalog_url: None,
@@ -569,6 +615,13 @@ other non-default provider fields are not supported"
         aws: Option<ModelProviderAwsAuthInfo>,
     ) -> ModelProviderInfo {
         ModelProviderInfo {
+            anthropic_max_tokens: None,
+
+            anthropic_thinking_budget: None,
+
+            anthropic_adaptive_thinking: false,
+
+            anthropic_prompt_caching: None,
             name: AMAZON_BEDROCK_PROVIDER_NAME.into(),
             // The runtime provider derives the regional Mantle endpoint when
             // this is unset. A configured value is therefore unambiguously an
@@ -754,6 +807,12 @@ pub fn create_oss_provider(default_provider_port: u16, wire_api: WireApi) -> Mod
 
 pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> ModelProviderInfo {
     ModelProviderInfo {
+        anthropic_max_tokens: None,
+
+        anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
+
+        anthropic_prompt_caching: None,
         name: "gpt-oss".into(),
         base_url: Some(base_url.into()),
         model_catalog_url: None,

@@ -1,13 +1,17 @@
+use super::AnthropicUpstreamKind;
 use super::AuthRequestTelemetryContext;
 use super::ModelClient;
 use super::PendingUnauthorizedRetry;
 use super::Prompt;
+use super::ThinkingEmission;
 use super::UnauthorizedRecoveryExecution;
+use super::UnsignedReplay;
 use super::X_CODEX_INSTALLATION_ID_HEADER;
 use super::X_CODEX_PARENT_THREAD_ID_HEADER;
 use super::X_CODEX_TURN_METADATA_HEADER;
 use super::X_CODEX_WINDOW_ID_HEADER;
 use super::X_OPENAI_SUBAGENT_HEADER;
+use super::thinking_400_recovery_class;
 use crate::AttestationContext;
 use crate::AttestationProvider;
 use crate::GenerateAttestationFuture;
@@ -2165,6 +2169,305 @@ async fn inference_tools_changes_follow_full_specs_across_turns() {
     let alpha = ResponsesApiTool {
         name: "alpha".into(),
         description: "Original".into(),
+#[test]
+fn map_chat_role_handles_known_and_unknown_roles() {
+    assert_eq!(super::map_chat_role("developer"), "system");
+    assert_eq!(super::map_chat_role("assistant"), "assistant");
+    assert_eq!(super::map_chat_role("unknown-role"), "user");
+}
+
+#[test]
+fn build_chat_request_omits_responses_only_fields() {
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseItem;
+
+    // T05 degradation: the chat wire body must never carry Responses-only
+    // controls (store / previous_response_id / reasoning / include).
+    let client = test_model_client(SessionSource::Cli);
+    let prompt = Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "hello".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }],
+        ..Default::default()
+    };
+    let model_info = test_model_info();
+
+    let request = client
+        .new_session()
+        .build_chat_request(&prompt, &model_info, None)
+        .expect("chat request should build");
+    let obj = request.as_object().expect("request should be an object");
+    for field in [
+        "store",
+        "previous_response_id",
+        "reasoning",
+        "include",
+        "cache_control",
+    ] {
+        assert!(
+            !obj.contains_key(field),
+            "chat request must not contain responses-only field `{field}`"
+        );
+    }
+    assert_eq!(obj["model"], "gpt-test");
+    assert_eq!(obj["stream"], true);
+}
+
+#[test]
+fn build_messages_messages_serializes_tool_roundtrip_items() {
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::FunctionCallOutputPayload;
+    use codex_protocol::models::ResponseItem;
+    use serde_json::json;
+
+    let input = vec![
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "hello".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: r#"{"cmd":"pwd"}"#.to_string(),
+            encrypted_function_args: None,
+            call_id: "toolu_1".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "notify".to_string(),
+            namespace: None,
+            arguments: String::new(),
+            encrypted_function_args: None,
+            call_id: "toolu_2".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("toolu_1".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("ok".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("toolu_2".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("sent".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+
+    let messages = super::build_messages_messages(
+        input,
+        ThinkingEmission::Standard {
+            unsigned: UnsignedReplay::Preserve,
+        },
+    );
+    assert_eq!(
+        messages,
+        vec![
+            json!({
+                "role": "user",
+                "content": [{"type": "text", "text": "hello"}],
+            }),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "exec_command",
+                        "input": {"cmd": "pwd"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_2",
+                        "name": "notify",
+                        // no-argument tools must serialize input as {}
+                        "input": {},
+                    },
+                ],
+            }),
+            json!({
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
+                    {"type": "tool_result", "tool_use_id": "toolu_2", "content": "sent"},
+                ],
+            }),
+        ]
+    );
+}
+
+#[test]
+fn build_messages_messages_emits_image_blocks_and_replays_thinking_with_signature() {
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ReasoningItemContent;
+    use codex_protocol::models::ResponseItem;
+
+    let input = vec![
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![
+                ContentItem::InputText {
+                    text: "what is this?".to_string(),
+                },
+                ContentItem::InputImage {
+                    image_url: "data:image/png;base64,aGVsbG8=".to_string(),
+                    detail: None,
+                },
+            ],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::Reasoning {
+            id: None,
+            summary: vec![],
+            content: Some(vec![
+                ReasoningItemContent::ReasoningText {
+                    text: "let me think".to_string(),
+                },
+                ReasoningItemContent::Text {
+                    text: " more".to_string(),
+                },
+            ]),
+            encrypted_content: Some("sig-abc".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: "the answer".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+
+    let messages = super::build_messages_messages(
+        input,
+        ThinkingEmission::Standard {
+            unsigned: UnsignedReplay::Preserve,
+        },
+    );
+    let user = &messages[0];
+    assert_eq!(user["role"], "user");
+    let blocks = user["content"].as_array().expect("user content array");
+    assert_eq!(blocks[0]["type"], "text");
+    assert_eq!(blocks[0]["text"], "what is this?");
+    assert_eq!(blocks[1]["type"], "image");
+    assert_eq!(blocks[1]["source"]["type"], "base64");
+    assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+    assert_eq!(blocks[1]["source"]["data"], "aGVsbG8=");
+
+    // thinking must precede the assistant text within the same assistant
+    // message, per the Messages API ordering contract.
+    let assistant = &messages[1];
+    assert_eq!(assistant["role"], "assistant");
+    let content = assistant["content"].as_array().unwrap();
+    assert_eq!(content[0]["type"], "thinking");
+    assert_eq!(content[0]["thinking"], "let me think more");
+    assert_eq!(content[0]["signature"], "sig-abc");
+    assert_eq!(content[1]["type"], "text");
+    assert_eq!(content[1]["text"], "the answer");
+}
+
+#[test]
+fn build_messages_messages_drops_unsigned_thinking_replay_on_first_party_and_preserves_on_compatible()
+ {
+    use codex_protocol::models::ReasoningItemContent;
+    use codex_protocol::models::ResponseItem;
+    // ADR-0009 revised the old unconditional-drop red line (ADR-0003) into a
+    // conditional dispatch: first-party upstreams drop unsigned blocks on the
+    // branches the server does not enforce (guard G1 escalates the manual +
+    // tool_use shape before send), while compatible endpoints must get the
+    // block back verbatim or the next tool round 400s (D-009 finding 4).
+    let input = vec![ResponseItem::Reasoning {
+        id: None,
+        summary: vec![],
+        content: Some(vec![ReasoningItemContent::ReasoningText {
+            text: "planning the answer".to_string(),
+        }]),
+        encrypted_content: None,
+        internal_chat_message_metadata_passthrough: None,
+    }];
+
+    let dropped = super::build_messages_messages(
+        input.clone(),
+        ThinkingEmission::Standard {
+            unsigned: UnsignedReplay::DropWarn,
+        },
+    );
+    assert!(
+        dropped.is_empty(),
+        "first-party unenforced branch drops the unsigned block"
+    );
+
+    let kept = super::build_messages_messages(
+        input.clone(),
+        ThinkingEmission::Standard {
+            unsigned: UnsignedReplay::Preserve,
+        },
+    );
+    assert_eq!(kept[0]["role"], "assistant");
+    assert_eq!(kept[0]["content"][0]["type"], "thinking");
+    assert_eq!(kept[0]["content"][0]["thinking"], "planning the answer");
+    assert!(
+        kept[0]["content"][0].get("signature").is_none(),
+        "preserved replay must not fabricate a signature"
+    );
+
+    let degraded = super::build_messages_messages(input, ThinkingEmission::Degrade);
+    assert!(
+        degraded.is_empty(),
+        "guard degradation strips every thinking-family block"
+    );
+}
+
+#[test]
+fn build_messages_request_emits_thinking_and_cache_control_when_configured() {
+    let mut provider =
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Anthropic);
+    provider.anthropic_max_tokens = Some(128_000);
+    provider.anthropic_thinking_budget = Some(8_192);
+    provider.anthropic_prompt_caching = Some(true);
+    let client = ModelClient::new(
+        None,
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        provider,
+        SessionSource::Cli,
+        "test_originator".to_string(),
+        None,
+        true,
+        false,
+        false,
+        None,
+        false,
+        None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    );
+    let mut prompt = Prompt::default();
+    let tool = ToolSpec::Function(ResponsesApiTool {
+        name: "exec_command".to_string(),
+        description: "run".to_string(),
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::default(),
@@ -2207,4 +2510,747 @@ async fn inference_tools_changes_follow_full_specs_across_turns() {
             "step {index}"
         );
     }
+}
+    });
+    prompt.tools = Arc::from(vec![tool]);
+    let model_info = test_model_info();
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &model_info, None)
+        .expect("messages request should build");
+    let obj = request.as_object().expect("object");
+    assert_eq!(obj["thinking"]["type"], "enabled");
+    assert_eq!(obj["thinking"]["budget_tokens"], 8_192);
+    let system = obj["system"]
+        .as_array()
+        .expect("system should be block array");
+    assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+    let tools = obj["tools"].as_array().unwrap();
+    assert_eq!(tools.last().unwrap()["cache_control"]["type"], "ephemeral");
+}
+
+#[test]
+fn build_messages_request_clamps_thinking_budget_below_max_tokens() {
+    let mut provider =
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Anthropic);
+    provider.anthropic_max_tokens = Some(4_096);
+    provider.anthropic_thinking_budget = Some(100_000);
+    let client = ModelClient::new(
+        None,
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        provider,
+        SessionSource::Cli,
+        "test_originator".to_string(),
+        None,
+        true,
+        false,
+        false,
+        None,
+        false,
+        None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    );
+    let prompt = Prompt::default();
+    let model_info = test_model_info();
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &model_info, None)
+        .expect("messages request should build");
+    let obj = request.as_object().expect("object");
+    // doc contract: budget_tokens must be < max_tokens
+    assert_eq!(obj["thinking"]["budget_tokens"], 4_096 - 1);
+}
+
+#[test]
+fn build_messages_request_metadata_max_tokens_relaxes_thinking_clamp() {
+    // Ticket 29 / A-007 联动验证: with no explicit provider budget, the
+    // model-catalog max_output_tokens metadata now drives max_tokens, so the
+    // thinking clamp widens accordingly instead of hitting the 8192 wall.
+    let mut provider =
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Anthropic);
+    provider.anthropic_max_tokens = None;
+    provider.anthropic_thinking_budget = Some(100_000);
+    let client = ModelClient::new(
+        None,
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        provider,
+        SessionSource::Cli,
+        "test_originator".to_string(),
+        None,
+        true,
+        false,
+        false,
+        None,
+        false,
+        None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    );
+    let prompt = Prompt::default();
+    let mut model_info = test_model_info();
+    model_info.max_output_tokens = Some(200_000);
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &model_info, None)
+        .expect("messages request should build");
+    let obj = request.as_object().expect("object");
+    // Metadata wins (capped at the managed ceiling): max_tokens = 128_000...
+    assert_eq!(obj["max_tokens"], 128_000);
+    // ...and the thinking budget keeps its configured value (100_000) under
+    // that ceiling instead of being cut by the 8192 wall.
+    assert_eq!(obj["thinking"]["budget_tokens"], 100_000);
+
+    // Below the cap the metadata value passes through uncapped.
+    let mut provider =
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Anthropic);
+    provider.anthropic_max_tokens = None;
+    provider.anthropic_thinking_budget = Some(100_000);
+    let client = ModelClient::new(
+        None,
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        provider,
+        SessionSource::Cli,
+        "test_originator".to_string(),
+        None,
+        true,
+        false,
+        false,
+        None,
+        false,
+        None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    );
+    let mut model_info = test_model_info();
+    model_info.max_output_tokens = Some(64_000);
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &model_info, None)
+        .expect("messages request should build");
+    let obj = request.as_object().expect("object");
+    assert_eq!(obj["max_tokens"], 64_000);
+    assert_eq!(obj["thinking"]["budget_tokens"], 64_000 - 1);
+}
+
+#[test]
+fn build_messages_request_uses_top_level_system_and_max_tokens() {
+    let client = test_model_client(SessionSource::Cli);
+    let prompt = Prompt::default();
+    let model_info = test_model_info();
+
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &model_info, None)
+        .expect("messages request should build");
+    let obj = request.as_object().expect("request should be an object");
+    assert_eq!(obj["model"], "gpt-test");
+    assert_eq!(obj["stream"], true);
+    assert!(obj["max_tokens"].is_u64());
+    assert!(obj.contains_key("system"));
+    for field in ["store", "previous_response_id", "reasoning", "include"] {
+        assert!(
+            !obj.contains_key(field),
+            "messages request must not contain responses-only field `{field}`"
+        );
+    }
+}
+
+#[test]
+fn build_chat_request_emits_reasoning_effort_when_session_sets_it() {
+    use codex_protocol::openai_models::ReasoningEffort;
+
+    let client = test_model_client(SessionSource::Cli);
+    let prompt = Prompt::default();
+    let model_info = test_model_info();
+
+    let request = client
+        .new_session()
+        .build_chat_request(&prompt, &model_info, Some(ReasoningEffort::High))
+        .expect("chat request should build");
+    assert_eq!(request["reasoning_effort"], "high");
+
+    // Without an effort the field stays absent (model default applies).
+    let request = client
+        .new_session()
+        .build_chat_request(&prompt, &model_info, None)
+        .expect("chat request should build");
+    assert!(request.get("reasoning_effort").is_none());
+}
+
+#[test]
+fn build_messages_request_session_effort_buckets_to_budget_tokens() {
+    use codex_protocol::openai_models::ReasoningEffort;
+
+    let mut provider =
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Anthropic);
+    provider.anthropic_max_tokens = Some(128_000);
+    provider.anthropic_thinking_budget = Some(8_192);
+    let client = ModelClient::new(
+        None,
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        provider,
+        SessionSource::Cli,
+        "test_originator".to_string(),
+        None,
+        true,
+        false,
+        false,
+        None,
+        false,
+        None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    );
+    let prompt = Prompt::default();
+    let model_info = test_model_info();
+
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &model_info, Some(ReasoningEffort::Low))
+        .expect("messages request should build");
+    // Session effort wins over the legacy 8192 budget: low buckets to 1024.
+    assert_eq!(request["thinking"]["budget_tokens"], 1_024);
+
+    // No session effort: the legacy budget path is unchanged.
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &model_info, None)
+        .expect("messages request should build");
+    assert_eq!(request["thinking"]["budget_tokens"], 8_192);
+}
+
+#[test]
+fn build_messages_request_adaptive_mode_maps_effort_to_output_config() {
+    use codex_protocol::openai_models::ReasoningEffort;
+
+    let mut provider =
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Anthropic);
+    provider.anthropic_adaptive_thinking = true;
+    let client = ModelClient::new(
+        None,
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        provider,
+        SessionSource::Cli,
+        "test_originator".to_string(),
+        None,
+        true,
+        false,
+        false,
+        None,
+        false,
+        None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    );
+    let prompt = Prompt::default();
+    let model_info = test_model_info();
+
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &model_info, Some(ReasoningEffort::Medium))
+        .expect("messages request should build");
+    assert_eq!(request["thinking"]["type"], "adaptive");
+    assert_eq!(request["output_config"]["effort"], "medium");
+    assert!(request["thinking"].get("budget_tokens").is_none());
+}
+
+#[test]
+fn build_chat_messages_serializes_tool_roundtrip_items() {
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::FunctionCallOutputPayload;
+    use codex_protocol::models::ResponseItem;
+    use serde_json::json;
+
+    let input = vec![
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "hello".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: r#"{"cmd":"pwd"}"#.to_string(),
+            encrypted_function_args: None,
+            call_id: "call_1".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "notify".to_string(),
+            namespace: None,
+            arguments: "{}".to_string(),
+            encrypted_function_args: None,
+            call_id: "call_2".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("call_1".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("ok".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("call_2".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("sent".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+
+    let messages = super::build_chat_messages("be helpful", input);
+    assert_eq!(
+        messages,
+        vec![
+            json!({"role":"system","content":"be helpful"}),
+            json!({"role":"user","content":"hello"}),
+            // Parallel calls from one turn replay as a single assistant message
+            // with a multi-entry tool_calls array: strict OpenAI-compatible
+            // servers 400 on assistant-split replays.
+            json!({
+                "role":"assistant",
+                "content":"",
+                "tool_calls":[
+                    {
+                        "id":"call_1",
+                        "type":"function",
+                        "function":{"name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"}
+                    },
+                    {
+                        "id":"call_2",
+                        "type":"function",
+                        "function":{"name":"notify","arguments":"{}"}
+                    }
+                ]
+            }),
+            json!({"role":"tool","tool_call_id":"call_1","content":"ok"}),
+            json!({"role":"tool","tool_call_id":"call_2","content":"sent"}),
+        ]
+    );
+}
+
+#[test]
+fn build_chat_messages_keeps_tool_results_adjacent_to_tool_calls() {
+    // Regression (fork): a Message or Reasoning item landing between a
+    // FunctionCall and its FunctionCallOutput must not split the eventual
+    // assistant(tool_calls) message from its tool results. NVIDIA NIM
+    // (kimi/minimax) hard-500s a replay whose tool result does not directly
+    // follow its tool_calls ("Failed to generate completions").
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::FunctionCallOutputPayload;
+    use codex_protocol::models::ResponseItem;
+    use serde_json::json;
+
+    let input = vec![
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "hi".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: "{}".to_string(),
+            encrypted_function_args: None,
+            call_id: "call_1".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "let me check".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "<environment_context/>".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("call_1".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("ok".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+
+    let messages = super::build_chat_messages("be helpful", input);
+    assert_eq!(
+        messages,
+        vec![
+            json!({"role":"system","content":"be helpful"}),
+            json!({"role":"user","content":"hi"}),
+            // Deferred: emitted ahead of the tool_calls message so the pair
+            // assistant(tool_calls) -> tool stays adjacent.
+            json!({"role":"assistant","content":"let me check"}),
+            json!({"role":"system","content":"<environment_context/>"}),
+            json!({
+                "role":"assistant",
+                "content":"",
+                "tool_calls":[
+                    {
+                        "id":"call_1",
+                        "type":"function",
+                        "function":{"name":"exec_command","arguments":"{}"}
+                    }
+                ]
+            }),
+            json!({"role":"tool","tool_call_id":"call_1","content":"ok"}),
+        ]
+    );
+}
+
+/// Defect ① outbound (ticket 27 / A-002): a `redacted_thinking` block
+/// must round-trip as its own wire block (data + signature), never as a
+/// thinking block (which would 400 on the server). The IR shape from
+/// the Messages SSE state machine is content: None + encrypted_content
+/// combining payload and signature as "data\0sig" (fork-internal
+/// delimiter); the dedicated arm reconstructs the
+/// redacted_thinking block before the general signed-thinking arm sees it.
+#[test]
+fn build_messages_messages_emits_redacted_thinking_block_verbatim() {
+    use codex_protocol::models::ResponseItem;
+    let input = vec![
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![codex_protocol::models::ContentItem::InputText {
+                text: "ask".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::Reasoning {
+            id: None,
+            summary: vec![],
+            // Fork-internal redacted_thinking IR encoding (ticket 27 def-①):
+            // payload+sig combined as "data\0sig" in encrypted_content,
+            // content is None (the structural discriminator vs. signed
+            // thinking, which always carries content: Some([ReasoningText])).
+            content: None,
+            encrypted_content: Some("data-r-out-1\0sig-r-out-1".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![codex_protocol::models::ContentItem::OutputText {
+                text: "answer".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+    let messages = super::build_messages_messages(
+        input,
+        ThinkingEmission::Standard {
+            unsigned: UnsignedReplay::Preserve,
+        },
+    );
+    // The user message is preserved.
+    assert_eq!(messages[0]["role"], "user");
+    // The assistant turn opens with the redacted_thinking block (verbatim
+    // payload + signature), followed by the text block.
+    let assistant = messages
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .expect("assistant turn");
+    let content = assistant["content"]
+        .as_array()
+        .expect("assistant content array");
+    assert_eq!(
+        content[0]["type"], "redacted_thinking",
+        "first block must be redacted_thinking, not thinking"
+    );
+    assert_eq!(
+        content[0]["data"], "data-r-out-1",
+        "encrypted payload must round-trip verbatim"
+    );
+    assert_eq!(
+        content[0]["signature"], "sig-r-out-1",
+        "signature must round-trip verbatim"
+    );
+    assert_eq!(content[1]["type"], "text");
+    assert_eq!(content[1]["text"], "answer");
+}
+// ---- ADR-0009: thinking-drop conditional red line + guards G1/G3 ----
+
+/// Anthropic model client for the ADR-0009 thinking-replay tests, pointed at
+/// `base_url` with the manual thinking track active via the legacy budget.
+fn thinking_replay_client(base_url: &str, adaptive: bool) -> ModelClient {
+    let mut provider = create_oss_provider_with_base_url(base_url, WireApi::Anthropic);
+    provider.anthropic_max_tokens = Some(128_000);
+    provider.anthropic_thinking_budget = Some(4_096);
+    provider.anthropic_adaptive_thinking = adaptive;
+    ModelClient::new(
+        None,
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        provider,
+        SessionSource::Cli,
+        "test_originator".to_string(),
+        None,
+        true,
+        false,
+        false,
+        None,
+        false,
+        None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    )
+}
+
+/// A tool round mid-flight: unsigned-or-signed reasoning (by flag), a
+/// tool_use call, and its result — the final assistant message carries a
+/// tool_use block, the shape that hard-400s under manual thinking when the
+/// replay cannot lead with a thinking block (ADR-0009 / guard G1).
+fn thinking_replay_tool_use_history(signed: bool) -> Vec<codex_protocol::models::ResponseItem> {
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::FunctionCallOutputPayload;
+    use codex_protocol::models::ReasoningItemContent;
+    use codex_protocol::models::ResponseItem;
+    vec![
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "run it".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::Reasoning {
+            id: None,
+            summary: vec![],
+            content: Some(vec![ReasoningItemContent::ReasoningText {
+                text: "planning".to_string(),
+            }]),
+            encrypted_content: if signed {
+                Some("sig-replay-1".to_string())
+            } else {
+                None
+            },
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "shell".to_string(),
+            namespace: None,
+            arguments: r#"{"cmd":"true"}"#.to_string(),
+            encrypted_function_args: None,
+            call_id: "toolu_replay_1".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("toolu_replay_1".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("done".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ]
+}
+
+#[test]
+fn build_messages_request_thinking_replay_first_party_manual_tool_use_degrades() {
+    // Guard G1: on a first-party upstream the manual (enabled) track with a
+    // trailing tool_use turn whose unsigned thinking was dropped would be
+    // hard-400ed; the builder must strip the thinking parameter and all
+    // thinking blocks instead of sending the doomed shape bare.
+    let client = thinking_replay_client("https://api.anthropic.com/v1", false);
+    let mut prompt = Prompt::default();
+    prompt.input = thinking_replay_tool_use_history(/*signed*/ false);
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &test_model_info(), None)
+        .expect("messages request should build");
+    assert!(
+        request.get("thinking").is_none(),
+        "G1 must drop the thinking parameter, not bare-send manual+tool_use"
+    );
+    let assistant = &request["messages"][1];
+    assert_eq!(assistant["role"], "assistant");
+    let blocks = assistant["content"].as_array().expect("assistant blocks");
+    assert_eq!(blocks.len(), 1, "degraded round strips thinking blocks too");
+    assert_eq!(blocks[0]["type"], "tool_use");
+}
+
+#[test]
+fn build_messages_request_thinking_replay_first_party_manual_signed_leads_and_keeps() {
+    // Control for G1: a signed thinking block replayed verbatim leads the
+    // tool-use turn, satisfying the first-party contract; no degradation.
+    let client = thinking_replay_client("https://api.anthropic.com/v1", false);
+    let mut prompt = Prompt::default();
+    prompt.input = thinking_replay_tool_use_history(/*signed*/ true);
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &test_model_info(), None)
+        .expect("messages request should build");
+    assert_eq!(request["thinking"]["type"], "enabled");
+    let blocks = request["messages"][1]["content"]
+        .as_array()
+        .expect("assistant blocks");
+    assert_eq!(blocks[0]["type"], "thinking");
+    assert_eq!(blocks[0]["signature"], "sig-replay-1");
+    assert_eq!(blocks[1]["type"], "tool_use");
+}
+
+#[test]
+fn build_messages_request_thinking_replay_first_party_adaptive_drops_unsigned_without_degrading() {
+    // ADR-0009 first-party adaptive branch: the server does not enforce the
+    // leading thinking block, so dropping the unsigned block with a warn
+    // leaves the adaptive parameter untouched.
+    use codex_protocol::openai_models::ReasoningEffort;
+    let client = thinking_replay_client("https://api.anthropic.com/v1", true);
+    let mut prompt = Prompt::default();
+    prompt.input = thinking_replay_tool_use_history(/*signed*/ false);
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &test_model_info(), Some(ReasoningEffort::Medium))
+        .expect("messages request should build");
+    assert_eq!(request["thinking"]["type"], "adaptive");
+    assert_eq!(request["output_config"]["effort"], "medium");
+    let blocks = request["messages"][1]["content"]
+        .as_array()
+        .expect("assistant blocks");
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0]["type"], "tool_use");
+}
+
+#[test]
+fn build_messages_request_thinking_replay_compatible_preserves_unsigned_block() {
+    // ADR-0009 third-party branch: /anthropic-compatible endpoints never sign
+    // blocks; the unsigned block must go back verbatim (no signature field)
+    // and the manual thinking parameter stays.
+    let client = thinking_replay_client("https://gateway.example.internal/v1", false);
+    let mut prompt = Prompt::default();
+    prompt.input = thinking_replay_tool_use_history(/*signed*/ false);
+    let request = client
+        .new_session()
+        .build_messages_request(&prompt, &test_model_info(), None)
+        .expect("messages request should build");
+    assert_eq!(request["thinking"]["type"], "enabled");
+    let blocks = request["messages"][1]["content"]
+        .as_array()
+        .expect("assistant blocks");
+    assert_eq!(blocks[0]["type"], "thinking");
+    assert_eq!(blocks[0]["thinking"], "planning");
+    assert!(blocks[0].get("signature").is_none());
+    assert_eq!(blocks[1]["type"], "tool_use");
+}
+
+#[test]
+fn build_messages_request_thinking_replay_degraded_forces_strip() {
+    // G3's forced-degradation entry point: even a signed replay is stripped
+    // along with the thinking parameter for the one bounded retry.
+    let client = thinking_replay_client("https://api.anthropic.com/v1", false);
+    let mut prompt = Prompt::default();
+    prompt.input = thinking_replay_tool_use_history(/*signed*/ true);
+    let request = client
+        .new_session()
+        .build_messages_request_degraded(&prompt, &test_model_info(), None, true)
+        .expect("degraded messages request should build");
+    assert!(request.get("thinking").is_none());
+    let blocks = request["messages"][1]["content"]
+        .as_array()
+        .expect("assistant blocks");
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0]["type"], "tool_use");
+}
+
+#[test]
+fn thinking_replay_400_recovery_class_matches_the_three_documented_texts() {
+    // D-009 finding 3: the three 400 texts guard G3 recognizes.
+    assert_eq!(
+        thinking_400_recovery_class(
+            "messages.1.content.0: Expected `thinking` or `redacted_thinking`, but found `text`"
+        ),
+        Some("expected-thinking-first")
+    );
+    assert_eq!(
+        thinking_400_recovery_class("Expected thinking or redacted_thinking at content index 0"),
+        Some("expected-thinking-first")
+    );
+    assert_eq!(
+        thinking_400_recovery_class(
+            "thinking blocks cannot be modified once they have been sent to the model"
+        ),
+        Some("thinking-immutable")
+    );
+    assert_eq!(
+        thinking_400_recovery_class("INVALID SIGNATURE in thinking block"),
+        Some("invalid-signature")
+    );
+}
+
+#[test]
+fn thinking_replay_400_recovery_class_rejects_unrelated_errors() {
+    assert_eq!(thinking_400_recovery_class("invalid_api_key"), None);
+    assert_eq!(
+        thinking_400_recovery_class("prompt is too long: 300000 tokens > 200000 maximum"),
+        None
+    );
+    assert_eq!(thinking_400_recovery_class(""), None);
+}
+
+#[test]
+fn thinking_replay_upstream_kind_classifies_by_host() {
+    // ADR-0009 discriminator: anthropic.com hosts are first-party; anything
+    // else (gateways, local mocks, lookalike suffixes) fails open to
+    // Compatible so third-party blocks are never silently dropped.
+    assert_eq!(
+        AnthropicUpstreamKind::from_base_url(Some("https://api.anthropic.com/v1")),
+        AnthropicUpstreamKind::FirstParty
+    );
+    assert_eq!(
+        AnthropicUpstreamKind::from_base_url(Some("https://api.anthropic.com:443")),
+        AnthropicUpstreamKind::FirstParty
+    );
+    assert_eq!(
+        AnthropicUpstreamKind::from_base_url(Some("https://ANTHROPIC.COM")),
+        AnthropicUpstreamKind::FirstParty
+    );
+    assert_eq!(
+        AnthropicUpstreamKind::from_base_url(Some("https://api.anthropic.com.attacker.example/")),
+        AnthropicUpstreamKind::Compatible
+    );
+    assert_eq!(
+        AnthropicUpstreamKind::from_base_url(Some(
+            "https://bedrock-runtime.us-east-1.amazonaws.com"
+        )),
+        AnthropicUpstreamKind::Compatible
+    );
+    assert_eq!(
+        AnthropicUpstreamKind::from_base_url(Some("http://localhost:43123/v1")),
+        AnthropicUpstreamKind::Compatible
+    );
+    assert_eq!(
+        AnthropicUpstreamKind::from_base_url(None),
+        AnthropicUpstreamKind::Compatible
+    );
 }

@@ -1,0 +1,56 @@
+{
+  "meta": {
+    "semantic": "streaming_stop",
+    "wire": "anthropic",
+    "scenario": "max_tokens_text_truncation",
+    "verified_at": "2026-09-11",
+    "source": "codex-api/src/sse/messages.rs (ticket 27 def-④)"
+  },
+  "stream_body_events": [
+    {
+      "type": "message_start",
+      "message": {
+        "id": "msg_trunc_fix",
+        "model": "claude-mock-1",
+        "usage": {
+          "input_tokens": 5,
+          "output_tokens": 0
+        }
+      }
+    },
+    {
+      "type": "content_block_start",
+      "index": 0,
+      "content_block": {
+        "type": "text",
+        "text": ""
+      }
+    },
+    {
+      "type": "content_block_delta",
+      "index": 0,
+      "delta": {
+        "type": "text_delta",
+        "text": "partial"
+      }
+    },
+    {
+      "type": "content_block_stop",
+      "index": 0
+    },
+    {
+      "type": "message_delta",
+      "delta": {
+        "stop_reason": "max_tokens"
+      },
+      "usage": {
+        "output_tokens": 3
+      }
+    },
+    {
+      "type": "message_stop"
+    }
+  ],
+  "expect_terminal": "Err(ApiError::ContextWindowExceeded)",
+  "expect_no_completed": true
+}

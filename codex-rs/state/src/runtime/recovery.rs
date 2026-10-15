@@ -74,20 +74,29 @@ impl RuntimeDbInitError {
 
 impl std::fmt::Display for RuntimeDbInitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Ticket 37 r2: this is a leaf error.  The source (which carries
+        // the fail-loud guidance with its help lines) is embedded directly
+        // in Display so it appears exactly once regardless of whether the
+        // caller uses `{}` or `{:#}`.  `source()` returns `None` to stop
+        // the error chain walker from rendering the guidance a second time
+        // (anyhow's `{:#}` walks `source()` without propagating the
+        // alternate flag, which previously caused the non-alternate branch
+        // to embed the source AND the chain walker to render it again).
         write!(
             f,
             "failed to {} {} at {}: {}",
             self.operation,
             self.label,
             self.path.display(),
-            self.source
+            self.source,
         )
     }
 }
 
 impl std::error::Error for RuntimeDbInitError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.source.as_ref())
+        // Leaf: the chain stops here.  The guidance is in Display.
+        None
     }
 }
 

@@ -7,6 +7,7 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 
 use crate::HooksToml;
+use crate::StateDbSettingsToml;
 use crate::browser_use::BrowserUseConfigToml;
 use crate::computer_use::ComputerUseConfigToml;
 use crate::permissions_toml::PermissionsToml;
@@ -485,6 +486,13 @@ pub struct ConfigToml {
 
     /// Memories subsystem settings.
     pub memories: Option<MemoriesToml>,
+
+    /// Local state database settings (fork-only; ticket 31). Controls the
+    /// _sqlx_migrations checksum family maintenance. Defaults to auto:
+    /// follow the family this binary embeds (the official platform
+    /// family); mismatches fail loud with the repair command and nothing
+    /// is rewritten automatically.
+    pub state: Option<StateDbSettingsToml>,
 
     /// User-level skill config entries keyed by SKILL.md path.
     pub skills: Option<SkillsConfig>,
