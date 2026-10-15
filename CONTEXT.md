@@ -218,6 +218,21 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
 - 本仓用法：发行分支上的版本标记，N 从 1 起递增不复用；用 prerelease 形式，不用 build metadata。
 - 禁止用法：使用 rust-v 前缀（会触发上游发布流程）。
 
+### preempt 打断
+- 本仓用法：chat/messages 流式生成中途收到用户新输入时，立即关闭 HTTP 流并对账历史；规则见 `docs/specs/chat-messages-preempt/README.md`。
+- 禁止用法：排空到完成后再处理新输入；与用户 Esc 中断混为一谈。
+- 源：ADR-0013。
+
+### 合成 tool result
+- 本仓用法：为已发出、未执行的 tool call 补写的固定文案结果，保证调用与结果配对（OpenAI 的 `tool` 消息、Anthropic 的 `tool_result` 块）。
+- 禁止用法：伪造成功结果；按工具名定制文案。
+- 源：ADR-0013；spec S-06。
+
+### 中断标记
+- 本仓用法：写入历史的模型可见中断提示，写入与否由 `agent_interrupt_message_enabled` 控制。
+- 禁止用法：以它替代合成 tool result；开关关闭时仍写入。
+- 源：spec S-02、S-05、S-09。
+
 ## 维护
 
 - 变更随其 ADR 入仓（ADR 先于本表）；新词随其 ADR 入表。
