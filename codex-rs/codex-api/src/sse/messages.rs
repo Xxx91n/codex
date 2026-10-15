@@ -186,6 +186,7 @@ pub fn spawn_anthropic_messages_stream(
     ResponseStream {
         rx_event,
         upstream_request_id,
+        interrupt: None,
     }
 }
 

@@ -10,9 +10,9 @@ pub(crate) mod responses_websocket;
 pub(crate) mod search;
 mod session;
 
-pub use images::ImageRequestError;
 pub use chat_completions::ChatCompletionsClient;
 pub use chat_completions::ChatCompletionsOptions;
+pub use images::ImageRequestError;
 pub use images::ImagesClient;
 pub use memories::MemoriesClient;
 pub use messages::MessagesClient;

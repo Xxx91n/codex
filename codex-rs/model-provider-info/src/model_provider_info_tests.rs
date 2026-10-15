@@ -933,6 +933,9 @@ model_catalog_url = "https://gateway.example/codex/catalog?token=catalog-secret"
             .base_url,
         "https://gateway.example/v1"
     );
+}
+
+#[test]
 fn anthropic_max_tokens_is_parsed_and_optional() {
     let provider: ModelProviderInfo = toml::from_str(
         r#"
