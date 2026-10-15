@@ -1,4 +1,5 @@
 use anyhow::Result;
+use codex_features::Feature;
 use codex_model_provider_info::WireApi;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
@@ -10,8 +11,11 @@ use std::sync::Mutex;
 
 use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
+use core_test_support::streaming_sse::StreamingSseChunk;
+use core_test_support::streaming_sse::start_streaming_sse_server;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
+use tokio::sync::oneshot;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::Request;
@@ -549,6 +553,196 @@ async fn chat_wire_reasoning_effort_passthrough() -> Result<()> {
         body["reasoning_effort"], "high",
         "chat request must carry the session reasoning effort"
     );
+
+    Ok(())
+}
+
+fn chat_delta_body(delta: serde_json::Value) -> String {
+    format!(
+        "data: {}
+
+",
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": delta,
+                "finish_reason": null,
+            }]
+        })
+    )
+}
+
+fn chat_delta_chunk(delta: serde_json::Value) -> StreamingSseChunk {
+    StreamingSseChunk {
+        gate: None,
+        body: chat_delta_body(delta),
+    }
+}
+
+/// True for a chat message whose text payload contains `needle`.
+fn message_contains_text(message: &serde_json::Value, needle: &str) -> bool {
+    match &message["content"] {
+        serde_json::Value::String(text) => text.contains(needle),
+        serde_json::Value::Array(parts) => parts.iter().any(|part| {
+            part["text"]
+                .as_str()
+                .is_some_and(|text| text.contains(needle))
+        }),
+        _ => false,
+    }
+}
+
+/// Spec S-01, S-03, S-04, S-06, S-07, S-08: a chat stream preempted mid
+/// generation closes its read at once, and the follow-up request replays the
+/// text that arrived plus the whole tool call paired with the synthetic result
+/// and the preempt marker, while the call cut mid-JSON is gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_wire_preempt_reconciles_the_interrupted_turn() -> Result<()> {
+    let keep_call = "chat-preempt-keep";
+    let cut_call = "chat-preempt-cut";
+    let keep_arguments = r#"{"cmd":"echo keep"}"#;
+    let (_hold_tx, hold_rx) = oneshot::channel();
+    let (server, _completions) = start_streaming_sse_server(vec![
+        vec![
+            chat_delta_chunk(serde_json::json!({
+                "tool_calls": [{
+                    "index": 0,
+                    "id": keep_call,
+                    "type": "function",
+                    "function": {"name": "shell", "arguments": keep_arguments},
+                }]
+            })),
+            chat_delta_chunk(serde_json::json!({
+                "tool_calls": [{
+                    "index": 1,
+                    "id": cut_call,
+                    "type": "function",
+                    "function": {"name": "shell", "arguments": "{\"cmd\":\"ec"},
+                }]
+            })),
+            chat_delta_chunk(serde_json::json!({"content": "partial answer"})),
+            // Held back: the client must reconcile without another frame, so a
+            // drain-to-completion implementation could never pass this test.
+            StreamingSseChunk {
+                gate: Some(hold_rx),
+                body: chat_delta_body(serde_json::json!({"content": "late"})),
+            },
+        ],
+        vec![
+            chat_delta_chunk(serde_json::json!({"content": "after the steer"})),
+            StreamingSseChunk {
+                gate: None,
+                body: "data: [DONE]\n\n".to_string(),
+            },
+        ],
+    ])
+    .await;
+
+    let test = test_codex()
+        .with_config(|config| {
+            config.model_provider.wire_api = WireApi::Chat;
+            config
+                .features
+                .enable(Feature::InstantInterrupt)
+                .expect("enable InstantInterrupt feature");
+        })
+        .build_with_streaming_server(&server)
+        .await?;
+
+    test.codex
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "run the echo command".to_string(),
+                text_elements: Vec::new(),
+            }])
+            .with_thread_settings(
+                codex_protocol::protocol::ThreadSettingsOverrides {
+                    approval_policy: Some(AskForApproval::Never),
+                    ..Default::default()
+                },
+            ),
+        )
+        .await?;
+
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::AgentMessageContentDelta(delta) if delta.delta == "partial answer")
+    })
+    .await;
+
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "answer this instead".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+
+    wait_for_event(&test.codex, |event| match event {
+        EventMsg::TurnComplete(_) => true,
+        EventMsg::Error(error) => panic!("unexpected turn error: {error:?}"),
+        _ => false,
+    })
+    .await;
+
+    server.wait_for_request_count(/*count*/ 2).await;
+    let requests = server.requests().await;
+    let follow_up: serde_json::Value =
+        serde_json::from_slice(&requests[1]).expect("follow-up chat body is json");
+    let messages = follow_up["messages"]
+        .as_array()
+        .expect("chat follow-up must carry messages");
+
+    let position = messages
+        .iter()
+        .position(|message| {
+            message["tool_calls"]
+                .as_array()
+                .is_some_and(|calls| calls.iter().any(|call| call["id"] == keep_call))
+        })
+        .expect("a tool call whose JSON arrived whole must stay in history");
+    let paired_result = &messages[position + 1];
+    assert_eq!(
+        paired_result["role"], "tool",
+        "the synthetic result must sit directly behind its call"
+    );
+    assert_eq!(paired_result["tool_call_id"], keep_call);
+    assert_eq!(
+        paired_result["content"],
+        "The tool call was interrupted before it ran and was not executed. Do not assume it succeeded.",
+        "every interrupted call uses the one fixed sentence"
+    );
+    let replayed = serde_json::to_string(messages).expect("serialize replayed messages");
+    assert!(
+        !replayed.contains(cut_call),
+        "a call cut mid-JSON must not be replayed, or the next request 400s"
+    );
+    assert!(
+        replayed.contains("partial answer"),
+        "text that was received must be kept"
+    );
+    let marker_at = messages
+        .iter()
+        .position(|message| {
+            message_contains_text(
+                message,
+                "The previous response was interrupted by a new user message before it finished.",
+            )
+        })
+        .expect("the preempt marker must be model-visible");
+    let steer_at = messages
+        .iter()
+        .position(|message| message_contains_text(message, "answer this instead"))
+        .expect("the new user message must be in the replayed history");
+    assert!(
+        marker_at < steer_at,
+        "the marker comes after the synthetic result and before the new input"
+    );
+
+    test.codex.submit(Op::Shutdown).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ShutdownComplete)
+    })
+    .await;
+    server.shutdown().await;
 
     Ok(())
 }

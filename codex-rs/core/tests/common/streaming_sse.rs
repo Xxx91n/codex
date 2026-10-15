@@ -123,7 +123,14 @@ pub async fn start_streaming_sse_server(
                             return;
                         }
 
-                        if method == "POST" && (responses_route || path == "/backend-api/codex/guardian") {
+                        // The Chat and Messages wires stream from the same gated
+                        // route, so a preemption test can hold a frame back the
+                        // way the Responses route does.
+                        let streamed_route = responses_route
+                            || path == "/backend-api/codex/guardian"
+                            || path == "/v1/chat/completions"
+                            || path == "/v1/messages";
+                        if method == "POST" && streamed_route {
                             let body = match read_request_body(&mut stream, &request, body_prefix)
                                 .await
                             {

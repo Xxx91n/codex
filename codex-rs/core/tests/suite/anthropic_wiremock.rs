@@ -1,4 +1,5 @@
 use anyhow::Result;
+use codex_features::Feature;
 use codex_model_provider_info::WireApi;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
@@ -10,8 +11,11 @@ use std::sync::Mutex;
 
 use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
+use core_test_support::streaming_sse::StreamingSseChunk;
+use core_test_support::streaming_sse::start_streaming_sse_server;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
+use tokio::sync::oneshot;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::Request;
@@ -751,5 +755,250 @@ async fn anthropic_wire_thinking_replay_400_invalid_signature_degrades_and_retri
         second.get("thinking").is_none(),
         "the G3 retry must strip the thinking parameter (and blocks)"
     );
+    Ok(())
+}
+
+fn messages_event_body(event: serde_json::Value) -> String {
+    format!("data: {event}\n\n")
+}
+
+fn messages_event_chunk(event: serde_json::Value) -> StreamingSseChunk {
+    StreamingSseChunk {
+        gate: None,
+        body: messages_event_body(event),
+    }
+}
+
+/// True for a Messages payload carrying a text block that contains `needle`.
+fn message_contains_text(message: &serde_json::Value, needle: &str) -> bool {
+    match &message["content"] {
+        serde_json::Value::String(text) => text.contains(needle),
+        serde_json::Value::Array(blocks) => blocks.iter().any(|block| {
+            block["text"]
+                .as_str()
+                .is_some_and(|text| text.contains(needle))
+        }),
+        _ => false,
+    }
+}
+
+/// Spec S-01, S-03, S-04, S-06, S-07, S-08, S-10: a Messages stream preempted
+/// mid-generation closes its read at once, and the follow-up request replays the
+/// received text and the whole tool_use paired with the synthetic result plus the
+/// preempt marker, while the truncated tool_use and the unsigned thinking block
+/// are gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn anthropic_wire_preempt_reconciles_the_interrupted_turn() -> Result<()> {
+    let keep_call = "toolu-preempt-keep";
+    let cut_call = "toolu-preempt-cut";
+    let keep_arguments = r#"{"command":"echo keep"}"#;
+    let (_hold_tx, hold_rx) = oneshot::channel();
+    let (server, _completions) = start_streaming_sse_server(vec![
+        vec![
+            messages_event_chunk(serde_json::json!({
+                "type": "message_start",
+                "message": {"id": "msg_preempt_1", "model": "claude-test"},
+            })),
+            messages_event_chunk(serde_json::json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "thinking"},
+            })),
+            messages_event_chunk(serde_json::json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "cut off inside the block"},
+            })),
+            messages_event_chunk(serde_json::json!({
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {"type": "tool_use", "id": keep_call, "name": "shell"},
+            })),
+            messages_event_chunk(serde_json::json!({
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": keep_arguments},
+            })),
+            messages_event_chunk(serde_json::json!({
+                "type": "content_block_start",
+                "index": 2,
+                "content_block": {"type": "tool_use", "id": cut_call, "name": "shell"},
+            })),
+            messages_event_chunk(serde_json::json!({
+                "type": "content_block_delta",
+                "index": 2,
+                "delta": {"type": "input_json_delta", "partial_json": "{\"command\":\"ec"},
+            })),
+            messages_event_chunk(serde_json::json!({
+                "type": "content_block_start",
+                "index": 3,
+                "content_block": {"type": "text"},
+            })),
+            messages_event_chunk(serde_json::json!({
+                "type": "content_block_delta",
+                "index": 3,
+                "delta": {"type": "text", "text": "half an answer"},
+            })),
+            // Held back: reconciliation may not wait for another frame.
+            StreamingSseChunk {
+                gate: Some(hold_rx),
+                body: messages_event_body(serde_json::json!({
+                    "type": "content_block_delta",
+                    "index": 3,
+                    "delta": {"type": "text", "text": " later"},
+                })),
+            },
+        ],
+        vec![
+            messages_event_chunk(serde_json::json!({
+                "type": "message_start",
+                "message": {"id": "msg_preempt_2", "model": "claude-test"},
+            })),
+            messages_event_chunk(serde_json::json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text"},
+            })),
+            messages_event_chunk(serde_json::json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text", "text": "after the steer"},
+            })),
+            messages_event_chunk(serde_json::json!({
+                "type": "content_block_stop",
+                "index": 0,
+            })),
+            messages_event_chunk(serde_json::json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"output_tokens": 4},
+            })),
+            messages_event_chunk(serde_json::json!({"type": "message_stop"})),
+        ],
+    ])
+    .await;
+
+    let test = test_codex()
+        .with_config(|config| {
+            config.model_provider.wire_api = WireApi::Anthropic;
+            config
+                .features
+                .enable(Feature::InstantInterrupt)
+                .expect("enable InstantInterrupt feature");
+        })
+        .build_with_streaming_server(&server)
+        .await?;
+
+    test.codex
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "run the echo command".to_string(),
+                text_elements: Vec::new(),
+            }])
+            .with_thread_settings(
+                codex_protocol::protocol::ThreadSettingsOverrides {
+                    approval_policy: Some(AskForApproval::Never),
+                    ..Default::default()
+                },
+            ),
+        )
+        .await?;
+
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::AgentMessageContentDelta(delta) if delta.delta == "half an answer")
+    })
+    .await;
+
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "answer this instead".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+
+    wait_for_event(&test.codex, |event| match event {
+        EventMsg::TurnComplete(_) => true,
+        EventMsg::Error(error) => panic!("unexpected turn error: {error:?}"),
+        _ => false,
+    })
+    .await;
+
+    server.wait_for_request_count(/*count*/ 2).await;
+    let requests = server.requests().await;
+    let follow_up: serde_json::Value =
+        serde_json::from_slice(&requests[1]).expect("follow-up messages body is json");
+    let messages = follow_up["messages"]
+        .as_array()
+        .expect("messages follow-up must carry messages");
+
+    let position = messages
+        .iter()
+        .position(|message| {
+            message["content"].as_array().is_some_and(|blocks| {
+                blocks
+                    .iter()
+                    .any(|block| block["type"] == "tool_use" && block["id"] == keep_call)
+            })
+        })
+        .expect("a tool_use whose input JSON arrived whole must stay in history");
+    assert_eq!(
+        messages[position]["role"], "assistant",
+        "the retained tool_use replays inside an assistant message"
+    );
+
+    let result_message = &messages[position + 1];
+    assert_eq!(
+        result_message["role"], "user",
+        "the tool result travels in the user message that follows its call"
+    );
+    let blocks = result_message["content"]
+        .as_array()
+        .expect("user content blocks");
+    assert_eq!(blocks[0]["type"], "tool_result");
+    assert_eq!(blocks[0]["tool_use_id"], keep_call);
+    assert_eq!(
+        blocks[0]["content"],
+        "The tool call was interrupted before it ran and was not executed. Do not assume it succeeded.",
+        "every interrupted call uses the one fixed sentence"
+    );
+
+    let replayed = serde_json::to_string(messages).expect("serialize replayed messages");
+    assert!(
+        replayed.contains("half an answer"),
+        "text that was received must be kept"
+    );
+    assert!(
+        !replayed.contains(cut_call),
+        "a tool_use cut mid-JSON must not be replayed, or the next request 400s"
+    );
+    assert!(
+        !replayed.contains("\"type\":\"thinking\""),
+        "an unsigned thinking block must be dropped, never given a fabricated signature"
+    );
+    let marker_at = messages
+        .iter()
+        .position(|message| {
+            message_contains_text(
+                message,
+                "The previous response was interrupted by a new user message before it finished.",
+            )
+        })
+        .expect("the preempt marker must be model-visible");
+    let steer_at = messages
+        .iter()
+        .position(|message| message_contains_text(message, "answer this instead"))
+        .expect("the new user message must be in the replayed history");
+    assert!(
+        marker_at > position && marker_at < steer_at,
+        "the marker sits behind the synthetic result and before the new input"
+    );
+
+    test.codex.submit(Op::Shutdown).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ShutdownComplete)
+    })
+    .await;
+    server.shutdown().await;
+
     Ok(())
 }
