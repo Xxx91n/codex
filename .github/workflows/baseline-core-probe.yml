@@ -1,0 +1,40 @@
+# Probe only: runs backlog #12 test filters on the unmodified upstream tag tree.
+name: baseline-core-probe
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 300
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: codex-rs
+      - name: codex-api files (blob upload)
+        id: t1
+        continue-on-error: true
+        shell: bash
+        run: cargo test --locked --no-fail-fast --lib -p codex-api files
+      - name: codex-core exec full-buffer capture
+        id: t2
+        continue-on-error: true
+        shell: bash
+        run: cargo test --locked --no-fail-fast --lib -p codex-core full_buffer_capture
+      - name: codex-core managed_network_proxy
+        id: t3
+        continue-on-error: true
+        shell: bash
+        run: cargo test --locked --no-fail-fast --lib -p codex-core managed_network_proxy
+      - name: Outcome summary
+        shell: bash
+        run: |
+          echo "codex-api files: ${{ steps.t1.outcome }}"
+          echo "core full_buffer_capture: ${{ steps.t2.outcome }}"
+          echo "core managed_network_proxy: ${{ steps.t3.outcome }}"
