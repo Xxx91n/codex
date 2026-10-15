@@ -24,7 +24,6 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::openai_models::ModelsResponse;
 
 use crate::ProviderCapabilities;
-#[cfg(test)]
 use crate::RemoteCompactionSupport;
 use crate::ResolvedResponsesProvider;
 use crate::amazon_bedrock::AmazonBedrockModelProvider;
