@@ -206,9 +206,9 @@ jobs:
         run: cargo test --locked --lib -p codex-api -p codex-model-provider-info
 
   config-schema:
-    # Pilot-only: regenerate codex-rs/core/config.schema.json (upstream copy
-    # is stale against the fork ModelProviderInfo fields) and upload it so the
-    # regenerated file can be committed back. Not part of the release path.
+    # Regenerate codex-rs/core/config.schema.json from the checked-out tree and
+    # upload it as an artifact so the committed schema can be kept in sync with
+    # ConfigToml. Read-only with respect to the repo; not part of the release path.
     if: ${{ contains(inputs.platforms, 'windows') || inputs.platforms == 'all' }}
     runs-on: ubuntu-latest
     defaults:
