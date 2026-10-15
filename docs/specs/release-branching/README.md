@@ -1,6 +1,6 @@
 # 上游稳定版发行分支规格
 
-状态：草案，待首版（rust-v0.162.1）样板验证。规则依据：[ADR-0012](../../adr/0012-release-branching-scheme.md)。
+状态：首版（rust-v0.162.1）样板已在 Windows CI 通过（run 38708780625）；Linux/macOS 与其余待办见 backlog。规则依据：[ADR-0012](../../adr/0012-release-branching-scheme.md)。
 
 ## 1. 基线
 - 上游稳定 tag：220 个，格式 rust-vX.Y.Z（无 alpha/beta）。
@@ -14,7 +14,7 @@
 - 分支：tri/vX.Y.Z，例 tri/v0.162.1。
 - 标签：tri-vX.Y.Z-tri.N，N 从 1 起，不复用。禁止 rust-v 前缀。
 - Cargo 版本：X.Y.Z-tri.N。
-- 主分支目标名：tri-wire-api（改名待批，见第 6 节）。
+- 主分支名：tri-wire-api（2026-10-15 已改名，远端默认分支已切换，旧名 feat/tri-wire-api 已删除）。
 
 ## 3. 每版流程（顺序固定）
 先用首版跑通全流程，再批量回溯其余版本；每批有可验证的每版验收标准。

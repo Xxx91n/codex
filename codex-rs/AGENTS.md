@@ -1,6 +1,6 @@
 # codex-rs (Rust workspace)
 
-Rust workspace of the `feat/tri-wire-api` fork of `openai/codex`. Crate names are
+Rust workspace of the `tri-wire-api` fork of `openai/codex`. Crate names are
 prefixed `codex-` (the `core` folder's crate is `codex-core`, etc.). This file
 scopes everything under `codex-rs/`; it adds fork-specific rules on top of the
 repo-root `AGENTS.md`.

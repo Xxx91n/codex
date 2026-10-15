@@ -1,6 +1,6 @@
 # Architecture Decision Records — Index
 
-Decision log for the `feat/tri-wire-api` fork (Nygard template:
+Decision log for the `tri-wire-api` fork (Nygard template:
 Status / Context / Decision / Consequences). Append-only per ADR-0001:
 accepted records are not edited; a changed decision writes a new record
 that supersedes and links the old one, incrementing the `NNNN` counter.

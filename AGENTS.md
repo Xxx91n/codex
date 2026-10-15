@@ -321,7 +321,7 @@ Codex supports running connected app-server and exec-server on different operati
 
 ## Fork delta: tri-wire-api
 
-This fork (`feat/tri-wire-api`) speaks three outbound wire protocols on one
+This fork (`tri-wire-api`) speaks three outbound wire protocols on one
 internal representation (`ResponseItem`): **Responses** (upstream's only wire),
 **Chat Completions** (removed upstream Feb 2026, PR #10157; restored here), and
 **Anthropic Messages** (added here, goose-blueprint in-process transport).
