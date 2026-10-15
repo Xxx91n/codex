@@ -409,12 +409,68 @@ pub fn create_text_param_for_request(
     })
 }
 
+/// Half of [`preempt_channel`] held by the streaming task.
+///
+/// The task races `stop` against reading the next upstream frame: when `stop`
+/// fires it must answer with the representation items it still holds in
+/// flight and stop reading, never drain to the protocol's own end.
+pub struct PreemptWatcher {
+    pub stop: oneshot::Receiver<()>,
+    pub pending: oneshot::Sender<Vec<ResponseItem>>,
+}
+
+/// Client-side interrupt seam for the HTTP wires that have no protocol
+/// interrupt frame (Chat Completions and Anthropic Messages).
+///
+/// [`ResponseStream::interrupt`] asks the server to stop and keeps consuming
+/// through completion; preemption is the opposite: the new user input is
+/// already here, so the read closes immediately and the in-flight items are
+/// handed back for history reconciliation (ADR-0013,
+/// `docs/specs/chat-messages-preempt`). The retained items are protocol
+/// obligations, not a stop condition: `stop_reason` and finish flags stay
+/// untouched.
+pub struct PreemptHandle {
+    stop: oneshot::Sender<()>,
+    pending: oneshot::Receiver<Vec<ResponseItem>>,
+}
+
+/// Creates the two halves of the preemption seam. Wires with no preempt
+/// support leave [`ResponseStream::preempt`] as `None`.
+pub fn preempt_channel() -> (PreemptHandle, PreemptWatcher) {
+    let (stop_tx, stop_rx) = oneshot::channel();
+    let (pending_tx, pending_rx) = oneshot::channel();
+    (
+        PreemptHandle {
+            stop: stop_tx,
+            pending: pending_rx,
+        },
+        PreemptWatcher {
+            stop: stop_rx,
+            pending: pending_tx,
+        },
+    )
+}
+
+impl PreemptHandle {
+    /// Closes the upstream read now and returns the items the wire had in
+    /// flight. A task that already exited reports nothing in flight, which is
+    /// the correct answer: there is nothing left to reconcile.
+    pub async fn preempt(self) -> Vec<ResponseItem> {
+        let Self { stop, pending } = self;
+        let _ = stop.send(());
+        pending.await.unwrap_or_default()
+    }
+}
+
 pub struct ResponseStream {
     pub rx_event: mpsc::Receiver<Result<ResponseEvent, ApiError>>,
     /// Server-assigned `x-request-id` response header, when present.
     pub upstream_request_id: Option<String>,
     /// Requests a graceful interrupt. Keep consuming events through completion.
     pub interrupt: Option<oneshot::Sender<()>>,
+    /// Requests a client-side preemption. Close the read and hand back the
+    /// in-flight items. Set only on the Chat and Messages wires.
+    pub preempt: Option<PreemptHandle>,
 }
 
 impl Stream for ResponseStream {

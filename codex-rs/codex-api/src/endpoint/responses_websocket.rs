@@ -345,6 +345,7 @@ impl ResponsesWebsocketConnection {
             rx_event,
             upstream_request_id: None,
             interrupt: Some(tx_interrupt),
+            preempt: None,
         })
     }
 }

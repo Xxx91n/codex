@@ -318,6 +318,9 @@ async fn truncated_stream_never_double_adds_active_thinking_block() {
         tx,
         std::time::Duration::from_secs(30),
         /*telemetry*/ None,
+        // Dropped handle: the seam stays disarmed and the read finishes on its
+        // own, exactly as before preemption existed.
+        preempt_channel().1,
     ));
 
     let mut events = Vec::new();
@@ -403,6 +406,9 @@ async fn messages_sse_stream_closed_before_message_stop_is_terminal_error_not_co
         tx,
         std::time::Duration::from_secs(30),
         /*telemetry*/ None,
+        // Dropped handle: the seam stays disarmed and the read finishes on its
+        // own, exactly as before preemption existed.
+        preempt_channel().1,
     ));
     let mut events = Vec::new();
     while let Some(ev) = rx.recv().await {
@@ -581,6 +587,9 @@ async fn plain_text_max_tokens_maps_to_context_window_exceeded() {
         tx,
         std::time::Duration::from_secs(30),
         None,
+        // Dropped handle: the seam stays disarmed and the read finishes on its
+        // own, exactly as before preemption existed.
+        preempt_channel().1,
     ));
     let mut events = Vec::new();
     while let Some(ev) = rx.recv().await {
@@ -649,6 +658,9 @@ async fn redacted_thinking_block_is_preserved_and_emitted() {
         tx,
         std::time::Duration::from_secs(30),
         None,
+        // Dropped handle: the seam stays disarmed and the read finishes on its
+        // own, exactly as before preemption existed.
+        preempt_channel().1,
     ));
     let mut events = Vec::new();
     while let Some(ev) = rx.recv().await {
@@ -794,6 +806,9 @@ async fn stop_reason_telemetry_counts_per_stream() {
         tx,
         std::time::Duration::from_secs(30),
         Some(telemetry.clone() as std::sync::Arc<dyn SseTelemetry>),
+        // Dropped handle: the seam stays disarmed and the read finishes on its
+        // own, exactly as before preemption existed.
+        preempt_channel().1,
     ));
     while rx.recv().await.is_some() {}
 
@@ -806,5 +821,88 @@ async fn stop_reason_telemetry_counts_per_stream() {
         recorded,
         vec![("max_tokens".to_string(), Some(77))],
         "stop_reason hook must fire once per stream with reason + output tokens"
+    );
+}
+
+/// The preemption snapshot hands the wire what actually arrived: no invented
+/// signature, no fabricated argument object, only the no-argument block's
+/// `{}` spelling that the finish path also uses.
+#[test]
+fn pending_ir_passes_the_in_flight_blocks_through_unrepaired() {
+    let mut thinking_blocks = BTreeMap::new();
+    thinking_blocks.insert(
+        0,
+        AggregatedThinking {
+            text: "cut off".to_string(),
+            signature: None,
+        },
+    );
+    let mut tool_uses = BTreeMap::new();
+    tool_uses.insert(
+        1,
+        AggregatedToolUse {
+            id: "toolu-cut".to_string(),
+            name: "exec_command".to_string(),
+            partial_json: r#"{"cmd":"ec"#.to_string(),
+        },
+    );
+    tool_uses.insert(
+        2,
+        AggregatedToolUse {
+            id: "toolu-whole".to_string(),
+            name: "exec_command".to_string(),
+            partial_json: String::new(),
+        },
+    );
+
+    let pending = messages_pending_ir(
+        &thinking_blocks,
+        &BTreeMap::new(),
+        &tool_uses,
+        "half an answer",
+    );
+
+    assert_eq!(
+        pending,
+        vec![
+            ResponseItem::Reasoning {
+                id: None,
+                summary: Vec::new(),
+                content: Some(vec![
+                    codex_protocol::models::ReasoningItemContent::ReasoningText {
+                        text: "cut off".to_string(),
+                    }
+                ]),
+                encrypted_content: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::FunctionCall {
+                id: None,
+                name: "exec_command".to_string(),
+                namespace: None,
+                arguments: r#"{"cmd":"ec"#.to_string(),
+                encrypted_function_args: None,
+                call_id: "toolu-cut".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::FunctionCall {
+                id: None,
+                name: "exec_command".to_string(),
+                namespace: None,
+                arguments: "{}".to_string(),
+                encrypted_function_args: None,
+                call_id: "toolu-whole".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: "half an answer".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ],
     );
 }

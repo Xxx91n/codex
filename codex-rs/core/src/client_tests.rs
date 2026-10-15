@@ -2135,6 +2135,7 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
             rx_event,
             upstream_request_id: None,
             interrupt: None,
+            preempt: None,
         },
         test_session_telemetry(),
         attempt,

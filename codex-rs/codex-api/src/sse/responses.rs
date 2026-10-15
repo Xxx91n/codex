@@ -100,6 +100,9 @@ pub fn spawn_response_stream(
         rx_event,
         upstream_request_id,
         interrupt: None,
+        // Responses owns its own interrupt semantics; preemption reconciliation
+        // is defined only for the Chat and Messages wires.
+        preempt: None,
     }
 }
 

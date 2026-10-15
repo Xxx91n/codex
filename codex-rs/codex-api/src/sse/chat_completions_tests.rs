@@ -14,6 +14,9 @@ async fn run_chat_sse(body: String) -> Vec<Result<ResponseEvent, ApiError>> {
         tx,
         std::time::Duration::from_secs(30),
         /*telemetry*/ None,
+        // Dropped handle: the seam stays disarmed and the read finishes on its
+        // own, exactly as before preemption existed.
+        preempt_channel().1,
     ));
     let mut events = Vec::new();
     while let Some(ev) = rx.recv().await {
@@ -535,6 +538,9 @@ async fn chat_sse_byte_by_byte_rechunking_yields_identical_items() {
         tx,
         std::time::Duration::from_secs(30),
         /*telemetry*/ None,
+        // Dropped handle: the seam stays disarmed and the read finishes on its
+        // own, exactly as before preemption existed.
+        preempt_channel().1,
     ));
     let mut split_events = Vec::new();
     while let Some(ev) = rx.recv().await {
@@ -748,4 +754,58 @@ async fn chat_chunk_with_partial_usage_still_emits_choices() {
         "text delta from partial-usage chunk must survive: {events:?}"
     );
     assert!(saw_completed, "stream should complete: {events:?}");
+}
+
+/// Spec S-01: preemption closes the read instead of draining it, and hands back
+/// the frames it had already aggregated so the wire can reconcile history.
+#[tokio::test]
+async fn preemption_closes_the_read_and_hands_back_the_in_flight_ir() {
+    // One delivered frame, then a read that never yields: without preemption
+    // this stream would sit until the idle timeout.
+    let frames: Vec<Result<bytes::Bytes, TransportError>> = vec![Ok(bytes::Bytes::from(
+        chunk(serde_json::json!({"content": "partial answer"}), None).into_bytes(),
+    ))];
+    let stalled: futures::stream::Pending<Result<bytes::Bytes, TransportError>> =
+        futures::stream::pending();
+    let stream = futures::stream::iter(frames).chain(stalled);
+    let (tx_event, mut rx_event) = mpsc::channel::<Result<ResponseEvent, ApiError>>(16);
+    let (preempt, watcher) = preempt_channel();
+    tokio::spawn(super::process_chat_sse(
+        Box::pin(stream),
+        tx_event,
+        std::time::Duration::from_secs(30),
+        /*telemetry*/ None,
+        watcher,
+    ));
+
+    // Consume until the delta proves the aggregation is in place.
+    loop {
+        let event = rx_event
+            .recv()
+            .await
+            .expect("the text delta should arrive before any [DONE]");
+        if matches!(&event, Ok(ResponseEvent::OutputTextDelta(text)) if text == "partial answer") {
+            break;
+        }
+    }
+
+    let pending = preempt.preempt().await;
+
+    assert_eq!(
+        pending,
+        vec![ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: "partial answer".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }],
+        "received text is handed back rather than dropped"
+    );
+    assert!(
+        rx_event.recv().await.is_none(),
+        "the stream ends at preemption: no Completed event, no drain to [DONE]"
+    );
 }

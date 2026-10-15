@@ -1,5 +1,7 @@
+use crate::common::PreemptWatcher;
 use crate::common::ResponseEvent;
 use crate::common::ResponseStream;
+use crate::common::preempt_channel;
 use crate::error::ApiError;
 use crate::telemetry::SseTelemetry;
 use codex_client::ByteStream;
@@ -132,18 +134,27 @@ pub fn spawn_chat_completions_stream(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
 
+    let (preempt, watcher) = preempt_channel();
     let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent, ApiError>>(1600);
     tokio::spawn(async move {
         if let Some(model) = server_model {
             let _ = tx_event.send(Ok(ResponseEvent::ServerModel(model))).await;
         }
-        process_chat_sse(stream_response.bytes, tx_event, idle_timeout, telemetry).await;
+        process_chat_sse(
+            stream_response.bytes,
+            tx_event,
+            idle_timeout,
+            telemetry,
+            watcher,
+        )
+        .await;
     });
 
     ResponseStream {
         rx_event,
         upstream_request_id,
         interrupt: None,
+        preempt: Some(preempt),
     }
 }
 
@@ -152,7 +163,13 @@ async fn process_chat_sse(
     tx_event: mpsc::Sender<Result<ResponseEvent, ApiError>>,
     idle_timeout: Duration,
     telemetry: Option<Arc<dyn SseTelemetry>>,
+    preempt: PreemptWatcher,
 ) {
+    let PreemptWatcher {
+        stop,
+        pending: pending_ir,
+    } = preempt;
+    let mut stop = stop;
     let mut stream = stream.eventsource();
     let mut created_emitted = false;
     let mut response_id: Option<String> = None;
@@ -167,10 +184,31 @@ async fn process_chat_sse(
     // first content/tool_calls delta (the switch point) or at [DONE].
     let mut reasoning_text: Option<String> = None;
     let mut reasoning_done = false;
+    // Disarmed when the handle was dropped instead of fired: dropping the
+    // stream is the plain "consumer went away" case, which the read loop has
+    // always handled by finishing on its own.
+    let mut preempt_armed = true;
 
     loop {
         let start = Instant::now();
-        let response = timeout(idle_timeout, stream.next()).await;
+        // Preemption closes the read immediately (spec S-01): the frames that
+        // were already aggregated are handed back for reconciliation instead
+        // of draining the HTTP stream to `[DONE]`.
+        let response = tokio::select! {
+            result = &mut stop, if preempt_armed => {
+                if result.is_err() {
+                    preempt_armed = false;
+                    continue;
+                }
+                let _ = pending_ir.send(chat_pending_ir(
+                    reasoning_text.take(),
+                    &assistant_text,
+                    &tool_calls,
+                ));
+                return;
+            }
+            response = timeout(idle_timeout, stream.next()) => response,
+        };
         if let Some(t) = telemetry.as_ref() {
             t.on_sse_poll(&response, start.elapsed());
         }
@@ -329,6 +367,63 @@ fn reasoning_delta(delta: &ChatDelta) -> Option<String> {
         .clone()
         .filter(|text| !text.is_empty())
         .or_else(|| delta.reasoning.clone().filter(|text| !text.is_empty()))
+}
+
+/// The IR still in flight when preemption closes the read, in the order a
+/// finished turn emits it ([`emit_chat_completion_items`]): the open reasoning
+/// segment, then buffered tool calls, then the assistant text.
+///
+/// Bytes are handed over unedited on purpose. An open reasoning segment never
+/// reached its switch point, a tool call may carry truncated arguments, and the
+/// assistant text may be cut mid-segment: deciding what survives is the chat
+/// wire's reconciliation, not this state machine's.
+fn chat_pending_ir(
+    reasoning_text: Option<String>,
+    assistant_text: &str,
+    tool_calls: &[AggregatedToolCall],
+) -> Vec<ResponseItem> {
+    let mut items = Vec::new();
+    if let Some(text) = reasoning_text
+        && !text.trim().is_empty()
+    {
+        items.push(ResponseItem::Reasoning {
+            id: None,
+            summary: Vec::new(),
+            content: Some(vec![ReasoningItemContent::ReasoningText { text }]),
+            encrypted_content: None,
+            internal_chat_message_metadata_passthrough: None,
+        });
+    }
+    for (index, call) in tool_calls.iter().enumerate() {
+        if call.name.trim().is_empty() {
+            continue;
+        }
+        let call_id = call
+            .id
+            .clone()
+            .unwrap_or_else(|| format!("chat_tool_call_{index}"));
+        items.push(ResponseItem::FunctionCall {
+            id: None,
+            name: call.name.clone(),
+            namespace: None,
+            arguments: call.arguments.clone(),
+            encrypted_function_args: None,
+            call_id,
+            internal_chat_message_metadata_passthrough: None,
+        });
+    }
+    if !assistant_text.trim().is_empty() {
+        items.push(ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: assistant_text.to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        });
+    }
+    items
 }
 
 /// Emits the completed Reasoning item for an open reasoning segment. Chat has

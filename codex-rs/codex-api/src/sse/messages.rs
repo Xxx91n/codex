@@ -1,5 +1,7 @@
+use crate::common::PreemptWatcher;
 use crate::common::ResponseEvent;
 use crate::common::ResponseStream;
+use crate::common::preempt_channel;
 use crate::error::ApiError;
 use crate::telemetry::SseTelemetry;
 use codex_client::ByteStream;
@@ -178,15 +180,24 @@ pub fn spawn_anthropic_messages_stream(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
 
+    let (preempt, watcher) = preempt_channel();
     let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent, ApiError>>(1600);
     tokio::spawn(async move {
-        process_messages_sse(stream_response.bytes, tx_event, idle_timeout, telemetry).await;
+        process_messages_sse(
+            stream_response.bytes,
+            tx_event,
+            idle_timeout,
+            telemetry,
+            watcher,
+        )
+        .await;
     });
 
     ResponseStream {
         rx_event,
         upstream_request_id,
         interrupt: None,
+        preempt: Some(preempt),
     }
 }
 
@@ -195,7 +206,13 @@ async fn process_messages_sse(
     tx_event: mpsc::Sender<Result<ResponseEvent, ApiError>>,
     idle_timeout: Duration,
     telemetry: Option<Arc<dyn SseTelemetry>>,
+    preempt: PreemptWatcher,
 ) {
+    let PreemptWatcher {
+        stop,
+        pending: pending_ir,
+    } = preempt;
+    let mut stop = stop;
     let mut stream = stream.eventsource();
     let mut created_emitted = false;
     let mut response_id: Option<String> = None;
@@ -209,10 +226,32 @@ async fn process_messages_sse(
     let mut thinking_blocks: BTreeMap<usize, AggregatedThinking> = BTreeMap::new();
     let mut redacted_blocks: BTreeMap<usize, AggregatedRedactedThinking> = BTreeMap::new();
     let mut stop_reason: Option<String> = None;
+    // Disarmed when the handle was dropped instead of fired: dropping the
+    // stream is the plain "consumer went away" case, which the read loop has
+    // always handled by finishing on its own.
+    let mut preempt_armed = true;
 
     loop {
         let start = Instant::now();
-        let response = timeout(idle_timeout, stream.next()).await;
+        // Preemption closes the read immediately (spec S-01). `stop_reason`
+        // stays whatever the protocol reported: preemption is a client-side
+        // interrupt, never a finish condition (wire red line 12).
+        let response = tokio::select! {
+            result = &mut stop, if preempt_armed => {
+                if result.is_err() {
+                    preempt_armed = false;
+                    continue;
+                }
+                let _ = pending_ir.send(messages_pending_ir(
+                    &thinking_blocks,
+                    &redacted_blocks,
+                    &tool_uses,
+                    &assistant_text,
+                ));
+                return;
+            }
+            response = timeout(idle_timeout, stream.next()) => response,
+        };
         if let Some(t) = telemetry.as_ref() {
             t.on_sse_poll(&response, start.elapsed());
         }
@@ -494,6 +533,90 @@ async fn process_messages_sse(
             }
         }
     }
+}
+
+/// The IR still in flight when preemption closes the read, in the order a
+/// finished turn emits it ([`finish_messages_stream`]): thinking blocks,
+/// redacted thinking blocks, tool_use blocks, then the assistant text.
+///
+/// Nothing is repaired here. A thinking block that never got its
+/// `signature_delta` stays unsigned, a tool_use that was cut off keeps its
+/// truncated `input_json_delta` buffer, and the assistant text may end
+/// mid-segment: deciding what is faithful enough to keep is the Messages
+/// wire's reconciliation, and inventing a signature or an argument object is
+/// not an option (wire red lines 3 and 4).
+fn messages_pending_ir(
+    thinking_blocks: &BTreeMap<usize, AggregatedThinking>,
+    redacted_blocks: &BTreeMap<usize, AggregatedRedactedThinking>,
+    tool_uses: &BTreeMap<usize, AggregatedToolUse>,
+    assistant_text: &str,
+) -> Vec<ResponseItem> {
+    let mut items = Vec::new();
+    for thinking in thinking_blocks.values() {
+        items.push(ResponseItem::Reasoning {
+            id: None,
+            summary: Vec::new(),
+            content: Some(vec![
+                codex_protocol::models::ReasoningItemContent::ReasoningText {
+                    text: thinking.text.clone(),
+                },
+            ]),
+            encrypted_content: thinking.signature.clone(),
+            internal_chat_message_metadata_passthrough: None,
+        });
+    }
+    for redacted in redacted_blocks.values() {
+        // Same fork-internal `data\0sig` combined encoding as
+        // `content_block_stop` and the finish flush.
+        let data = redacted.data.as_deref().unwrap_or_default();
+        let signature = redacted.signature.as_deref().unwrap_or_default();
+        items.push(ResponseItem::Reasoning {
+            id: None,
+            summary: Vec::new(),
+            content: None,
+            encrypted_content: Some(format!("{data}\0{signature}")),
+            internal_chat_message_metadata_passthrough: None,
+        });
+    }
+    for (index, call) in tool_uses {
+        if call.name.trim().is_empty() {
+            continue;
+        }
+        // A no-argument tool_use carries no input_json_delta; an empty buffer
+        // is `{}` exactly as the finish path serializes it. A non-empty buffer
+        // is passed through unparsed so the reconciler can spot truncation.
+        let arguments = if call.partial_json.is_empty() {
+            "{}".to_string()
+        } else {
+            call.partial_json.clone()
+        };
+        let call_id = if call.id.is_empty() {
+            format!("toolu_stream_{index}")
+        } else {
+            call.id.clone()
+        };
+        items.push(ResponseItem::FunctionCall {
+            id: None,
+            name: call.name.clone(),
+            namespace: None,
+            arguments,
+            encrypted_function_args: None,
+            call_id,
+            internal_chat_message_metadata_passthrough: None,
+        });
+    }
+    if !assistant_text.trim().is_empty() {
+        items.push(ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: assistant_text.to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        });
+    }
+    items
 }
 
 /// Emits the buffered items and the completion marker, or a terminal error

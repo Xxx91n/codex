@@ -1,3 +1,4 @@
+use codex_api::PreemptHandle;
 pub use codex_api::ResponseEvent;
 use codex_protocol::error::Result;
 use codex_protocol::models::BaseInstructions;
@@ -118,6 +119,11 @@ fn normalize_image_detail(detail: &mut Option<ImageDetail>, model_info: &ModelIn
 pub struct ResponseStream {
     pub(crate) rx_event: mpsc::Receiver<Result<ResponseEvent>>,
     pub(crate) interrupt: Option<oneshot::Sender<()>>,
+    /// Client-side preemption seam of the Chat and Messages wires: firing it
+    /// closes the upstream read immediately and returns the IR the wire still
+    /// held in flight, which that wire's module reconciles into history items
+    /// (ADR-0013). `None` on Responses, whose interrupt stays as-is.
+    pub(crate) preempt: Option<PreemptHandle>,
     /// Signals the mapper task that the consumer stopped polling before the
     /// provider stream reached its own terminal event.
     pub(crate) consumer_dropped: CancellationToken,

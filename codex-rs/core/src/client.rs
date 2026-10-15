@@ -159,6 +159,8 @@ use codex_response_debug_context::telemetry_transport_error_message;
 
 mod wire;
 
+pub(crate) use wire::reconcile_preempted;
+
 pub const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
 pub const X_CODEX_INSTALLATION_ID_HEADER: &str = "x-codex-installation-id";
 pub const X_CODEX_ROUTING_HINT_HEADER: &str = "x-codex-routing-hint";
@@ -2407,6 +2409,7 @@ fn map_response_stream(
 ) -> (ResponseStream, oneshot::Receiver<LastResponse>) {
     let upstream_request_id = api_stream.upstream_request_id.take();
     let interrupt = api_stream.interrupt.take();
+    let preempt = api_stream.preempt.take();
     let (mut stream, last_response) = map_response_events(
         upstream_request_id,
         crate::model_request::intercept_stream(Box::pin(api_stream), interceptors),
@@ -2415,6 +2418,7 @@ fn map_response_stream(
         provider,
     );
     stream.interrupt = interrupt;
+    stream.preempt = preempt;
     (stream, last_response)
 }
 
@@ -2563,6 +2567,7 @@ where
         ResponseStream {
             rx_event,
             interrupt: None,
+            preempt: None,
             consumer_dropped: consumer_dropped_for_stream,
         },
         rx_last_response,

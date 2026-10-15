@@ -32,6 +32,7 @@ async fn interceptors_forward_before_completion_in_order_and_cancel_upstream() {
             ResponseStream {
                 rx_event,
                 interrupt: None,
+                preempt: None,
                 consumer_dropped,
             }
             .map(|event| {
