@@ -975,23 +975,46 @@ async fn anthropic_wire_preempt_reconciles_the_interrupted_turn() -> Result<()> 
         !replayed.contains("\"type\":\"thinking\""),
         "an unsigned thinking block must be dropped, never given a fabricated signature"
     );
+    const MARKER_SENTENCE: &str =
+        "The previous response was interrupted by a new user message before it finished.";
     let marker_at = messages
         .iter()
-        .position(|message| {
-            message_contains_text(
-                message,
-                "The previous response was interrupted by a new user message before it finished.",
-            )
-        })
+        .position(|message| message_contains_text(message, MARKER_SENTENCE))
         .expect("the preempt marker must be model-visible");
     let steer_at = messages
         .iter()
         .position(|message| message_contains_text(message, "answer this instead"))
         .expect("the new user message must be in the replayed history");
     assert!(
-        marker_at > position && marker_at < steer_at,
-        "the marker sits behind the synthetic result and before the new input"
+        marker_at > position,
+        "the marker must sit behind the retained tool call and its result"
     );
+    // Consecutive user items coalesce into one user message on this wire, so the
+    // marker and the new input may share a message: then the order is a fact
+    // about their blocks (spec S-04), not about message indices.
+    if marker_at == steer_at {
+        let blocks = messages[marker_at]["content"]
+            .as_array()
+            .expect("coalesced user content blocks");
+        let text_of = |block: &serde_json::Value| block["text"].as_str().unwrap_or_default();
+        let marker_block = blocks
+            .iter()
+            .position(|block| text_of(block).contains(MARKER_SENTENCE))
+            .expect("marker block");
+        let steer_block = blocks
+            .iter()
+            .position(|block| text_of(block).contains("answer this instead"))
+            .expect("new input block");
+        assert!(
+            marker_block < steer_block,
+            "the marker must come before the new user message"
+        );
+    } else {
+        assert!(
+            marker_at < steer_at,
+            "the marker must come before the new user message"
+        );
+    }
 
     test.codex.submit(Op::Shutdown).await?;
     wait_for_event(&test.codex, |event| {
