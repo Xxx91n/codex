@@ -105,9 +105,10 @@ fn retained_and_dropped_calls_keep_stream_order_with_each_pair_adjacent() {
 
 #[test]
 fn received_text_is_kept() {
-    let pending = vec![assistant_message("partial answer")];
+    let kept = assistant_message("partial answer");
+    let pending = vec![kept.clone()];
 
-    assert_eq!(reconcile_preempted(pending), pending);
+    assert_eq!(reconcile_preempted(pending), vec![kept]);
 }
 
 #[test]

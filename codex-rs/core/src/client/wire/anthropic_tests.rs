@@ -102,7 +102,7 @@ fn truncated_tool_use_is_dropped_whole() {
 
 #[test]
 fn signed_thinking_and_received_text_survive() {
-    let signed = thinking("thought to the end", "signature-abc");
+    let signed = thinking("thought to the end", Some("signature-abc"));
     let pending = vec![
         signed.clone(),
         assistant_message("half an answer"),
