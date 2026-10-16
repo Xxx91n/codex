@@ -863,10 +863,10 @@ pub(crate) fn reconcile_preempted(pending: Vec<ResponseItem>) -> Vec<ResponseIte
                 }
                 debug!("messages preemption: dropping truncated tool_use {call_id}");
             }
-            ResponseItem::Message { role, content, .. } => {
-                if role.as_str() == "assistant" && content_items_to_text(content).is_some() {
-                    retained.push(item);
-                }
+            ResponseItem::Message { role, content, .. }
+                if role.as_str() == "assistant" && content_items_to_text(content).is_some() =>
+            {
+                retained.push(item);
             }
             ResponseItem::Reasoning {
                 content,
