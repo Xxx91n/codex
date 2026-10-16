@@ -996,15 +996,17 @@ async fn anthropic_wire_preempt_reconciles_the_interrupted_turn() -> Result<()> 
         let blocks = messages[marker_at]["content"]
             .as_array()
             .expect("coalesced user content blocks");
-        let text_of = |block: &serde_json::Value| block["text"].as_str().unwrap_or_default();
-        let marker_block = blocks
-            .iter()
-            .position(|block| text_of(block).contains(MARKER_SENTENCE))
-            .expect("marker block");
-        let steer_block = blocks
-            .iter()
-            .position(|block| text_of(block).contains("answer this instead"))
-            .expect("new input block");
+        // A closure cannot return data borrowed from its argument, so this
+        // resolves the block index directly.
+        let block_holding = |needle: &str| -> Option<usize> {
+            blocks.iter().position(|block| {
+                block["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains(needle))
+            })
+        };
+        let marker_block = block_holding(MARKER_SENTENCE).expect("marker block");
+        let steer_block = block_holding("answer this instead").expect("new input block");
         assert!(
             marker_block < steer_block,
             "the marker must come before the new user message"
