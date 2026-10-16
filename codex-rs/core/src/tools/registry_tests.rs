@@ -910,7 +910,7 @@ async fn dispatch_resolves_chat_wire_qualified_names_to_namespaced_handlers() ->
     let turn = Arc::new(turn);
 
     let result = registry
-        .dispatch_any_with_terminal_outcome(
+        .dispatch_any_with_state(
             test_invocation(
                 Arc::clone(&session),
                 Arc::clone(&turn),
@@ -921,7 +921,7 @@ async fn dispatch_resolves_chat_wire_qualified_names_to_namespaced_handlers() ->
                     "mcp__1mcp__tool_invoke",
                 ),
             ),
-            /*terminal_outcome_reached*/ None,
+            /*call_state*/ None,
         )
         .await?;
     let response = result.into_response().item;

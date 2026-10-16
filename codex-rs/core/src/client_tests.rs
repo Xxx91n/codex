@@ -55,6 +55,7 @@ use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ExecutedToolCall;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::ToolResultMetadata;
@@ -2322,7 +2323,9 @@ fn build_messages_messages_emits_image_blocks_and_replays_thinking_with_signatur
                     text: "what is this?".to_string(),
                 },
                 ContentItem::InputImage {
-                    image_url: "data:image/png;base64,aGVsbG8=".to_string(),
+                    image: ImageReference::Inline {
+                        image_url: "data:image/png;base64,aGVsbG8=".to_string(),
+                    },
                     detail: None,
                 },
             ],
@@ -2452,10 +2455,15 @@ fn build_messages_request_emits_thinking_and_cache_control_when_configured() {
         true,
         false,
         false,
+        /*include_timing_metrics*/ false,
         None,
         false,
         None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        codex_model_provider::WorkspaceRoutingContext::new(
+            "https://chatgpt.com/backend-api".into(),
+        ),
+        /*request_contributors*/ Vec::new(),
     );
     let mut prompt = Prompt::default();
     let tool = ToolSpec::Function(ResponsesApiTool {
@@ -2500,10 +2508,15 @@ fn build_messages_request_clamps_thinking_budget_below_max_tokens() {
         true,
         false,
         false,
+        /*include_timing_metrics*/ false,
         None,
         false,
         None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        codex_model_provider::WorkspaceRoutingContext::new(
+            "https://chatgpt.com/backend-api".into(),
+        ),
+        /*request_contributors*/ Vec::new(),
     );
     let prompt = Prompt::default();
     let model_info = test_model_info();
@@ -2536,10 +2549,15 @@ fn build_messages_request_metadata_max_tokens_relaxes_thinking_clamp() {
         true,
         false,
         false,
+        /*include_timing_metrics*/ false,
         None,
         false,
         None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        codex_model_provider::WorkspaceRoutingContext::new(
+            "https://chatgpt.com/backend-api".into(),
+        ),
+        /*request_contributors*/ Vec::new(),
     );
     let prompt = Prompt::default();
     let mut model_info = test_model_info();
@@ -2571,10 +2589,15 @@ fn build_messages_request_metadata_max_tokens_relaxes_thinking_clamp() {
         true,
         false,
         false,
+        /*include_timing_metrics*/ false,
         None,
         false,
         None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        codex_model_provider::WorkspaceRoutingContext::new(
+            "https://chatgpt.com/backend-api".into(),
+        ),
+        /*request_contributors*/ Vec::new(),
     );
     let mut model_info = test_model_info();
     model_info.max_output_tokens = Some(64_000);
@@ -2651,10 +2674,15 @@ fn build_messages_request_session_effort_buckets_to_budget_tokens() {
         true,
         false,
         false,
+        /*include_timing_metrics*/ false,
         None,
         false,
         None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        codex_model_provider::WorkspaceRoutingContext::new(
+            "https://chatgpt.com/backend-api".into(),
+        ),
+        /*request_contributors*/ Vec::new(),
     );
     let prompt = Prompt::default();
     let model_info = test_model_info();
@@ -2692,10 +2720,15 @@ fn build_messages_request_adaptive_mode_maps_effort_to_output_config() {
         true,
         false,
         false,
+        /*include_timing_metrics*/ false,
         None,
         false,
         None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        codex_model_provider::WorkspaceRoutingContext::new(
+            "https://chatgpt.com/backend-api".into(),
+        ),
+        /*request_contributors*/ Vec::new(),
     );
     let prompt = Prompt::default();
     let model_info = test_model_info();
@@ -2971,10 +3004,15 @@ fn thinking_replay_client(base_url: &str, adaptive: bool) -> ModelClient {
         true,
         false,
         false,
+        /*include_timing_metrics*/ false,
         None,
         false,
         None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        codex_model_provider::WorkspaceRoutingContext::new(
+            "https://chatgpt.com/backend-api".into(),
+        ),
+        /*request_contributors*/ Vec::new(),
     )
 }
 
