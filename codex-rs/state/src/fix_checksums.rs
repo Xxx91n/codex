@@ -285,7 +285,7 @@ async fn actual_schema_inventory(
 }
 
 async fn open_pool_for(sqlite: &SqliteConfig, path: &Path) -> anyhow::Result<SqlitePool> {
-    Ok(sqlite.open_read_write_pool(path).await?)
+    sqlite.open_read_write_pool(path).await
 }
 
 async fn validate_database(
