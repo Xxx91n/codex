@@ -61,8 +61,22 @@ jobs:
         with:
           fetch-depth: 0 # full history: the drift-probe diff needs a merge-base
           ref: ${{ inputs.target_ref || github.ref }}
-      - uses: dtolnay/rust-toolchain@stable
+      # The seam gate lints with the compiler the repo pins, not the runner's
+      # floating stable: new clippy lints land on stable between releases and
+      # turned the daily watchdog red on files nobody touched (runs
+      # 38840335553 / 38846427234, both on code identical to tri-wire-api's).
+      # codex-rs/rust-toolchain.toml stays the single pin — the channel is read
+      # from it; the action is pinned by commit SHA the way rust-ci.yml pins it.
+      - name: Resolve the repo-pinned toolchain channel
+        id: pinned-toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(sed -nE 's/^channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' rust-toolchain.toml)
+          test -n "$CHANNEL"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
+          toolchain: ${{ steps.pinned-toolchain.outputs.channel }}
           components: rustfmt, clippy
       # `just test` is the repo-mandated test entrypoint and shells out to
       # cargo-nextest (NEXTEST_PROFILE=local) — same install path the repo's
