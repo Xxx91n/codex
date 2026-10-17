@@ -10,6 +10,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_tools::ToolSpec;
 use futures::Stream;
+use futures::StreamExt;
 use serde_json::Value;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -116,17 +117,53 @@ fn normalize_image_detail(detail: &mut Option<ImageDetail>, model_info: &ModelIn
     }
 }
 
+/// Client-side preemption seam of one Chat/Messages stream: the handle that
+/// closes the upstream read plus the reconciler of the wire that produced it,
+/// bound where that wire's stream is constructed. Pairing them here is what lets
+/// the turn loop stay protocol-blind (CONTEXT.md「turn 循环无 wire 感知」).
+pub(crate) struct PreemptSeam {
+    pub(crate) handle: PreemptHandle,
+    pub(crate) reconcile: fn(Vec<ResponseItem>) -> Vec<ResponseItem>,
+}
+
 pub struct ResponseStream {
     pub(crate) rx_event: mpsc::Receiver<Result<ResponseEvent>>,
     pub(crate) interrupt: Option<oneshot::Sender<()>>,
-    /// Client-side preemption seam of the Chat and Messages wires: firing it
-    /// closes the upstream read immediately and returns the IR the wire still
-    /// held in flight, which that wire's module reconciles into history items
-    /// (ADR-0013). `None` on Responses, whose interrupt stays as-is.
-    pub(crate) preempt: Option<PreemptHandle>,
+    /// Present only on the Chat and Messages wires, whose turns can be preempted
+    /// mid-stream: firing the seam closes the HTTP read immediately and returns
+    /// the IR the wire still held in flight, which that wire's module reconciles
+    /// into history items (ADR-0013). `None` on Responses, whose interrupt stays
+    /// as-is (spec N-02).
+    pub(crate) preempt: Option<PreemptSeam>,
     /// Signals the mapper task that the consumer stopped polling before the
     /// provider stream reached its own terminal event.
     pub(crate) consumer_dropped: CancellationToken,
+}
+
+impl ResponseStream {
+    /// Preempted mid-stream: close the upstream read, keep the items the wire had
+    /// already handed to this consumer, then let the wire reconcile what it still
+    /// held in flight, so the next request replays a legal turn (ADR-0013).
+    /// `None` when this wire has no client-side preemption seam.
+    pub(crate) async fn take_preempted_history(&mut self) -> Option<Vec<ResponseItem>> {
+        let seam = self.preempt.take()?;
+        let pending = seam.handle.preempt().await;
+        let mut retained = Vec::new();
+        // Events the wire had already emitted but the turn loop had not consumed.
+        // On these two wires only reasoning blocks reach the consumer before the
+        // terminal frame — calls and text are emitted at completion — so nothing
+        // buffered here can be an unpaired tool call, and none of it was
+        // dispatched, which is why the reconciler does not run over it.
+        while let Some(event) = self.next().await {
+            match event {
+                Ok(ResponseEvent::OutputItemDone(item)) => retained.push(item),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        retained.extend((seam.reconcile)(pending));
+        Some(retained)
+    }
 }
 
 impl Stream for ResponseStream {

@@ -229,9 +229,14 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
 - 源：ADR-0013；ADR-0014；spec S-06。
 
 ### pending IR 快照
-- 本仓用法：preempt 关流时 chat/messages 入站状态机交回的"仍在大块中"的 IR（未收尾文字段、缓冲的 tool call / tool_use、未闭合 thinking 块），交同文件的 `reconcile_preempted` 决定去留。
+- 本仓用法：preempt 关流时 chat/messages 入站状态机交回的"仍在大块中"的 IR（未收尾文字段、缓冲的 tool call / tool_use、未闭合 thinking 块），交同文件的 `reconcile_preempted` 决定去留；该函数在各 wire 的 stream 构造点绑进 `ResponseStream` 的 preempt 缝，turn 循环只取回已对账的条目（ADR-0015）。
 - 禁止用法：在状态机里判定取舍或修补字节（补签名、造参数对象）；把它当作已收完成事件的条目重复入史。
 - 源：ADR-0013；spec S-03、S-08、S-10、S-11。
+
+### preempt 缝
+- 本仓用法：`core/src/client_common.rs` 里 `ResponseStream.preempt: Option<PreemptSeam>`——关流句柄与该 wire 的对账函数成对存在，由各 wire 自己的 stream 构造点经 `map_response_stream(.., preempt_reconciler)` 绑入；`take_preempted_history()` 一次做完"关上游读→收下已发事件→本 wire 对账→返回应入史条目"，且只触发一次。Responses 两条路径恒为 `None`。
+- 禁止用法：在 `turn.rs` 读 `wire_api` 或手工排空 stream（＝把协议感知放回 turn 循环）；在 `wire/` 内再写一处 `match wire_api`；为测试从 codex-api 导出 `preempt_channel`。
+- 源：ADR-0013；ADR-0015；spec S-01、S-02、N-02。
 
 ### 中断标记
 - 本仓用法：写入历史的模型可见中断提示，写入与否由 `agent_interrupt_message_enabled` 控制。

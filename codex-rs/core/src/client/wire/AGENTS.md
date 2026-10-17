@@ -21,16 +21,21 @@ non-Responses wires on one internal representation (`ResponseItem`).
   2. `ModelProviderInfo.wire_api` field — same file
   3. dispatch `match` on `wire_api` — `core/src/client.rs` (`stream()`)
 - This directory is reached only through the dispatch. Never add a fourth
-  registration point here, and never move a registration point in.
+  registration point here, and never move a registration point in. Binding a
+  wire's own `reconcile_preempted` as a function pointer at that wire's stream
+  construction is NOT a registration point (ADR-0015); no `match wire_api` may
+  appear in this directory.
 - The API-crate side of the seam lives in codex-api
   (`endpoint/messages.rs`, `sse/chat_completions.rs`, `sse/messages.rs`);
   changing wire/ behavior often requires changing it too — check both sides.
 
 ## File map
 
-- `mod.rs` — module docs + shared helpers (`content_items_to_text`, the
-  preemption seam: `reconcile_preempted` dispatch, `PREEMPTED_TOOL_CALL_RESULT`,
-  `preempted_tool_call_result`).
+- `mod.rs` — module docs + shared helpers (`content_items_to_text`,
+  `PREEMPTED_TOOL_CALL_RESULT`, `preempted_tool_call_result`). No wire dispatch
+  lives here: each module's `reconcile_preempted` is bound into the stream at that
+  wire's own construction point (ADR-0015), so this directory never matches on
+  `wire_api` a second time beside registration point 3.
 - `chat.rs` — `stream_chat_completions`, `build_chat_request`,
   `build_chat_messages`, `map_chat_role`, `reconcile_preempted`.
 - `anthropic.rs` — `stream_anthropic_messages`, `build_messages_request`,

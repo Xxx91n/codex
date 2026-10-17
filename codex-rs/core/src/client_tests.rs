@@ -2142,6 +2142,7 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
         attempt,
         test_model_provider(),
         vec![Box::new(ReplaceOutput)],
+        /*preempt_reconciler*/ None,
     );
     let mut delivered = Vec::new();
     while let Some(event) = stream.next().await {

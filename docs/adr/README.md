@@ -21,6 +21,7 @@ that supersedes and links the old one, incrementing the `NNNN` counter.
 | [0012](0012-release-branching-scheme.md) | Accepted | Upstream stable release branches: base on the tag commit (not main), naming tri/vX.Y.Z and tri-vX.Y.Z-tri.N, prerelease over build metadata, no rust-v prefix, per-release rulings in FORK_DIVERGENCE |
 | [0013](0013-chat-messages-preempt-interrupt.md) | Accepted | chat/messages preempt interrupt: close the HTTP stream immediately and reconcile history, no drain; rules in docs/specs/chat-messages-preempt |
 | [0014](0014-anthropic-tool-result-is-error.md) | Accepted | Anthropic outbound `tool_result` carries `is_error: true` whenever the IR payload says `success: Some(false)` (field omitted on success; Chat wire unchanged) |
+| [0015](0015-preempt-seam-binding-at-wire-construction.md) | Accepted | Preemption reconciles through a per-wire seam bound at the wire's own stream construction (`ResponseStream::take_preempted_history`); `turn.rs` holds no `wire_api` and `wire/mod.rs` no longer matches on it |
 
 Term definitions for vocabulary used across ADRs live in the repo-root
 [CONTEXT.md](../../CONTEXT.md) (single vocabulary authority). Agent-facing

@@ -11,7 +11,6 @@ pub(crate) mod chat;
 pub(crate) mod max_tokens;
 pub(crate) mod reasoning_effort;
 
-use codex_model_provider_info::WireApi;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
@@ -23,25 +22,13 @@ use codex_protocol::models::ResponseItem;
 pub(crate) const PREEMPTED_TOOL_CALL_RESULT: &str =
     "The tool call was interrupted before it ran and was not executed. Do not assume it succeeded.";
 
-/// Seam the session loop calls when a Chat or Messages stream was preempted:
-/// each wire reconciles its own pending IR, because the faithfulness rules are
-/// per-wire and must not be transplanted (see wire/AGENTS.md "Does NOT carry
-/// over"). Responses preempts through its protocol interrupt frame, so nothing
-/// reaches this seam (spec N-02).
-pub(crate) fn reconcile_preempted(
-    wire_api: WireApi,
-    pending: Vec<ResponseItem>,
-) -> Vec<ResponseItem> {
-    match wire_api {
-        WireApi::Chat => chat::reconcile_preempted(pending),
-        WireApi::Anthropic => anthropic::reconcile_preempted(pending),
-        WireApi::Responses => Vec::new(),
-    }
-}
-
 /// Pairs a retained tool call with the synthetic result that says it never ran
 /// (spec S-04: the result goes directly behind its call, so neither API rejects
-/// the replay for an unpaired call).
+/// the replay for an unpaired call). Each wire's own `reconcile_preempted`
+/// (`chat.rs` / `anthropic.rs`) decides which calls get one, because the
+/// faithfulness rules are per-wire and must not be transplanted (see
+/// wire/AGENTS.md "Does NOT carry over"); that reconciler is bound into the
+/// stream at construction, so the turn loop never selects it (ADR-0015).
 pub(crate) fn preempted_tool_call_result(call_id: &str) -> ResponseItem {
     ResponseItem::FunctionCallOutput {
         id: None,

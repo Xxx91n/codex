@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use crate::client::ModelClientSession;
-use crate::client::reconcile_preempted;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::compact::run_inline_auto_compact_task;
@@ -2645,30 +2644,14 @@ async fn try_run_sampling_request(
                     needs_follow_up = true;
                     continue;
                 }
-                if let Some(preempt_handle) = stream.preempt.take() {
-                    // Chat and Messages have no interrupt frame: close the HTTP read
-                    // now instead of draining it, then reconcile what was already
-                    // received so the next request replays a legal turn (ADR-0013).
-                    let pending = preempt_handle.preempt().await;
-                    let mut retained = Vec::new();
-                    // Events the wire had already handed over but this loop had not
-                    // processed. On these two wires only reasoning blocks reach the
-                    // consumer before the terminal frame — calls and text are emitted
-                    // at completion — so nothing buffered here can be an unpaired tool
-                    // call, and none of it was dispatched, which is why the reconciler
-                    // does not need to run over it.
-                    while let Some(event) = stream.next().await {
-                        match event {
-                            Ok(ResponseEvent::OutputItemDone(item)) => retained.push(item),
-                            Ok(_) => {}
-                            Err(_) => break,
-                        }
-                    }
+                if let Some(mut retained) = stream.take_preempted_history().await {
+                    // Chat and Messages have no interrupt frame: the stream's own seam closed
+                    // the HTTP read and reconciled what had already arrived, so this loop never
+                    // learns which wire it is running (ADR-0013, ADR-0015). Dropping `stream`
+                    // from inside this body relies on edition 2024's `if_let_rescope`, which
+                    // releases the scrutinee's borrow before the arm runs; under edition 2021
+                    // that borrow lived through the arm and this move did not compile.
                     drop(stream);
-                    retained.extend(reconcile_preempted(
-                        turn_context.provider.info().wire_api,
-                        pending,
-                    ));
                     if let Some(marker) = preempted_turn_history_marker(
                         InterruptedTurnHistoryMarker::from_config_and_version(
                             turn_context.config.as_ref(),

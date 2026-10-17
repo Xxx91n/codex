@@ -124,6 +124,7 @@ use uuid::Uuid;
 use crate::attestation::AttestationContext;
 use crate::attestation::AttestationProvider;
 use crate::attestation::X_OAI_ATTESTATION_HEADER;
+use crate::client_common::PreemptSeam;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
@@ -158,8 +159,6 @@ use codex_response_debug_context::telemetry_api_error_message;
 use codex_response_debug_context::telemetry_transport_error_message;
 
 mod wire;
-
-pub(crate) use wire::reconcile_preempted;
 
 pub const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
 pub const X_CODEX_INSTALLATION_ID_HEADER: &str = "x-codex-installation-id";
@@ -1802,6 +1801,7 @@ impl ModelClientSession {
                         inference_trace_attempt,
                         Arc::clone(&self.client.state.provider),
                         interceptors,
+                        /*preempt_reconciler*/ None,
                     );
                     return Ok(stream);
                 }
@@ -2132,6 +2132,7 @@ impl ModelClientSession {
                 inference_trace_attempt,
                 Arc::clone(&self.client.state.provider),
                 interceptors,
+                /*preempt_reconciler*/ None,
             );
             self.websocket_session.last_response_rx = Some(last_request_rx);
             return Ok(WebsocketStreamOutcome::Stream(stream));
@@ -2406,6 +2407,7 @@ fn map_response_stream(
     inference_trace_attempt: InferenceTraceAttempt,
     provider: SharedModelProvider,
     interceptors: Vec<Box<dyn codex_extension_api::ModelResponseInterceptor>>,
+    preempt_reconciler: Option<fn(Vec<ResponseItem>) -> Vec<ResponseItem>>,
 ) -> (ResponseStream, oneshot::Receiver<LastResponse>) {
     let upstream_request_id = api_stream.upstream_request_id.take();
     let interrupt = api_stream.interrupt.take();
@@ -2418,7 +2420,11 @@ fn map_response_stream(
         provider,
     );
     stream.interrupt = interrupt;
-    stream.preempt = preempt;
+    // The handle only means something paired with the wire's own reconciler; the
+    // Responses wires pass no reconciler, so their seam stays None (spec N-02).
+    stream.preempt = preempt
+        .zip(preempt_reconciler)
+        .map(|(handle, reconcile)| PreemptSeam { handle, reconcile });
     (stream, last_response)
 }
 
