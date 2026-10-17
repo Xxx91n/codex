@@ -38,4 +38,4 @@ D-005 的原话要求「JSON 已完整的 tool call 保留，并补一条 `is_er
 - 台账：仓外运行台账 `.scratch/architecture-recovery/FORK_DIVERGENCE.md` 新增 **WIR-9**
   （`push_anthropic_tool_result` 的出站失败位，分类 apply）；wire/AGENTS.md 红线 8 同步补该出站位。
 - 已知债：`anthropic.rs` 现 936 行，已过根 AGENTS.md「Avoid large modules」的 800 行目标；本轮
-  13 行属同地修补，模块拆分另票处理，不在本决策里顺手做。
+  `+26/-4` 属同地修补，模块拆分另票处理，不在本决策里顺手做。
