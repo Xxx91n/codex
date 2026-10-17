@@ -481,6 +481,17 @@
         "chat": "no chat-native counterpart; provider flag anthropic_prompt_caching does not apply to the chat wire"
       },
       "policy": "omission: no first-class IR item; semantics lives in provider flags, so a cross-wire translation cannot carry it and must not invent a chat/responses encoding (semantics[cache_control].ir_mapping)"
+    },
+    {
+      "id": "tool_result_is_error_anthropic",
+      "semantic": "tool_call",
+      "field": "tool_result block \"is_error\" (anthropic request)",
+      "native_wire": "anthropic",
+      "other_wires_behavior": {
+        "chat": "role:\"tool\" messages have no error bit; a failed result reaches the model as result text only (wire/chat.rs build_chat_messages FunctionCallOutput arm)",
+        "responses": "function_call_output replays the payload as-is; no error bit is invented on the request"
+      },
+      "policy": "omission: written only when FunctionCallOutputPayload.success == Some(false) and absent otherwise — None and Some(true) both mean success, and the flag is never inferred from the text (ADR-0014; asserted by only_a_failed_payload_marks_the_tool_result_as_an_error and anthropic_wire_preempt_reconciles_the_interrupted_turn)"
     }
   ]
 }
