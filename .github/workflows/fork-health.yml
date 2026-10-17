@@ -318,7 +318,12 @@ jobs:
             });
             const existing = open.find((i) => i.title.startsWith('fork-health failed'));
             if (existing) {
-              await github.rest.issues.update({ owner, repo, issue_number: existing.number, body });
+              // Refresh the title too: matching on the prefix alone used to leave
+              // the issue naming the FIRST failing ref/sha forever (issue #1 read
+              // `feat/tri-wire-api @ 8b86dfb1` while its body described a failure
+              // on `tri-wire-api`), so the one open issue always states the current
+              // failure in both title and body.
+              await github.rest.issues.update({ owner, repo, issue_number: existing.number, title, body });
             } else {
               await github.rest.issues.create({ owner, repo, title, body, labels: ['fork-health'] });
             }
