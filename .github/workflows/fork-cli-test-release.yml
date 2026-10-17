@@ -451,12 +451,16 @@ jobs:
           # / #8458): the "run green, download 404" disease. Publish is now an
           # idempotent upsert; this step performs zero destructive ref ops.
           # (a) rolling tag: single-request refs-API force-move; create the ref
-          #     only when it is absent (404 fallback). last-writer-wins replaces
-          #     "already exists"; the tag never goes away, so no GC race is seeded.
+          #     only when it is absent. The absent-ref answer is NOT a 404: GitHub
+          #     returns 422 "Reference does not exist" (run 39019757024 died on
+          #     exactly this — the create-path never fired because this fork had
+          #     never published, so the 404-only matcher took the else branch).
+          #     last-writer-wins replaces "already exists"; the tag never goes away,
+          #     so no GC race is seeded.
           ref_err=$(mktemp)
           if gh api -X PATCH "repos/${{ github.repository }}/git/refs/tags/$tag" -f sha="$GITHUB_SHA" -F force=true >/dev/null 2>"$ref_err"; then
             echo "rolling tag $tag force-moved to ${GITHUB_SHA:0:8}"
-          elif grep -qiE 'HTTP 404|Could not resolve|Not Found' "$ref_err"; then
+          elif grep -qiE 'HTTP 404|HTTP 422|Could not resolve|Not Found|Reference does not exist' "$ref_err"; then
             gh api -X POST "repos/${{ github.repository }}/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" >/dev/null
             echo "rolling tag $tag created at ${GITHUB_SHA:0:8}"
           else
