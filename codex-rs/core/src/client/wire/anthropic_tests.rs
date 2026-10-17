@@ -33,6 +33,20 @@ fn interrupted_result(call_id: &str) -> ResponseItem {
     }
 }
 
+fn tool_output(call_id: &str, success: Option<bool>) -> ResponseItem {
+    ResponseItem::FunctionCallOutput {
+        id: None,
+        call_id: Some(call_id.to_string()),
+        name: None,
+        namespace: None,
+        output: FunctionCallOutputPayload {
+            body: FunctionCallOutputBody::Text("the result".to_string()),
+            success,
+        },
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
 fn assistant_message(text: &str) -> ResponseItem {
     ResponseItem::Message {
         id: None,
@@ -129,6 +143,69 @@ fn redacted_thinking_round_trips_only_with_both_halves() {
 }
 
 #[test]
+fn only_a_failed_payload_marks_the_tool_result_as_an_error() {
+    let history = vec![
+        function_call("toolu-failed", "{}"),
+        tool_output("toolu-failed", Some(false)),
+        function_call("toolu-unknown", "{}"),
+        tool_output("toolu-unknown", None),
+        function_call("toolu-ok", "{}"),
+        tool_output("toolu-ok", Some(true)),
+    ];
+
+    let messages = build_messages_messages(
+        history,
+        ThinkingEmission::Standard {
+            unsigned: UnsignedReplay::DropWarn,
+        },
+    );
+
+    assert_eq!(
+        messages,
+        vec![
+            json!({
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "toolu-failed", "name": "shell", "input": {}},
+                ]
+            }),
+            json!({
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu-failed", "content": "the result", "is_error": true},
+                ]
+            }),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "toolu-unknown", "name": "shell", "input": {}},
+                ]
+            }),
+            json!({
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu-unknown", "content": "the result"},
+                ]
+            }),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "toolu-ok", "name": "shell", "input": {}},
+                ]
+            }),
+            json!({
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu-ok", "content": "the result"},
+                ]
+            }),
+        ],
+        "success: Some(false) is the IR's only failure signal; None and Some(true) both \
+         mean success, and the field stays absent because the Messages API defaults it to false"
+    );
+}
+
+#[test]
 fn reconciled_preemption_replays_alternating_with_the_result_behind_its_call() {
     let arguments = r#"{"command":"echo keep"}"#;
     let mut history = reconcile_preempted(vec![
@@ -161,7 +238,7 @@ fn reconciled_preemption_replays_alternating_with_the_result_behind_its_call() {
             json!({
                 "role": "user",
                 "content": [
-                    {"type": "tool_result", "tool_use_id": "toolu-whole", "content": PREEMPTED_TOOL_CALL_RESULT},
+                    {"type": "tool_result", "tool_use_id": "toolu-whole", "content": PREEMPTED_TOOL_CALL_RESULT, "is_error": true},
                 ]
             }),
             json!({

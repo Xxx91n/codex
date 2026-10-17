@@ -20,6 +20,7 @@ that supersedes and links the old one, incrementing the `NNNN` counter.
 | [0011](0011-checksum-family-official-default.md) | Accepted (supersedes the ticket-25 six-directory LF-lock ruling part of ADR-0010 row 1) | Checksum family back to the official platform default: retire the LF lock (`text !eol`), auto = follow-embedded-family + fail-loud repair command (zero auto-rewrite), fingerprint-keyed one-time notice, CI platform-family/digest/e2e-official-binary assertions, restore SOP runbook |
 | [0012](0012-release-branching-scheme.md) | Accepted | Upstream stable release branches: base on the tag commit (not main), naming tri/vX.Y.Z and tri-vX.Y.Z-tri.N, prerelease over build metadata, no rust-v prefix, per-release rulings in FORK_DIVERGENCE |
 | [0013](0013-chat-messages-preempt-interrupt.md) | Accepted | chat/messages preempt interrupt: close the HTTP stream immediately and reconcile history, no drain; rules in docs/specs/chat-messages-preempt |
+| [0014](0014-anthropic-tool-result-is-error.md) | Accepted | Anthropic outbound `tool_result` carries `is_error: true` whenever the IR payload says `success: Some(false)` (field omitted on success; Chat wire unchanged) |
 
 Term definitions for vocabulary used across ADRs live in the repo-root
 [CONTEXT.md](../../CONTEXT.md) (single vocabulary authority). Agent-facing

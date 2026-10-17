@@ -654,7 +654,14 @@ pub(crate) fn build_messages_messages(
                     .map(ToString::to_string)
                     .or_else(|| output.body.to_text())
                     .unwrap_or_default();
-                push_anthropic_tool_result(&mut messages, &call_id.unwrap_or_default(), text);
+                // `success: Some(false)` is the IR's only failure signal — `None`
+                // and `Some(true)` both mean success, the way the dispatcher reads it.
+                push_anthropic_tool_result(
+                    &mut messages,
+                    &call_id.unwrap_or_default(),
+                    text,
+                    output.success == Some(false),
+                );
             }
             ResponseItem::CustomToolCallOutput {
                 call_id, output, ..
@@ -665,7 +672,12 @@ pub(crate) fn build_messages_messages(
                     .map(ToString::to_string)
                     .or_else(|| output.body.to_text())
                     .unwrap_or_default();
-                push_anthropic_tool_result(&mut messages, &call_id, text);
+                push_anthropic_tool_result(
+                    &mut messages,
+                    &call_id,
+                    text,
+                    output.success == Some(false),
+                );
             }
             _ => {}
         }
@@ -695,12 +707,22 @@ fn anthropic_tool_use_block(name: &str, id: &str, arguments: &str) -> serde_json
     })
 }
 
-fn push_anthropic_tool_result(messages: &mut Vec<serde_json::Value>, call_id: &str, text: String) {
-    let block = json!({
+fn push_anthropic_tool_result(
+    messages: &mut Vec<serde_json::Value>,
+    call_id: &str,
+    text: String,
+    is_error: bool,
+) {
+    let mut block = json!({
         "type": "tool_result",
         "tool_use_id": call_id,
         "content": text,
     });
+    // The field is absent on success because the Messages API already defaults
+    // it to false; sending it only for failures keeps the payload minimal.
+    if is_error {
+        block["is_error"] = json!(true);
+    }
     // Coalesce consecutive tool results into one user message: the Messages
     // API requires strict user/assistant alternation.
     if let Some(last) = messages.last_mut()

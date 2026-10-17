@@ -224,9 +224,9 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
 - 源：ADR-0013。
 
 ### 合成 tool result
-- 本仓用法：为已发出、未执行的 tool call 补写的固定文案结果，保证调用与结果配对（OpenAI 的 `tool` 消息、Anthropic 的 `tool_result` 块）。
-- 禁止用法：伪造成功结果；按工具名定制文案。
-- 源：ADR-0013；spec S-06。
+- 本仓用法：为已发出、未执行的 tool call 补写的固定文案结果，保证调用与结果配对（OpenAI 的 `tool` 消息、Anthropic 的 `tool_result` 块）；结果失败时在 Anthropic 出站块写 `is_error: true`，成功省略该字段，失败判定只认 `FunctionCallOutputPayload.success == Some(false)`。
+- 禁止用法：伪造成功结果；按工具名定制文案；绕过 `FunctionCallOutputPayload.success` 另造失败判据。
+- 源：ADR-0013；ADR-0014；spec S-06。
 
 ### pending IR 快照
 - 本仓用法：preempt 关流时 chat/messages 入站状态机交回的"仍在大块中"的 IR（未收尾文字段、缓冲的 tool call / tool_use、未闭合 thinking 块），交同文件的 `reconcile_preempted` 决定去留。

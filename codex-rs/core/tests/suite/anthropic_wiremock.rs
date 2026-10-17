@@ -961,6 +961,12 @@ async fn anthropic_wire_preempt_reconciles_the_interrupted_turn() -> Result<()> 
         "The tool call was interrupted before it ran and was not executed. Do not assume it succeeded.",
         "every interrupted call uses the one fixed sentence"
     );
+    assert_eq!(
+        blocks[0]["is_error"].as_bool(),
+        Some(true),
+        "the outbound block must say the call failed, not merely carry a sentence \
+         the model can misread as a normal result"
+    );
 
     let replayed = serde_json::to_string(messages).expect("serialize replayed messages");
     assert!(

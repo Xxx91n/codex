@@ -80,6 +80,9 @@ non-Responses wires on one internal representation (`ResponseItem`).
    tool_use block with a 400.
 8. `push_anthropic_tool_result`: consecutive tool results coalesce into ONE
    user message — the Messages API requires strict user/assistant alternation.
+   A failed result MUST carry `"is_error": true` (ADR-0014); the only failure
+   source is `FunctionCallOutputPayload.success == Some(false)` — `None` and
+   `Some(true)` both mean success, and success omits the field.
 
 ### Usage metadata & events
 
