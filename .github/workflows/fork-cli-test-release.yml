@@ -28,9 +28,9 @@ jobs:
         # Pure-bash selection (no jq: two jq syntax bugs already bit runs
         # 34376975626/34378510877; this logic is byte-tested locally).
         run: |
-          W='{"os":"windows-latest","platform":"windows","target":"x86_64-pc-windows-msvc","asset":"codex-win-x86_64-pc-windows-msvc.zip","bin":"codex.exe"}'
-          U='{"os":"ubuntu-latest","platform":"ubuntu","target":"x86_64-unknown-linux-gnu","asset":"codex-linux-x86_64-unknown-linux-gnu.tar.gz","bin":"codex"}'
-          M='{"os":"macos-latest","platform":"macos","target":"aarch64-apple-darwin","asset":"codex-mac-aarch64-apple-darwin.tar.gz","bin":"codex"}'
+          W='{"os":"windows-latest","platform":"windows","target":"x86_64-pc-windows-msvc","asset":"win-x86_64-pc-windows-msvc.zip","bin":"codex.exe"}'
+          U='{"os":"ubuntu-latest","platform":"ubuntu","target":"x86_64-unknown-linux-gnu","asset":"linux-x86_64-unknown-linux-gnu.tar.gz","bin":"codex"}'
+          M='{"os":"macos-latest","platform":"macos","target":"aarch64-apple-darwin","asset":"mac-aarch64-apple-darwin.tar.gz","bin":"codex"}'
           p=",${PLATFORMS},"
           if [[ -z "$PLATFORMS" || "$PLATFORMS" == "all" ]]; then
             echo "build={\"include\":[$W,$U,$M]}" >> "$GITHUB_OUTPUT"
@@ -160,20 +160,33 @@ jobs:
           label = "CRLF" if expected_crlf else "LF"
           print(f"embedded checksum family assertion: {total} migration sources, digests present, {label} native")
           PY
+      - name: Resolve release version
+        id: release-version
+        shell: bash
+        # Asset names must self-identify the version: three platform files from
+        # different releases are otherwise indistinguishable once downloaded.
+        # The workspace version is the single source (X.Y.Z on trunk,
+        # X.Y.Z-tri.N on a release branch).
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          [ -n "$version" ] || { echo "::error::workspace version missing from codex-rs/Cargo.toml"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "asset prefix: codex-$version-"
       - name: Package artifact
         shell: bash
         run: |
           mkdir -p out
           cd target/${{ matrix.target }}/release
+          name="codex-${{ steps.release-version.outputs.version }}-${{ matrix.asset }}"
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            7z a ../../../out/${{ matrix.asset }} ${{ matrix.bin }}
+            7z a ../../../out/$name ${{ matrix.bin }}
           else
-            tar czf ../../../out/${{ matrix.asset }} ${{ matrix.bin }}
+            tar czf ../../../out/$name ${{ matrix.bin }}
           fi
       - uses: actions/upload-artifact@v4
         with:
           name: cli-${{ matrix.target }}
-          path: codex-rs/out/${{ matrix.asset }}
+          path: codex-rs/out/codex-${{ steps.release-version.outputs.version }}-${{ matrix.asset }}
           retention-days: 14
 
   check:
@@ -300,7 +313,9 @@ jobs:
           # taskkill by PID, then reap so no server holds the WAL when
           # fix-checksums takes the concurrency gate below.
           taskkill_pid() { kill "$1" 2>/dev/null || true; taskkill //F //PID "$1" >/dev/null 2>&1 || true; }
-          7z x -y -ofork-bin fork-cli/codex-win-x86_64-pc-windows-msvc.zip >/dev/null
+          # Asset names carry the version now, so select by pattern rather than
+          # hardcoding one release string into the drill.
+          7z x -y -ofork-bin fork-cli/codex-*-win-x86_64-pc-windows-msvc.zip >/dev/null
           FORK="$PWD/fork-bin/codex.exe"
           "$FORK" --version
           SCRATCH="$(mktemp -d)"
