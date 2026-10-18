@@ -127,3 +127,23 @@ fn blank_assistant_text_is_not_replayed() {
 
     assert_eq!(reconcile_preempted(pending), vec![]);
 }
+
+#[test]
+fn chat_wire_provider_config_accepts_wire_api_chat() {
+    // Guards the fork restore: upstream rejects `wire_api = "chat"` inside
+    // `WireApi`'s deserializer, so an upstream merge that brought the rejection
+    // back would break every chat provider at config load. The TUI and exec
+    // share this path, which is why the reported "TUI rejects chat" symptom
+    // cannot be reproduced while this test passes.
+    let provider: codex_model_provider_info::ModelProviderInfo = toml::from_str(
+        r#"
+name = "Chat upstream"
+base_url = "https://example.invalid/v1"
+env_key = "CHAT_API_KEY"
+wire_api = "chat"
+"#,
+    )
+    .expect("chat wire must stay parseable in this fork");
+
+    assert_eq!(provider.wire_api, codex_model_provider_info::WireApi::Chat);
+}
