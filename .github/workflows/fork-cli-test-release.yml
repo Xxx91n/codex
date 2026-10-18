@@ -473,7 +473,9 @@ jobs:
 
   release:
     # Publish only the full 3-OS run; single-platform test builds deliver via
-    # build artifacts (the rolling tag race bit run 34317047952 already).
+    # build artifacts. Target depends on the ref: a tri/v* release branch owns
+    # the immutable version tag tri-v<version> and its assets; the trunk only
+    # refreshes the index page (ADR-0016 / spec R-14, D-020).
     # The green e2e coexistence drill gates publication (ticket 35).
     if: inputs.platforms == 'all'
     needs: [build, e2e-official-coexistence]
@@ -489,49 +491,97 @@ jobs:
           pattern: cli-*
           merge-multiple: true
           path: dist
-      - name: Publish rolling prerelease (public download)
+      - name: Publish (version page on tri/v*, index on trunk)
         env:
           GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          tag=tri-wire-test
-          title="Tri-wire test build (CLI) — ${GITHUB_SHA:0:8}"
-          # Ticket 36 (A-029, B1 root-cause fix): the old tear-down-and-recreate
-          # publish was never atomic - GitHub async tag GC can replay the late
-          # removal event and force the fresh release back to draft (cli/cli#5024
-          # / #8458): the "run green, download 404" disease. Publish is now an
-          # idempotent upsert; this step performs zero destructive ref ops.
-          # (a) rolling tag: single-request refs-API force-move; create the ref
-          #     only when it is absent. The absent-ref answer is NOT a 404: GitHub
-          #     returns 422 "Reference does not exist" (run 39019757024 died on
-          #     exactly this — the create-path never fired because this fork had
-          #     never published, so the 404-only matcher took the else branch).
-          #     last-writer-wins replaces "already exists"; the tag never goes away,
-          #     so no GC race is seeded.
-          ref_err=$(mktemp)
-          if gh api -X PATCH "repos/${{ github.repository }}/git/refs/tags/$tag" -f sha="$GITHUB_SHA" -F force=true >/dev/null 2>"$ref_err"; then
-            echo "rolling tag $tag force-moved to ${GITHUB_SHA:0:8}"
-          elif grep -qiE 'HTTP 404|HTTP 422|Could not resolve|Not Found|Reference does not exist' "$ref_err"; then
-            gh api -X POST "repos/${{ github.repository }}/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" >/dev/null
-            echo "rolling tag $tag created at ${GITHUB_SHA:0:8}"
-          else
-            cat "$ref_err" >&2
-            exit 1
-          fi
-          # (b) release create-or-heal: edit the existing release in place
-          #     (--draft=false also heals an orphan draft left by the legacy GC
-          #     symptom; prerelease kept; title/notes refreshed). Only a missing
-          #     release is created.
-          notes="Test build of the tri-wire fork CLI (tri-wire-api). Windows x86_64 / Linux x86_64 / macOS aarch64 (Apple Silicon). Unsigned. Report issues in this repo. ROLLING TAG: this prerelease tag is force-moved by every green full run - always download from releases/download/tri-wire-test/<asset>; do not pin a commit SHA or the release id. Family change (ticket 35): migration checksums follow the official platform family again (Windows=CRLF). If a startup reports a checksum family mismatch, run codex state fix-checksums --family crlf --apply once; runbook: docs/fork-checksum-family.md"
-          if gh api "repos/${{ github.repository }}/releases/tags/$tag" >/dev/null 2>&1; then
-            echo "release $tag exists - healing in place"
-            gh release edit "$tag" --repo "${{ github.repository }}" --draft=false --prerelease --title "$title" --notes "$notes"
-          else
-            echo "release $tag absent - creating"
-            gh release create "$tag" --repo "${{ github.repository }}" --title "$title" --notes "$notes" --prerelease
-          fi
-          # (c) same-name assets are overwritten via --clobber; off-name
-          #     leftovers are kept untouched (asset naming is stable per OS; the
-          #     retention policy is stated in the ticket 36 report).
-          gh release upload "$tag" dist/*.zip dist/*.tar.gz --repo "${{ github.repository }}" --clobber
-          # publish self-evidence: final public state of the rolling release.
-          gh release view "$tag" --repo "${{ github.repository }}" --json tagName,isDraft,isPrerelease,assets
+          set -eu
+          repo="${{ github.repository }}"
+          # Versioned asset names carry the release version, so one file is
+          # enough to recover it without a second checkout.
+          first=$(ls dist | sed -n "1p")
+          version=$(echo "$first" | sed -E "s/^codex-//; s/-(win|linux|mac)-.*$//")
+          [ -n "$version" ] || { echo "::error::cannot recover version from dist/$first"; exit 1; }
+          echo "dist version: $version (ref: $REF_NAME)"
+
+          upsert_release() {  # $1 tag, $2 title, $3 notes file
+            if gh api "repos/$repo/releases/tags/$1" >/dev/null 2>&1; then
+              gh release edit "$1" --repo "$repo" --draft=false --prerelease --title "$2" --notes-file "$3"
+            else
+              gh release create "$1" --repo "$repo" --title "$2" --notes-file "$3" --prerelease
+            fi
+          }
+
+          case "$REF_NAME" in
+            tri/v*)
+              case "$version" in
+                *-tri.*) ;;
+                *) echo "::error::ref $REF_NAME has version $version without a -tri.N marker; a release branch must set it (spec R-03)"; exit 1 ;;
+              esac
+              tag="tri-v$version"
+              upstream="rust-v${version%%-tri.*}"
+              # Tags are immutable (ADR-0012 / spec R-03): create once, never move.
+              if gh api "repos/$repo/git/ref/tags/$tag" >/dev/null 2>&1; then
+                existing=$(gh api "repos/$repo/git/ref/tags/$tag" --jq ".object.sha")
+                [ "$existing" = "$GITHUB_SHA" ] || { echo "::error::tag $tag already points at $existing, refusing to move it"; exit 1; }
+                echo "tag $tag already at ${GITHUB_SHA:0:8}"
+              else
+                gh api -X POST "repos/$repo/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" >/dev/null
+                echo "tag $tag created at ${GITHUB_SHA:0:8}"
+              fi
+              {
+                echo "## 上游版本"
+                echo
+                echo "\`$upstream\`"
+                echo
+                echo "## 本版内容"
+                echo
+                echo "上游该版全部内容 + 三 wire 原生支持（Responses / Chat Completions / Anthropic Messages）+ fork 修改。"
+                echo
+                echo "## fork 修改"
+                echo
+                echo "完整差异：[${upstream}...${REF_NAME}](https://github.com/openai/codex/compare/${upstream}...${repo%%/*}:${repo#*/}:${REF_NAME})"
+                echo
+                echo "## 已知限制"
+                echo
+                echo "- 二进制**未签名**。"
+                echo "- Anthropic Messages wire：跨厂商托管的 \`file_id\` 图片无法上送，降级为可见文本占位。"
+                echo "- Anthropic Messages wire：http(s) URL 图片仍会被丢弃。"
+                echo "- Chat Completions wire：无图片路径。"
+                echo "- 远程压缩在 chat/anthropic wire 上降级为本地摘要。"
+                echo "- 校验和家族跟随官方平台族（Windows=CRLF，Linux/macOS=LF）；启动报不匹配时运行 \`codex state fix-checksums --family crlf --apply\`。"
+                echo
+                echo "## 校验和（sha256）"
+                echo
+                echo "\`\`\`"
+                ( cd dist && sha256sum * )
+                echo "\`\`\`"
+              } > notes.md
+              upsert_release "$tag" "tri-wire $version" notes.md
+              gh release upload "$tag" dist/*.zip dist/*.tar.gz --repo "$repo" --clobber
+              gh release view "$tag" --repo "$repo" --json tagName,isPrerelease,assets
+              ;;
+            tri-wire-api)
+              # Trunk publishes the index only: assets live on version pages
+              # (ADR-0016 / spec R-14; D-020).
+              latest=$(gh api "repos/$repo/releases?per_page=100" --jq "[.[]|select(.draft|not)|select(.tag_name|startswith("tri-v"))]|sort_by(.created_at)|last|.tag_name // empty")
+              if [ -n "$latest" ]; then
+                pointer="最新已发布版本：**[${latest}](https://github.com/${repo}/releases/tag/${latest})**"
+              else
+                pointer="还没有任何版本发布。"
+              fi
+              {
+                echo "## 这是索引页，不是下载页"
+                echo
+                echo "$pointer"
+                echo
+                echo "资产只在各自的版本页上挂一份，本页不存放文件。"
+              } > notes.md
+              upsert_release tri-wire-test "Tri-wire 发行索引（最新版指针）" notes.md
+              echo "index page updated; latest=$latest"
+              ;;
+            *)
+              echo "ref $REF_NAME publishes nothing (only tri/v* and tri-wire-api do)"
+              ;;
+          esac
