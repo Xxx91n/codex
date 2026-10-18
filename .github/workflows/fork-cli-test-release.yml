@@ -1,5 +1,7 @@
-# fork-only workflow: build tri-wire test binaries for Windows/macOS/Linux and
-# publish one public rolling prerelease with per-OS assets. NOT upstream-shipped.
+# fork-only workflow: build tri-wire test binaries for Windows/macOS/Linux, then
+# publish by ref: a tri/v* release branch owns the immutable tri-v<version> tag and
+# its three assets; the trunk only refreshes the index page (ADR-0016, spec R-14).
+# NOT upstream-shipped.
 name: fork-cli-test-release
 on:
   workflow_dispatch:
@@ -565,7 +567,7 @@ jobs:
             tri-wire-api)
               # Trunk publishes the index only: assets live on version pages
               # (ADR-0016 / spec R-14; D-020).
-              latest=$(gh api "repos/$repo/releases?per_page=100" --jq "[.[]|select(.draft|not)|select(.tag_name|startswith("tri-v"))]|sort_by(.created_at)|last|.tag_name // empty")
+              latest=$(gh api "repos/$repo/releases?per_page=100" --jq '[.[]|select(.draft|not)|select(.tag_name|startswith("tri-v"))]|sort_by(.created_at)|last|.tag_name // empty')
               if [ -n "$latest" ]; then
                 pointer="最新已发布版本：**[${latest}](https://github.com/${repo}/releases/tag/${latest})**"
               else
