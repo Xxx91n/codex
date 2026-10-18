@@ -762,10 +762,12 @@ fn push_anthropic_user_blocks(
     }));
 }
 
-/// Converts Responses `input_image` content items to Anthropic
-/// `image` blocks. Only base64 data-URIs are accepted — the Messages API
-/// has no URL-fetch variant, so plain http(s) URLs degrade to being dropped
-/// (the text sibling already carries the fallback marker).
+/// Converts Responses `input_image` content items to Anthropic `image` blocks.
+///
+/// Only base64 data-URIs can be carried as images: the Messages API has no
+/// URL-fetch variant, and a hosted `file_id` is minted by one provider and is
+/// meaningless to another (file ids never cross vendors). Both forms replay as
+/// a visible text placeholder so a turn never loses its only trace of the image.
 fn content_items_to_image_blocks(
     content: &[codex_protocol::models::ContentItem],
 ) -> Vec<serde_json::Value> {
@@ -774,9 +776,19 @@ fn content_items_to_image_blocks(
         let codex_protocol::models::ContentItem::InputImage { image, .. } = item else {
             continue;
         };
-        let codex_protocol::models::ImageReference::Inline { image_url } = image else {
-            debug!("anthropic replay: file-id image dropped");
-            continue;
+        let image_url = match image {
+            codex_protocol::models::ImageReference::Inline { image_url } => image_url,
+            codex_protocol::models::ImageReference::File { file_id } => {
+                warn!(
+                    file_id = %file_id,
+                    "anthropic replay: hosted file-id image cannot cross providers; kept as a text placeholder"
+                );
+                blocks.push(json!({
+                    "type": "text",
+                    "text": hosted_file_image_placeholder(file_id),
+                }));
+                continue;
+            }
         };
         let Some(rest) = image_url.strip_prefix("data:") else {
             debug!("anthropic replay: non-data-URI image dropped: {image_url:?}");
@@ -796,6 +808,11 @@ fn content_items_to_image_blocks(
         }));
     }
     blocks
+}
+
+/// Text stand-in for an image the Messages wire cannot carry.
+fn hosted_file_image_placeholder(file_id: &str) -> String {
+    format!("[image omitted: hosted file `{file_id}` is not available to this provider]")
 }
 
 /// Guard G1 pre-flight (ADR-0009): a manual-thinking request whose final

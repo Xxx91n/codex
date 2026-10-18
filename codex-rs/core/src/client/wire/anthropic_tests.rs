@@ -258,3 +258,38 @@ fn reconciled_preemption_replays_alternating_with_the_result_behind_its_call() {
          thinking block nor the truncated tool_use may appear"
     );
 }
+
+#[test]
+fn hosted_file_image_is_replayed_as_a_text_placeholder() {
+    let history = vec![ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputImage {
+            image: codex_protocol::models::ImageReference::File {
+                file_id: "file_abc".to_string(),
+            },
+            detail: None,
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }];
+
+    let messages = build_messages_messages(
+        history,
+        ThinkingEmission::Standard {
+            unsigned: UnsignedReplay::Preserve,
+        },
+    );
+
+    assert_eq!(
+        messages,
+        vec![json!({
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": "[image omitted: hosted file `file_abc` is not available to this provider]",
+            }],
+        })],
+        "a hosted file id cannot cross providers, so the turn keeps a visible trace instead of dropping the image"
+    );
+}
