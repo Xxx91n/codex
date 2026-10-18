@@ -14,6 +14,10 @@ fork 需要为每个上游稳定版（rust-vX.Y.Z，共 220 个）提供一条�
 4. 标签不用 rust-v 前缀：fork 的 .github/workflows/rust-release.yml 监听 rust-v*.*.*。
 5. 逐版裁决写入 FORK_DIVERGENCE，不逐版写 ADR；本 ADR 管规则。
 
+## 修订（append-only 追加，2026-10-18）
+
+Decision 1（基点 = tag 提交）已被 ADR-0016 修订：基点改为 trunk 上“已含切点”的提交，并用 diff 门证明与官方同版。命名（Decision 2）、prerelease 形式（Decision 3）、标签前缀（Decision 4）与逐版登记（Decision 5）继续有效。
+
 ## Consequences
 - 已知代价：X.Y.Z-tri.N 低于 X.Y.Z，自更新与版本比较逻辑需在首版验证。
 - 流程细节（验收门、冲突规则、bot 边界）见 docs/specs/release-branching/README.md。

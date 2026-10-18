@@ -211,12 +211,24 @@ D6 原「CONTEXT.md 仓外」由 2026-09-03 大脑轨裁决替代，证据链：
   xdifu codex-repair 对齐（官方 #23863 同族事故）。
 
 ### 发行分支（tri/vX.Y.Z）
-- 本仓用法：fork 对某个上游稳定版的完整发行线，从该 tag 提交切出，承载 fork 改动。
-- 禁止用法：从 upstream/main 切发行分支；把发行分支称为 release。
+- 本仓用法：fork 对某个上游稳定版的完整发行线。基点 = trunk 上“已含上游切点”的提交，再补齐该 tag 独有的提交；切点 = `merge-base(tag, upstream/main)`。发行后冻结，缺陷回该分支内修。
+- 禁止用法：从 upstream/main 或 tag 提交直接切；从 trunk 当前 HEAD 切（会把上游发版后的新提交带进旧版本号）；把发行分支称为 release。
+- 源：ADR-0016；ADR-0012（命名）。
 
 ### 发行标签（tri-vX.Y.Z-tri.N）
-- 本仓用法：发行分支上的版本标记，N 从 1 起递增不复用；用 prerelease 形式，不用 build metadata。
-- 禁止用法：使用 rust-v 前缀（会触发上游发布流程）。
+- 本仓用法：发行分支上的版本标记，每版 N 从 1 起；消耗 N 的唯一触发是“会改变产物内容的提交”，CI 重跑与资产重传不消耗。
+- 禁止用法：使用 rust-v 前缀（会触发上游发布流程）；移动/覆盖/复用已推 tag；同一内容打多个 tag。
+- 源：ADR-0012 Decision 3；ADR-0016。
+
+### 发行队列
+- 本仓用法：待发行的上游稳定版按版本号升序排队，最小在前；当前格全档完成才允许开始下一格；新版只追加到队尾，不打断、不抢占。
+- 禁止用法：跳过未完成的格；因新版出现而丢弃手上进度。
+- 源：ADR-0016 Decision 4；spec R-11。
+
+### main 镜像
+- 本仓用法：`main`（本地 + 远端）= 上游 `main` 的纯镜像，只快进、零 fork 提交，由定时 workflow 每日推一次；trunk 是 `tri-wire-api`，两者是两条独立管线。
+- 禁止用法：把 main 当 trunk 或发行源；在 main 上提交 fork 改动；用 GitHub “Sync fork” 按钮（它同步默认分支，会试图覆盖工作区）。
+- 源：ADR-0016 Decision 6；spec R-10。
 
 ### preempt 打断
 - 本仓用法：chat/messages 流式生成中途收到用户新输入时，立即关闭 HTTP 流并对账历史；规则见 `docs/specs/chat-messages-preempt/README.md`。
