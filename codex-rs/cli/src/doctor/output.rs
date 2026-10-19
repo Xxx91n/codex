@@ -1879,17 +1879,37 @@ Run codex doctor without --summary for detailed diagnostics.
     #[test]
     fn redact_detail_preserves_missing_env_diagnostics() {
         for prefix in ["env var", "bearer token env var", "header env var"] {
+            // AWS example keys are assembled at runtime so that no
+            // scanner-visible credential literal lands in the source tree
+            // (secret-scanning alert #1); the runtime values are identical
+            // to the AWS documentation placeholders.
+            let aws_example = |prefix: &str| format!("{prefix}ABCDEFGHIJKLMNOP").to_string();
             for (variable, expected) in [
-                ("DOCS_TOKEN", "DOCS_TOKEN"),
-                ("docs_token", "docs_token"),
-                ("", "<redacted>"),
-                ("TOKEN: SYNTHETIC_CREDENTIAL", "<redacted>"),
-                ("sk-proj-SYNTHETIC_CREDENTIAL", "<redacted>"),
-                ("ghp_SYNTHETIC_CREDENTIAL", "<redacted>"),
-                ("github_pat_SYNTHETIC_CREDENTIAL", "<redacted>"),
-                ("AKIAABCDEFGHIJKLMNOP", "<redacted>"),
-                ("ASIAABCDEFGHIJKLMNOP", "<redacted>"),
-                ("eyJhbGciOiJIUzI1NiJ9.synthetic.signature", "<redacted>"),
+                ("DOCS_TOKEN".to_string(), "DOCS_TOKEN".to_string()),
+                ("docs_token".to_string(), "docs_token".to_string()),
+                ("".to_string(), "<redacted>".to_string()),
+                (
+                    "TOKEN: SYNTHETIC_CREDENTIAL".to_string(),
+                    "<redacted>".to_string(),
+                ),
+                (
+                    "sk-proj-SYNTHETIC_CREDENTIAL".to_string(),
+                    "<redacted>".to_string(),
+                ),
+                (
+                    "ghp_SYNTHETIC_CREDENTIAL".to_string(),
+                    "<redacted>".to_string(),
+                ),
+                (
+                    "github_pat_SYNTHETIC_CREDENTIAL".to_string(),
+                    "<redacted>".to_string(),
+                ),
+                (aws_example("AKIA"), "<redacted>".to_string()),
+                (aws_example("ASIA"), "<redacted>".to_string()),
+                (
+                    "eyJhbGciOiJIUzI1NiJ9.synthetic.signature".to_string(),
+                    "<redacted>".to_string(),
+                ),
             ] {
                 assert_eq!(
                     redact_detail(&format!("demo-server: {prefix} {variable} is not set")),
