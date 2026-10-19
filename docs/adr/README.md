@@ -23,6 +23,7 @@ that supersedes and links the old one, incrementing the `NNNN` counter.
 | [0014](0014-anthropic-tool-result-is-error.md) | Accepted | Anthropic outbound `tool_result` carries `is_error: true` whenever the IR payload says `success: Some(false)` (field omitted on success; Chat wire unchanged) |
 | [0015](0015-preempt-seam-binding-at-wire-construction.md) | Accepted | Preemption reconciles through a per-wire seam bound at the wire's own stream construction (`ResponseStream::take_preempted_history`); `turn.rs` holds no `wire_api` and `wire/mod.rs` no longer matches on it |
 | [0016](0016-release-train-and-branch-base.md) | Accepted | Release train: version branches cut from trunk at the upstream cut point (not from the tag), release-only commits cherry-picked, same-version proven by a diff gate; strict ascending version queue; full-tier definition of done; `main` is an upstream mirror, `tri-wire-api` the working trunk |
+| [0017](0017-branch-whitelist-and-purge.md) | Accepted | Branch whitelist (trunk / upstream mirror / frozen release lines) and a one-time purge of the 4632 upstream-inherited contributor branches; probe branch deleted after archiving its SHAs; tags untouched; future remote branches must fill a whitelist role |
 
 Term definitions for vocabulary used across ADRs live in the repo-root
 [CONTEXT.md](../../CONTEXT.md) (single vocabulary authority). Agent-facing
