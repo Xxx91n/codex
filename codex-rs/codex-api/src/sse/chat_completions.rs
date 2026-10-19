@@ -330,6 +330,8 @@ async fn process_chat_sse(
             if let Some(content) = choice.delta.content {
                 if !assistant_item_open {
                     let msg = ResponseItem::Message {
+                        encrypted_content: None,
+                        status: None,
                         id: None,
                         role: "assistant".to_string(),
                         content: vec![],
@@ -403,6 +405,8 @@ fn chat_pending_ir(
             .clone()
             .unwrap_or_else(|| format!("chat_tool_call_{index}"));
         items.push(ResponseItem::FunctionCall {
+            encrypted_content: None,
+            status: None,
             id: None,
             name: call.name.clone(),
             namespace: None,
@@ -414,10 +418,14 @@ fn chat_pending_ir(
     }
     if !assistant_text.trim().is_empty() {
         items.push(ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
                 text: assistant_text.to_string(),
+                annotations: None,
+                logprobs: None,
             }],
             phase: None,
             internal_chat_message_metadata_passthrough: None,
@@ -506,6 +514,8 @@ async fn emit_chat_completion_items(
             .clone()
             .unwrap_or_else(|| format!("chat_tool_call_{index}"));
         let item = ResponseItem::FunctionCall {
+            encrypted_content: None,
+            status: None,
             id: None,
             name: call.name.clone(),
             namespace: None,
@@ -525,10 +535,14 @@ async fn emit_chat_completion_items(
 
     if !assistant_text.trim().is_empty() {
         let message = ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
                 text: assistant_text.to_string(),
+                annotations: None,
+                logprobs: None,
             }],
             phase: None,
             internal_chat_message_metadata_passthrough: None,

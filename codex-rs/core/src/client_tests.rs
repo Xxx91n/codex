@@ -2255,6 +2255,8 @@ fn build_chat_request_omits_responses_only_fields() {
     let client = test_model_client(SessionSource::Cli);
     let prompt = Prompt {
         input: vec![ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -2297,6 +2299,8 @@ fn build_messages_messages_serializes_tool_roundtrip_items() {
 
     let input = vec![
         ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -2306,6 +2310,8 @@ fn build_messages_messages_serializes_tool_roundtrip_items() {
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::FunctionCall {
+            encrypted_content: None,
+            status: None,
             id: None,
             name: "exec_command".to_string(),
             namespace: None,
@@ -2315,6 +2321,8 @@ fn build_messages_messages_serializes_tool_roundtrip_items() {
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::FunctionCall {
+            encrypted_content: None,
+            status: None,
             id: None,
             name: "notify".to_string(),
             namespace: None,
@@ -2391,6 +2399,8 @@ fn build_messages_messages_emits_image_blocks_and_replays_thinking_with_signatur
 
     let input = vec![
         ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "user".to_string(),
             content: vec![
@@ -2422,10 +2432,14 @@ fn build_messages_messages_emits_image_blocks_and_replays_thinking_with_signatur
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
                 text: "the answer".to_string(),
+                annotations: None,
+                logprobs: None,
             }],
             phase: None,
             internal_chat_message_metadata_passthrough: None,
@@ -2533,7 +2547,8 @@ fn build_messages_request_emits_thinking_and_cache_control_when_configured() {
         /*include_timing_metrics*/ false,
         None,
         false,
-        None,
+        /*output_token_replay_enabled*/ false,
+        /*attestation_provider*/ None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         codex_model_provider::WorkspaceRoutingContext::new(
             "https://chatgpt.com/backend-api".into(),
@@ -2586,7 +2601,8 @@ fn build_messages_request_clamps_thinking_budget_below_max_tokens() {
         /*include_timing_metrics*/ false,
         None,
         false,
-        None,
+        /*output_token_replay_enabled*/ false,
+        /*attestation_provider*/ None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         codex_model_provider::WorkspaceRoutingContext::new(
             "https://chatgpt.com/backend-api".into(),
@@ -2627,7 +2643,8 @@ fn build_messages_request_metadata_max_tokens_relaxes_thinking_clamp() {
         /*include_timing_metrics*/ false,
         None,
         false,
-        None,
+        /*output_token_replay_enabled*/ false,
+        /*attestation_provider*/ None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         codex_model_provider::WorkspaceRoutingContext::new(
             "https://chatgpt.com/backend-api".into(),
@@ -2667,7 +2684,8 @@ fn build_messages_request_metadata_max_tokens_relaxes_thinking_clamp() {
         /*include_timing_metrics*/ false,
         None,
         false,
-        None,
+        /*output_token_replay_enabled*/ false,
+        /*attestation_provider*/ None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         codex_model_provider::WorkspaceRoutingContext::new(
             "https://chatgpt.com/backend-api".into(),
@@ -2752,7 +2770,8 @@ fn build_messages_request_session_effort_buckets_to_budget_tokens() {
         /*include_timing_metrics*/ false,
         None,
         false,
-        None,
+        /*output_token_replay_enabled*/ false,
+        /*attestation_provider*/ None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         codex_model_provider::WorkspaceRoutingContext::new(
             "https://chatgpt.com/backend-api".into(),
@@ -2798,7 +2817,8 @@ fn build_messages_request_adaptive_mode_maps_effort_to_output_config() {
         /*include_timing_metrics*/ false,
         None,
         false,
-        None,
+        /*output_token_replay_enabled*/ false,
+        /*attestation_provider*/ None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         codex_model_provider::WorkspaceRoutingContext::new(
             "https://chatgpt.com/backend-api".into(),
@@ -2826,6 +2846,8 @@ fn build_chat_messages_serializes_tool_roundtrip_items() {
 
     let input = vec![
         ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -2835,6 +2857,8 @@ fn build_chat_messages_serializes_tool_roundtrip_items() {
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::FunctionCall {
+            encrypted_content: None,
+            status: None,
             id: None,
             name: "exec_command".to_string(),
             namespace: None,
@@ -2844,6 +2868,8 @@ fn build_chat_messages_serializes_tool_roundtrip_items() {
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::FunctionCall {
+            encrypted_content: None,
+            status: None,
             id: None,
             name: "notify".to_string(),
             namespace: None,
@@ -2915,6 +2941,8 @@ fn build_chat_messages_keeps_tool_results_adjacent_to_tool_calls() {
 
     let input = vec![
         ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -2924,6 +2952,8 @@ fn build_chat_messages_keeps_tool_results_adjacent_to_tool_calls() {
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::FunctionCall {
+            encrypted_content: None,
+            status: None,
             id: None,
             name: "exec_command".to_string(),
             namespace: None,
@@ -2933,6 +2963,8 @@ fn build_chat_messages_keeps_tool_results_adjacent_to_tool_calls() {
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "assistant".to_string(),
             content: vec![ContentItem::InputText {
@@ -2942,6 +2974,8 @@ fn build_chat_messages_keeps_tool_results_adjacent_to_tool_calls() {
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "developer".to_string(),
             content: vec![ContentItem::InputText {
@@ -2998,6 +3032,8 @@ fn build_messages_messages_emits_redacted_thinking_block_verbatim() {
     use codex_protocol::models::ResponseItem;
     let input = vec![
         ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "user".to_string(),
             content: vec![codex_protocol::models::ContentItem::InputText {
@@ -3018,10 +3054,14 @@ fn build_messages_messages_emits_redacted_thinking_block_verbatim() {
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "assistant".to_string(),
             content: vec![codex_protocol::models::ContentItem::OutputText {
                 text: "answer".to_string(),
+                annotations: None,
+                logprobs: None,
             }],
             phase: None,
             internal_chat_message_metadata_passthrough: None,
@@ -3082,7 +3122,8 @@ fn thinking_replay_client(base_url: &str, adaptive: bool) -> ModelClient {
         /*include_timing_metrics*/ false,
         None,
         false,
-        None,
+        /*output_token_replay_enabled*/ false,
+        /*attestation_provider*/ None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         codex_model_provider::WorkspaceRoutingContext::new(
             "https://chatgpt.com/backend-api".into(),
@@ -3102,6 +3143,8 @@ fn thinking_replay_tool_use_history(signed: bool) -> Vec<codex_protocol::models:
     use codex_protocol::models::ResponseItem;
     vec![
         ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -3124,6 +3167,8 @@ fn thinking_replay_tool_use_history(signed: bool) -> Vec<codex_protocol::models:
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::FunctionCall {
+            encrypted_content: None,
+            status: None,
             id: None,
             name: "shell".to_string(),
             namespace: None,

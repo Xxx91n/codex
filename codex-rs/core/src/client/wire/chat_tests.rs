@@ -8,6 +8,8 @@ use pretty_assertions::assert_eq;
 
 fn function_call(call_id: &str, arguments: &str) -> ResponseItem {
     ResponseItem::FunctionCall {
+        encrypted_content: None,
+        status: None,
         id: None,
         name: "shell".to_string(),
         namespace: None,
@@ -34,10 +36,14 @@ fn interrupted_result(call_id: &str) -> ResponseItem {
 
 fn assistant_message(text: &str) -> ResponseItem {
     ResponseItem::Message {
+        encrypted_content: None,
+        status: None,
         id: None,
         role: "assistant".to_string(),
         content: vec![ContentItem::OutputText {
             text: text.to_string(),
+            annotations: None,
+            logprobs: None,
         }],
         phase: None,
         internal_chat_message_metadata_passthrough: None,

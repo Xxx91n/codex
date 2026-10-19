@@ -129,7 +129,6 @@ pub(crate) struct PreemptSeam {
 pub struct ResponseStream {
     pub(crate) rx_event: mpsc::Receiver<Result<ResponseEvent>>,
     pub(crate) interrupt: Option<oneshot::Sender<codex_api::ResponseInterrupt>>,
-    pub(crate) interrupt: Option<oneshot::Sender<()>>,
     /// Present only on the Chat and Messages wires, whose turns can be preempted
     /// mid-stream: firing the seam closes the HTTP read immediately and returns
     /// the IR the wire still held in flight, which that wire's module reconciles

@@ -79,9 +79,11 @@ impl ModelClientSession {
                 RequestRouteTelemetry::for_endpoint(CHAT_COMPLETIONS_ENDPOINT),
                 self.client.state.auth_env_telemetry.clone(),
             );
-            let compression = self.responses_request_compression(client_setup.auth.as_ref());
-            let responses_options = self
+            let executor = crate::client::ResponsesHttpExecutor::new(&self.client);
+            let compression = executor.responses_request_compression(client_setup.auth.as_ref());
+            let responses_options = executor
                 .build_responses_options(
+                    &self.turn_state,
                     responses_metadata,
                     compression,
                     /*use_responses_lite*/ false,

@@ -294,6 +294,8 @@ async fn emit_chat_completion_items_emits_tool_message_and_completed() {
 
     match first {
         ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
+            encrypted_content: None,
+            status: None,
             name,
             call_id,
             arguments,
@@ -313,6 +315,8 @@ async fn emit_chat_completion_items_emits_tool_message_and_completed() {
                 content,
                 vec![ContentItem::OutputText {
                     text: "done".to_string(),
+                    annotations: None,
+                    logprobs: None,
                 }]
             );
         }
@@ -413,6 +417,8 @@ async fn chat_sse_two_parallel_tool_calls_survive_index_keyed_merge() {
         .iter()
         .filter_map(|ev| match ev {
             Ok(ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 call_id,
                 name,
                 arguments,
@@ -471,6 +477,8 @@ fn comparable_event_signatures(
                 Some(("ReasoningDone", text))
             }
             Ok(ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 call_id,
                 name,
                 arguments,
@@ -479,7 +487,7 @@ fn comparable_event_signatures(
             Ok(ResponseEvent::OutputTextDelta(text)) => Some(("TextDelta", text.clone())),
             Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { content, .. })) => {
                 let text = match &content[0] {
-                    ContentItem::OutputText { text } => text.clone(),
+                    ContentItem::OutputText { text, .. } => text.clone(),
                     _ => String::new(),
                 };
                 Some(("MessageDone", text))
@@ -795,9 +803,13 @@ async fn preemption_closes_the_read_and_hands_back_the_in_flight_ir() {
         pending,
         vec![ResponseItem::Message {
             id: None,
+            encrypted_content: None,
+            status: None,
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
                 text: "partial answer".to_string(),
+                annotations: None,
+                logprobs: None,
             }],
             phase: None,
             internal_chat_message_metadata_passthrough: None,
