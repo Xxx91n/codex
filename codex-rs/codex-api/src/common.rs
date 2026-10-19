@@ -462,11 +462,24 @@ impl PreemptHandle {
     }
 }
 
+/// Distinguishes draining a live response from abandoning obsolete work.
+#[derive(Clone, Copy)]
+pub enum ResponseInterrupt {
+    /// Drain normally, without validating or waiting for interruption acknowledgements.
+    Drain,
+    /// Skip undispatched work or retire its transport at the cleanup deadline.
+    /// Undispatched work ends without a completion event and leaves the socket reusable.
+    Cancel { deadline: tokio::time::Instant },
+}
+
 pub struct ResponseStream {
     pub rx_event: mpsc::Receiver<Result<ResponseEvent, ApiError>>,
     /// Server-assigned `x-request-id` response header, when present.
     pub upstream_request_id: Option<String>,
     /// Requests a graceful interrupt. Keep consuming events through completion.
+    /// Requests a graceful interrupt. Keep consuming events through completion.
+    /// Only `Cancel` validates and waits for an interruption acknowledgement.
+    pub interrupt: Option<oneshot::Sender<ResponseInterrupt>>,
     pub interrupt: Option<oneshot::Sender<()>>,
     /// Requests a client-side preemption. Close the read and hand back the
     /// in-flight items. Set only on the Chat and Messages wires.

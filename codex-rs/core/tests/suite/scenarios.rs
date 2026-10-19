@@ -16,9 +16,12 @@ use codex_config::ConfigLayerStack;
 use codex_config::types::McpServerConfig;
 use codex_context_fragments::AnsweredQuestion;
 use codex_context_fragments::ContextualUserFragment;
+use codex_core::ForkSnapshot;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
+use codex_core::compact::AutoCompactionDisabled;
 use codex_core::config::Config;
+use codex_core::config::TokenBudgetConfig;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
@@ -63,6 +66,7 @@ use core_test_support::context_snapshot::ContextSnapshotOptions;
 use core_test_support::context_snapshot::SnapshotEntry;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::ev_custom_tool_call;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_message_item_added;
@@ -89,6 +93,9 @@ use tokio::sync::oneshot;
 
 const ONE_PIXEL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 
+#[path = "scenarios_retained_tool_outputs.rs"]
+mod retained_tool_outputs;
+
 #[path = "scenarios_incremental_tools.rs"]
 mod incremental_tools;
 #[path = "scenarios_incremental_tools_resume.rs"]
@@ -106,11 +113,20 @@ mod agent_message_board;
 #[path = "scenarios_mailbox_preemption_tests.rs"]
 mod mailbox_preemption;
 
+#[path = "scenarios_agent_eviction_tests.rs"]
+mod agent_eviction;
+
 #[path = "scenarios_partial_answers.rs"]
 mod partial_answers;
 
+#[path = "scenarios_guardian_sender_context.rs"]
+mod guardian_sender_context;
+
 #[path = "scenarios_guardian_extra_policy.rs"]
 mod guardian_extra_policy;
+
+#[path = "scenarios_guardian_orchestrator_connector.rs"]
+mod guardian_orchestrator_connector;
 
 #[path = "scenarios_guardian_conversation_history_tests.rs"]
 mod guardian_conversation_history;
@@ -268,6 +284,20 @@ fn configure_scenario_catalog(config: &mut Config) {
     .expect("fixture config layers");
     config.model_catalog = Some(bundled_models_response().expect("bundled model catalog"));
     config.cloud_skill_enabled = false;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn realtime_attachment_replacement_preserves_handoff_context() -> Result<()> {
+    let requests = super::realtime_attachment::attachment_replacement_scenario().await?;
+    insta::assert_snapshot!(
+        "realtime_attachment_replacement",
+        context_snapshot::format_request_history_snapshot(
+            "A replacement fences an older pending connection and stale stops; only the selected call starts a Codex handoff.",
+            &requests,
+            &ContextSnapshotOptions::default().rewrite_known_segments(),
+        )
+    );
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -696,7 +726,101 @@ async fn astra_kickoff_with_skills_plugins_and_remote_compaction() -> Result<()>
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn astra_omits_disabled_executor_and_plugin_skills_from_model_context() -> Result<()> {
+async fn astra_plugin_policy_limits_visible_skills() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let home = Arc::new(TempDir::new()?);
+    write_scenario_capabilities(&home)?;
+    fs::rename(
+        home.path().join("plugins/cache/test"),
+        home.path().join("plugins/cache/openai-curated-remote"),
+    )?;
+    fs::write(
+        home.path().join("config.toml"),
+        r#"[features]
+plugins = true
+remote_plugin = true
+[skills.bundled]
+enabled = false
+[plugins._default]
+enabled = false
+[plugins."calendar@openai-curated-remote"]
+enabled = true
+"#,
+    )?;
+    let installed_plugins = ["calendar", "notes"].map(|name| json!({
+        "id": format!("plugins~Plugin_{name}"),
+        "name": name,
+        "scope": "GLOBAL",
+        "status": "ENABLED",
+        "installation_policy": "AVAILABLE",
+        "authentication_policy": "ON_USE",
+        "release": { "version": "local", "display_name": name, "description": name, "interface": {} },
+        "enabled": true,
+    }));
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/ps/plugins/installed"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+            "plugins": installed_plugins,
+            "pagination": { "next_page_token": null },
+        })))
+        .mount(&server)
+        .await;
+    let mock = mount_sse_sequence(
+        &server,
+        vec![sse(vec![
+            ev_response_created("skills-response"),
+            ev_assistant_message("skills", "The calendar agenda skill is available."),
+            ev_completed("skills-response"),
+        ])],
+    )
+    .await;
+    let chatgpt_base_url = server.uri();
+    let test = test_codex()
+        .with_model("gpt-6-astra")
+        .with_home(home)
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_extensions(skills_extensions())
+        .with_config(move |config| {
+            configure_scenario_catalog(config);
+            config.chatgpt_base_url = chatgpt_base_url;
+            config.workspace_roots = vec![config.cwd.clone()];
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    let auth = test.thread_manager.auth_manager().auth().await;
+    test.thread_manager
+        .plugins_manager()
+        .reconcile_remote_installed_plugins(&test.config.plugins_config_input(), auth.as_ref())
+        .await?;
+    test.submit_turn("Plan a team kickoff. Which planning skills are available?")
+        .await?;
+
+    let requests = mock.requests();
+    insta::assert_snapshot!(
+        "astra_plugin_policy_limits_visible_skills",
+        context_snapshot::format_request_history_snapshot(
+            "Astra sees the permitted calendar plugin and standalone skills, but not the unlisted notes plugin.",
+            &requests,
+            &ContextSnapshotOptions::default().include_request_settings(),
+        )
+    );
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ExecutorPluginDisablement {
+    ThreadSelection,
+    ConfigRefresh,
+}
+
+#[test_case::test_case(ExecutorPluginDisablement::ThreadSelection; "thread_selection")]
+#[test_case::test_case(ExecutorPluginDisablement::ConfigRefresh; "config_refresh")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn astra_omits_disabled_executor_and_plugin_skills_from_model_context(
+    disablement: ExecutorPluginDisablement,
+) -> Result<()> {
     use codex_extension_api::ContextContributor;
     use codex_extension_api::ExtensionFuture;
     use codex_extension_api::SelectedPluginSnapshot;
@@ -716,9 +840,11 @@ async fn astra_omits_disabled_executor_and_plugin_skills_from_model_context() ->
             input: WorldStateContributionInput<'a>,
         ) -> ExtensionFuture<'a, Vec<WorldStateSectionContribution>> {
             Box::pin(async move {
-                let first = self.first.lock().unwrap().take();
+                let first = self.first.lock().expect("world state pause lock").take();
                 if let Some(first) = first {
-                    first.send(input.turn_id.to_string()).unwrap();
+                    first
+                        .send(input.turn_id.to_string())
+                        .expect("world state pause receiver");
                     self.resume.notified().await;
                 }
                 Vec::new()
@@ -831,7 +957,10 @@ async fn astra_omits_disabled_executor_and_plugin_skills_from_model_context() ->
     let mut thread_extension_init = ExtensionDataInit::new();
     thread_extension_init.insert(vec![selected_root(
         "plugin-skills",
-        PathUri::from_host_native_path(plugin_root)?,
+        PathUri::from_host_native_path(match disablement {
+            ExecutorPluginDisablement::ThreadSelection => plugin_root,
+            ExecutorPluginDisablement::ConfigRefresh => plugin_root.join("skills"),
+        })?,
     )]);
     let mut first_environment = test.executor_environment().selection().clone();
     let mut environment_config = environment_config_for_selection(&test.config, &first_environment);
@@ -847,7 +976,12 @@ async fn astra_omits_disabled_executor_and_plugin_skills_from_model_context() ->
         .start_thread(StartThreadOptions {
             environments: Some(vec![first_environment.into_request()]),
             thread_extension_init,
-            disabled_plugin_ids: Some(vec!["plugin-skills".to_string()]),
+            disabled_plugin_ids: match disablement {
+                ExecutorPluginDisablement::ThreadSelection => {
+                    Some(vec!["plugin-skills".to_string()])
+                }
+                ExecutorPluginDisablement::ConfigRefresh => None,
+            },
             ..StartThreadOptions::new(test.config.clone())
         })
         .await?
@@ -870,6 +1004,20 @@ async fn astra_omits_disabled_executor_and_plugin_skills_from_model_context() ->
         })
         .await?;
     assert_eq!(outcome.await?, TurnSettingsUpdateOutcome::Applied);
+    if matches!(disablement, ExecutorPluginDisablement::ConfigRefresh) {
+        let current_config = thread.config().await;
+        let mut next_config = (*current_config).clone();
+        next_config.config_layer_stack = next_config.config_layer_stack.with_user_config(
+            &next_config.codex_home.join("config.toml"),
+            toml::from_str("[plugins._default]\nenabled = false")?,
+        )?;
+        assert_eq!(
+            thread
+                .refresh_runtime_config(current_config, next_config)
+                .await,
+            codex_core::ConfigRefreshOutcome::Published
+        );
+    }
     // Refresh shared MCP for the new roots (there is no Apps server in this test), then
     // replace its plugin list before the next step captures it or needs another refresh.
     let _ = thread.refresh_codex_apps_tools().await;
@@ -891,6 +1039,15 @@ async fn astra_omits_disabled_executor_and_plugin_skills_from_model_context() ->
         .expect("first step's skills.list output");
     assert!(first_step_tool.contains("active-helper"));
     assert!(!first_step_tool.contains("next-helper"));
+    let plugin_was_enabled = matches!(disablement, ExecutorPluginDisablement::ConfigRefresh);
+    assert_eq!(
+        first_step_tool.contains("disabled-plugin-helper"),
+        plugin_was_enabled
+    );
+    assert_eq!(
+        requests[0].body_contains_text("disabled-plugin-helper"),
+        plugin_was_enabled
+    );
     let developer_texts = requests[1].message_input_texts("developer");
     let latest_skills = developer_texts
         .iter()
@@ -899,6 +1056,7 @@ async fn astra_omits_disabled_executor_and_plugin_skills_from_model_context() ->
         .expect("second step's skills section");
     assert!(latest_skills.contains("next-helper"));
     assert!(!latest_skills.contains("active-helper"));
+    assert!(!latest_skills.contains("disabled-plugin-helper"));
     let mut bodies = requests
         .iter()
         .map(core_test_support::responses::ResponsesRequest::body_json)
@@ -906,7 +1064,9 @@ async fn astra_omits_disabled_executor_and_plugin_skills_from_model_context() ->
     for body in &mut bodies {
         let input = body["input"].to_string();
         assert!(!input.contains("retired-helper"));
-        assert!(!input.contains("disabled-plugin-helper"));
+        if !plugin_was_enabled {
+            assert!(!input.contains("disabled-plugin-helper"));
+        }
         // Normalize opaque skill locators before snapshot truncation and hashing.
         body["input"] = serde_json::from_str(&input.replace(&skill_files, "<SKILLS_ROOT>/"))?;
         // Cargo and Bazel can serialize the JSON inside the tool output in different key orders.
@@ -920,10 +1080,20 @@ async fn astra_omits_disabled_executor_and_plugin_skills_from_model_context() ->
         }
     }
     let entries = bodies.iter().map(SnapshotEntry::body).collect::<Vec<_>>();
-    insta::assert_snapshot!(
-        "astra_disabled_executor_skills",
-        context_snapshot::format_context_snapshot(
+    let (snapshot_name, description) = match disablement {
+        ExecutorPluginDisablement::ThreadSelection => (
+            "astra_disabled_executor_skills",
             "Astra keeps disabled skills hidden and uses each step's selected skills after the environment changes during preparation.",
+        ),
+        ExecutorPluginDisablement::ConfigRefresh => (
+            "astra_executor_plugin_policy_refresh",
+            "Astra applies refreshed plugin policy to the next step while preserving earlier authorized skill context and tool output.",
+        ),
+    };
+    insta::assert_snapshot!(
+        snapshot_name,
+        context_snapshot::format_context_snapshot(
+            description,
             &entries,
             &ContextSnapshotOptions::default().include_request_settings(),
         )
@@ -931,14 +1101,17 @@ async fn astra_omits_disabled_executor_and_plugin_skills_from_model_context() ->
     Ok(())
 }
 
+#[test_case::test_case(false; "native_tools")]
+#[test_case::test_case(true; "host_tools")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn multi_agent_catalog_parameters() -> Result<()> {
+async fn multi_agent_catalog_parameters(disable_native_tools: bool) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
     let test = test_codex()
-        .with_config(|config| {
+        .with_config(move |config| {
             configure_scenario_catalog(config);
+            config.multi_agent_v2.disable_native_tools = disable_native_tools;
             config.workspace_roots = vec![config.cwd.clone()];
         })
         .with_model_info_override("gpt-6-astra", |model| {
@@ -983,10 +1156,25 @@ async fn multi_agent_catalog_parameters() -> Result<()> {
     .await;
     test.submit_turn("Check which agents are working under /root before delegating more work.")
         .await?;
-    insta::assert_snapshot!(
-        "multi_agent_catalog_parameters",
-        context_snapshot::format_request_history_snapshot(
+    assert_eq!(
+        test.codex.multi_agent_version(),
+        Some(codex_protocol::protocol::MultiAgentVersion::V2)
+    );
+    let (name, description) = if disable_native_tools {
+        (
+            "multi_agent_native_tools_hidden",
+            "Native tools are unavailable while the V2 runtime and its instructions remain enabled.",
+        )
+    } else {
+        (
+            "multi_agent_catalog_parameters",
             "Astra calls list_agents using the selected catalog parameter schema.",
+        )
+    };
+    insta::assert_snapshot!(
+        name,
+        context_snapshot::format_request_history_snapshot(
+            description,
             &mock.requests(),
             &ContextSnapshotOptions::default().include_request_settings(),
         )
@@ -1822,6 +2010,94 @@ async fn subagent_waits_for_its_inherited_environment_configuration() -> Result<
             "subagent_inherits_pending_environment"
         };
     insta::assert_snapshot!(snapshot_name, snapshot);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prediction_fork_inherits_parent_context() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let requests = super::reasoning_effort_override::prediction_fork_requests().await?;
+    insta::assert_snapshot!(context_snapshot::format_request_history_snapshot(
+        "A parent pins high request effort, then selects low. Its ephemeral prediction fork inherits the context and baseline, then selects medium on its first turn. Continuing the parent at medium produces the same request.",
+        &requests,
+        &ContextSnapshotOptions::default().include_request_settings(),
+    ));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prediction_fork_preserves_context_above_compaction_threshold() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_assistant_message("parent", "The release is ready for validation."),
+                ev_completed_with_tokens("parent", /*total_tokens*/ 70_000),
+            ]),
+            sse(vec![
+                ev_function_call_with_namespace(
+                    "remaining",
+                    "functions",
+                    "get_context_remaining",
+                    "{}",
+                ),
+                ev_completed_with_tokens("tool", /*total_tokens*/ 70_000),
+            ]),
+            sse(vec![
+                ev_assistant_message("prediction", "Run the release checks."),
+                ev_completed_with_tokens("prediction", /*total_tokens*/ 70_000),
+            ]),
+        ],
+    )
+    .await;
+    let mut test = test_codex()
+        .with_model("gpt-6-astra")
+        .with_config(|config| {
+            configure_scenario_catalog(config);
+            config.workspace_roots = vec![config.cwd.clone()];
+            config.model_auto_compact_token_limit = Some(50_000);
+            config
+                .features
+                .enable(Feature::TokenBudget)
+                .expect("enable token budget");
+            config.token_budget = Some(TokenBudgetConfig {
+                reminder_threshold_tokens: Some(2_000),
+                ..TokenBudgetConfig::default()
+            });
+        })
+        .build_with_auto_env(&server)
+        .await?;
+
+    test.submit_turn("Prepare the release.").await?;
+    test.codex.flush_rollout().await?;
+    let (mut options, settings) = test
+        .thread_manager
+        .fork_options_from_parent(test.session_configured.thread_id)
+        .await?;
+    options.config.ephemeral = true;
+    options.thread_extension_init.insert(AutoCompactionDisabled);
+    let child = test
+        .thread_manager
+        .fork_legacy_thread(
+            ForkSnapshot::Interrupted,
+            options,
+            test.codex.rollout_path().expect("parent rollout path"),
+        )
+        .await?;
+    child.thread.restore_thread_settings(settings).await?;
+    test.codex = child.thread;
+    test.submit_turn("Suggest my next message.").await?;
+
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 3);
+    insta::assert_snapshot!(context_snapshot::format_request_history_snapshot(
+        "The parent finishes above the compaction threshold. Its prediction fork retains the parent's context and reminder, but neither compacts nor adds another reminder after a tool call.",
+        &requests,
+        &ContextSnapshotOptions::default().include_request_settings(),
+    ));
     Ok(())
 }
 
