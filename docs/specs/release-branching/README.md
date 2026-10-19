@@ -1,8 +1,11 @@
 # 上游稳定版发行分支规格
 
-状态：首版（rust-v0.162.1）样板已在 Windows CI 通过（run 38708780625）；Linux/macOS 与其余待办见 backlog。规则依据：[ADR-0012](../../adr/0012-release-branching-scheme.md)。
+> **部分条款已被取代（2026-10-18）**：本文的基点与每版流程（§1、§3）基于“从上游 tag 提交切分支再合 fork”，已被 [ADR-0016](../../adr/0016-release-train-and-branch-base.md) 推翻——实测那条路只能产出“当前 fork 代码 + 旧版本号”。现役规则见 [release-train 规格](../release-train/README.md) R-05~R-07。
+> 命名（§2）与验收门（§4）仍有效。下文保留为历史依据，不再作为执行依据。
 
-## 1. 基线
+状态（历史）：首版样板当时只在 Windows CI 通过（run 38708780625）；2026-10-18 三平台已全绿（run 39107264573）。规则依据：[ADR-0012](../../adr/0012-release-branching-scheme.md)。
+
+## 1. 基线（基点条款已废，见页首）
 - 上游稳定 tag：220 个，格式 rust-vX.Y.Z（无 alpha/beta）。
 - 基点 = tag 指向的提交（ADR-0012）。
 - 首版：rust-v0.162.1（指向 092d3acd）。批量阶段按同一规则回溯。
@@ -16,7 +19,7 @@
 - Cargo 版本：X.Y.Z-tri.N。
 - 主分支名：tri-wire-api（2026-10-15 已改名，远端默认分支已切换，旧名 feat/tri-wire-api 已删除）。
 
-## 3. 每版流程（顺序固定）
+## 3. 每版流程（已废，见 release-train R-05）
 先用首版跑通全流程，再批量回溯其余版本；每批有可验证的每版验收标准。
 1. 从 tag 提交建分支 tri/vX.Y.Z（不推送）。
 2. merge fork 改动（不 rebase，ADR-0001）。

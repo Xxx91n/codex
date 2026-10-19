@@ -1,5 +1,7 @@
 # Release notes - idempotent rolling-tag publishing (ticket 36)
 
+> **已被取代（2026-10-18）**：本文描述的“每次全量跑把 `tri-wire-test` 强制移到新提交、资产全部挂在该页”已不再成立。现在版本分支发到不可变的 `tri-v<version>` 页并拥有自己的资产，`tri-wire-test` 只做最新版索引、不存文件（ADR-0016、spec R-14）。本文保留为当时的历史依据。
+
 Status: for the fork test-release pipeline (.github/workflows/fork-cli-test-release.yml,
 `release` job). Required by A-029 / D-007: the rolling prerelease publish is now an
 idempotent upsert, and the manual "delete tag, re-dispatch" recovery runbook is retired.
