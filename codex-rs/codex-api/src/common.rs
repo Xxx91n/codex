@@ -477,10 +477,8 @@ pub struct ResponseStream {
     /// Server-assigned `x-request-id` response header, when present.
     pub upstream_request_id: Option<String>,
     /// Requests a graceful interrupt. Keep consuming events through completion.
-    /// Requests a graceful interrupt. Keep consuming events through completion.
     /// Only `Cancel` validates and waits for an interruption acknowledgement.
     pub interrupt: Option<oneshot::Sender<ResponseInterrupt>>,
-    pub interrupt: Option<oneshot::Sender<()>>,
     /// Requests a client-side preemption. Close the read and hand back the
     /// in-flight items. Set only on the Chat and Messages wires.
     pub preempt: Option<PreemptHandle>,

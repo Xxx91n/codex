@@ -409,6 +409,8 @@ async fn process_messages_sse(
                             if let Some(text) = delta.text {
                                 if !assistant_item_open {
                                     let msg = ResponseItem::Message {
+                                        encrypted_content: None,
+                                        status: None,
                                         id: None,
                                         role: "assistant".to_string(),
                                         content: vec![],
@@ -596,6 +598,8 @@ fn messages_pending_ir(
             call.id.clone()
         };
         items.push(ResponseItem::FunctionCall {
+            encrypted_content: None,
+            status: None,
             id: None,
             name: call.name.clone(),
             namespace: None,
@@ -607,10 +611,14 @@ fn messages_pending_ir(
     }
     if !assistant_text.trim().is_empty() {
         items.push(ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
                 text: assistant_text.to_string(),
+                annotations: None,
+                logprobs: None,
             }],
             phase: None,
             internal_chat_message_metadata_passthrough: None,
@@ -713,6 +721,8 @@ async fn finish_messages_stream(
             call.id.clone()
         };
         let item = ResponseItem::FunctionCall {
+            encrypted_content: None,
+            status: None,
             id: None,
             name: call.name.clone(),
             namespace: None,
@@ -732,10 +742,14 @@ async fn finish_messages_stream(
 
     if !assistant_text.trim().is_empty() {
         let message = ResponseItem::Message {
+            encrypted_content: None,
+            status: None,
             id: None,
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
                 text: assistant_text.to_string(),
+                annotations: None,
+                logprobs: None,
             }],
             phase: None,
             internal_chat_message_metadata_passthrough: None,

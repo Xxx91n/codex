@@ -55,6 +55,8 @@ async fn finish_messages_stream_emits_tool_message_and_completed() {
 
     match first {
         ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
+            encrypted_content: None,
+            status: None,
             name,
             call_id,
             arguments,
@@ -74,6 +76,8 @@ async fn finish_messages_stream_emits_tool_message_and_completed() {
                 content,
                 vec![ContentItem::OutputText {
                     text: "done".to_string(),
+                    annotations: None,
+                    logprobs: None,
                 }]
             );
         }
@@ -877,6 +881,8 @@ fn pending_ir_passes_the_in_flight_blocks_through_unrepaired() {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "exec_command".to_string(),
                 namespace: None,
@@ -886,6 +892,8 @@ fn pending_ir_passes_the_in_flight_blocks_through_unrepaired() {
                 internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::FunctionCall {
+                encrypted_content: None,
+                status: None,
                 id: None,
                 name: "exec_command".to_string(),
                 namespace: None,
@@ -896,9 +904,13 @@ fn pending_ir_passes_the_in_flight_blocks_through_unrepaired() {
             },
             ResponseItem::Message {
                 id: None,
+                encrypted_content: None,
+                status: None,
                 role: "assistant".to_string(),
                 content: vec![ContentItem::OutputText {
                     text: "half an answer".to_string(),
+                    annotations: None,
+                    logprobs: None,
                 }],
                 phase: None,
                 internal_chat_message_metadata_passthrough: None,

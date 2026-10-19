@@ -391,8 +391,8 @@ pub(crate) fn finalize_tool_router(
     }
     let tool_search_name = ToolName::plain(TOOL_SEARCH_TOOL_NAME);
     let deferred_tools_guidance_enabled = search_tool_enabled(turn_context, model_info);
-    for (name, spec, tool) in code_mode_tools(turn_context, model_info, registry) {
-        code_mode_tool_names.insert(name, tool.runtime.tool_name());
+    let search_exposure = if search_tool_enabled(turn_context, model_info)
+        && registry.tool_policy.allows(&tool_search_name)
         && registry.entries().any(|tool| {
             tool.runtime.tool_name() != tool_search_name
                 && tool.exposure.is_deferred()

@@ -247,7 +247,7 @@ impl ResponsesWebsocketConnection {
     ) -> Result<ResponseStream, ApiError> {
         let (tx_event, rx_event) =
             mpsc::channel::<std::result::Result<ResponseEvent, ApiError>>(1600);
-        let (tx_interrupt, rx_interrupt) = oneshot::channel();
+        let (tx_interrupt, rx_interrupt) = oneshot::channel::<ResponseInterrupt>();
         let stream = Arc::clone(&self.stream);
         let idle_timeout = self.idle_timeout;
         let server_reasoning_included = self.server_reasoning_included;
