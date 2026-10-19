@@ -35,7 +35,7 @@ Where to read what (link, don't copy — each layer stays the single source for 
 
 1. **[CONTEXT.md](CONTEXT.md)** — the fork's vocabulary authority: tri-wire terms, usage/prohibited-usage pairs, sources. Read it before naming anything new.
 2. **[docs/adr/](docs/adr/)** — decision records, append-only ([index](docs/adr/README.md)): 0001 fork baseline & sync, 0002 merge rulings, 0003 Gemini verdict, 0004 reasoning_content passthrough, 0005 reasoning_effort translation, 0006 fork divergence patch queue.
-3. **[AGENTS.md](AGENTS.md)** — agent-facing rules; the "Fork delta: tri-wire-api" section holds the fork red lines. Nested chain (nearest file wins): [codex-rs/AGENTS.md](codex-rs/AGENTS.md) → [core/src/client/wire/AGENTS.md](codex-rs/core/src/client/wire/AGENTS.md) for the per-wire protocol red lines.
+3. **[AGENTS.md](AGENTS.md)** — agent-facing rules; the "Fork maintenance constitution (tri-wire-api)" section holds the fork red lines and the executor rules. Nested chain (nearest file wins): [codex-rs/AGENTS.md](codex-rs/AGENTS.md) → [core/src/client/wire/AGENTS.md](codex-rs/core/src/client/wire/AGENTS.md) for the per-wire protocol red lines.
 4. **CI**: `.github/workflows/fork-health.yml` is the daily fork-seam watchdog (seam-crate clippy + wiremock suites + drift probe); `fork-cli-test-release.yml` runs the three-platform check + release build. Heavy builds run in CI only.
 5. **Version control**: maintained with [GitButler](https://gitbutler.com) (virtual branches, one lane per ticket); upstream sync merges `upstream/main` and never rebases (ADR-0001).
 
@@ -139,72 +139,25 @@ A new outbound protocol (say Gemini) follows the same blueprint that produced Ch
 
 ---
 
-## Quickstart
+## Install (this fork)
 
-### Installing and running Codex CLI
+Everything you need is published on this repository's [Releases page](https://github.com/Xxx91n/codex/releases). Every version ships exactly three assets, one per platform, and every asset name carries the version it was built from.
 
-Run the following on Mac or Linux to install Codex CLI:
+1. From the newest `tri-v<version>-tri.N` release (the [`tri-wire-test`](https://github.com/Xxx91n/codex/releases/tag/tri-wire-test) release is only an index pointing at the newest version, it hosts no files), download the asset for your platform:
 
-```shell
-curl -fsSL https://chatgpt.com/codex/install.sh | sh
-```
+   | Platform | Asset |
+   |---|---|
+   | Windows x86_64 | `codex-<version>-win-x86_64-pc-windows-msvc.zip` |
+   | Linux x86_64 | `codex-<version>-linux-x86_64-unknown-linux-gnu.tar.gz` |
+   | macOS (Apple Silicon) | `codex-<version>-mac-aarch64-apple-darwin.tar.gz` |
 
-Run the following on Windows to install Codex CLI:
+2. Extract the archive — it contains a single binary. Rename it to `codex` (Windows: `codex.exe`) and put it on your `PATH`.
+3. Verify: `codex --version` prints `X.Y.Z-tri.N` — the fork's version marker. If it does not end in `-tri.N`, you are not running this fork's build.
 
-```shell
-powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
-```
-
-The standalone installers download from `https://releases.openai.com/codex` by default and fall back to GitHub Releases if a metadata or asset download is unavailable. To force GitHub Releases, set `CODEX_INSTALLER_USE_RELEASES_OPENAI_COM` to `false` (`0` and `no` are also accepted):
-
-```shell
-curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_INSTALLER_USE_RELEASES_OPENAI_COM=false sh
-```
-
-```powershell
-$env:CODEX_INSTALLER_USE_RELEASES_OPENAI_COM='false'; irm https://chatgpt.com/codex/install.ps1 | iex
-```
-
-Codex CLI can also be installed via the following package managers:
-
-```shell
-# Install using npm
-npm install -g @openai/codex
-```
-
-```shell
-# Install using Homebrew
-brew install --cask codex
-```
-
-Then simply run `codex` to get started.
-
-<details>
-<summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
-
-Each GitHub Release contains many executables, but in practice, you likely want one of these:
-
-- macOS
-  - Apple Silicon/arm64: `codex-aarch64-apple-darwin.tar.gz`
-  - x86_64 (older Mac hardware): `codex-x86_64-apple-darwin.tar.gz`
-- Linux
-  - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
-  - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
-
-Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
-
-</details>
-
-### Using Codex with your ChatGPT plan
-
-Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Business, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
-
-You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
-
-### Pointing the Codex Desktop app at this fork’s binary (Windows)
+### Using the fork binary with the Codex Desktop app (Windows)
 
 The Codex Desktop app can run a different CLI engine through the `CODEX_CLI_PATH`
-user environment variable — this is how you swap the app’s kernel for a fork build
+user environment variable — this is how you swap the app's kernel for a fork build
 without touching the app install:
 
 ```powershell
@@ -213,7 +166,7 @@ setx CODEX_CLI_PATH "D:\path\to\codex.exe"
 
 Fully restart the app afterwards (the variable is read at engine spawn time).
 To roll back, clear the variable (`reg delete "HKCU\Environment" /v CODEX_CLI_PATH /f`
-or System Properties → Environment Variables) and restart the app again. This fork’s
+or System Properties → Environment Variables) and restart the app again. This fork's
 release packages are built for exactly this workflow — see the Releases page.
 
 **Kernel-swap checksum family (ticket 35 / ADR-0011):** fork builds embed the same
@@ -225,6 +178,18 @@ LF-lock era), run the repair command the error names once —
 `codex state fix-checksums --family crlf --apply` — and cold-start the official CLI
 to verify; the full runbook is [docs/fork-checksum-family.md](./docs/fork-checksum-family.md).
 
+### Building from source
+
+See [docs/install.md](./docs/install.md). Remember the repo's rule: heavy builds and
+all release acceptance run in CI (see "Local dev vs. cloud CI" above); a local
+`codex-rs/target/` is a disposable cache.
+
+### Looking for the official Codex CLI?
+
+This repository only documents installing **this fork**. For the official OpenAI
+Codex CLI, go to [openai/codex](https://github.com/openai/codex).
+
+---
 ## Docs
 
 - [**Codex Documentation**](https://developers.openai.com/codex)

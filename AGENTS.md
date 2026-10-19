@@ -319,7 +319,13 @@ Tests and features must support Linux, macOS and Windows unless feature is expli
 Codex supports running connected app-server and exec-server on different operating systems. See the
 `$remote-tests` skill for details about integration testing these configurations.
 
-## Fork delta: tri-wire-api
+## Fork maintenance constitution (tri-wire-api)
+
+This section governs **every executor that maintains this fork** — human,
+local agent, or remote bot. It states only red lines and pointers; the
+authoritative rule text lives in the linked documents and is never
+duplicated here. The upstream sections above (code review, TUI, tests)
+govern contributor work; this constitution governs fork maintenance.
 
 This fork (`tri-wire-api`) speaks three outbound wire protocols on one
 internal representation (`ResponseItem`): **Responses** (upstream's only wire),
@@ -331,6 +337,59 @@ vocabulary authority; read it before naming anything new and use its terms
 (no synonyms). Decision records live in `docs/adr/` (index:
 `docs/adr/README.md`); upstream-merge rulings increment the counter there
 (see Sync below).
+
+### Role: release-train operator, not a mechanic
+
+An executor runs the release train defined by the
+[release-train spec](docs/specs/release-train/README.md) (R-01..R-16): walk the
+ascending version queue, merge upstream per the conflict whitelist, cut
+release branches, build and publish through CI gates. Fixing product source
+code is **not** part of the role: any failure outside the recipe produces a
+STOP report and waits for a human (spec R-13).
+
+### Executor authority (spec R-09 — applies to every executor)
+
+- Autonomous: create branches, merge, cherry-pick, tag locally, run CI.
+- Gated: push `tri/v*` branches, push `tri-v*` tags, publish releases — only
+  when the diff gate and CI gate scripts both exit zero.
+- Always forbidden: change the default branch, delete released branches/tags,
+  touch `origin/main`, edit `.github/workflows`, edit `.gitattributes`, touch
+  the real `~/.codex`.
+- Judgment principle: every "should I continue" decision must be an
+  executable script whose exit code decides; no subjective judgment.
+- Automation level: semi-automatic until both 0.162.1 and 0.163.0 complete
+  their full tier (spec R-12); opening report first, human confirms.
+
+### Queue state is derived, never stored (spec R-16)
+
+- Derive the queue from tags: upstream has `rust-vX.Y.Z` and this fork has no
+  matching `tri-vX.Y.Z-*` tag → that cell is unfinished; the smallest
+  unfinished cell is the current cell.
+- Never maintain any state file (in-repo or out), and never write state into
+  AGENTS.md or CONTEXT.md.
+- STOP report: `gh issue create` with the `stop-report` label, body in the
+  fixed R-13 format (which cell, which step, which file, what error, what was
+  tried). Opening reports go to the operator channel, not into the repo.
+
+### Stop conditions
+
+Stop immediately and only produce a STOP report (spec R-13) on: conflict
+files outside the whitelist (R-07 — never rule on them yourself), the diff
+gate failing, CI or a gate script failing twice, or the spec contradicting
+reality in a way one sentence cannot settle. The queue stays on that cell.
+
+### Repo map
+
+1. [CONTEXT.md](CONTEXT.md) — vocabulary authority (usage/prohibited pairs).
+2. [docs/adr/](docs/adr/README.md) — decision records, append-only; 0016 is
+   the release-train ruling, 0017 the branch whitelist (trunk / upstream
+   mirror / frozen release lines — nothing else may be pushed).
+3. [docs/specs/release-train/README.md](docs/specs/release-train/README.md) —
+   behavior authority R-01..R-16 for the release train.
+4. CI: `.github/workflows/fork-health.yml` (seam watchdog, dispatchable) and
+   `fork-cli-test-release.yml` (`platforms=all` builds three platforms and
+   publishes: `tri/v*` → version page + immutable tag, trunk → index page only).
+5. Tags are immutable (spec R-03); all `tri-v*` / `rust-v*` tags stay (ADR-0017).
 
 ### Registration points (red line - do not move)
 
