@@ -50,6 +50,13 @@ jobs:
           fi
 
   build:
+    # The trunk only refreshes the index page, and that page is derived from
+    # the release list - it needs no binary at all. Skipping the three release
+    # builds here keeps a text update from being gated on 40-160 minutes of
+    # compilation per platform, where one reclaimed runner used to stall the
+    # whole queue (issue #4). Trunk compile coverage stays with fork-health's
+    # seam job; a release branch still builds and publishes all three.
+    if: github.ref_name != 'tri-wire-api'
     needs: matrix
     strategy:
       fail-fast: false
@@ -294,7 +301,8 @@ jobs:
     #      Releases cold-boots the same home - the inverse of the incident
     #      turned regression gate.
     name: e2e official+fork coexistence (windows)
-    if: ${{ github.repository == 'Xxx91n/codex' && (inputs.platforms == 'all' || contains(inputs.platforms, 'windows')) }}
+    # Needs the windows build artifact, so it rides the same trunk skip.
+    if: ${{ github.ref_name != 'tri-wire-api' && github.repository == 'Xxx91n/codex' && (inputs.platforms == 'all' || contains(inputs.platforms, 'windows')) }}
     needs: build
     runs-on: windows-latest
     steps:
@@ -479,7 +487,9 @@ jobs:
     # the immutable version tag tri-v<version> and its assets; the trunk only
     # refreshes the index page (ADR-0016 / spec R-14, D-020).
     # The green e2e coexistence drill gates publication (ticket 35).
-    if: inputs.platforms == 'all'
+    # On the trunk both upstream jobs are skipped by design, so the gate is
+    # the ref itself; a version branch must still have a green build and e2e.
+    if: ${{ !cancelled() && inputs.platforms == 'all' && (github.ref_name == 'tri-wire-api' || (needs.build.result == 'success' && needs.e2e-official-coexistence.result == 'success')) }}
     needs: [build, e2e-official-coexistence]
     # (d) serialize publishers (ticket 36): concurrent dispatches queue on
     #     this group instead of racing the rolling tag; no
@@ -488,7 +498,10 @@ jobs:
       group: fork-cli-test-release-publish
     runs-on: ubuntu-latest
     steps:
+      # The trunk publishes no assets and its build job is skipped, so there
+      # is nothing to download on that ref.
       - uses: actions/download-artifact@v4
+        if: github.ref_name != 'tri-wire-api'
         with:
           pattern: cli-*
           merge-multiple: true
@@ -500,13 +513,6 @@ jobs:
         run: |
           set -eu
           repo="${{ github.repository }}"
-          # Versioned asset names carry the release version, so one file is
-          # enough to recover it without a second checkout.
-          first=$(ls dist | sed -n "1p")
-          version=$(echo "$first" | sed -E "s/^codex-//; s/-(win|linux|mac)-.*$//")
-          [ -n "$version" ] || { echo "::error::cannot recover version from dist/$first"; exit 1; }
-          echo "dist version: $version (ref: $REF_NAME)"
-
           upsert_release() {  # $1 tag, $2 title, $3 notes file
             if gh api "repos/$repo/releases/tags/$1" >/dev/null 2>&1; then
               gh release edit "$1" --repo "$repo" --draft=false --prerelease --title "$2" --notes-file "$3"
@@ -517,6 +523,14 @@ jobs:
 
           case "$REF_NAME" in
             tri/v*)
+              # Versioned asset names carry the release version, so one file is
+              # enough to recover it without a second checkout. Resolved here
+              # and not above: the trunk path publishes no assets and has no
+              # dist directory at all.
+              first=$(ls dist | sed -n "1p")
+              version=$(echo "$first" | sed -E "s/^codex-//; s/-(win|linux|mac)-.*$//")
+              [ -n "$version" ] || { echo "::error::cannot recover version from dist/$first"; exit 1; }
+              echo "dist version: $version (ref: $REF_NAME)"
               case "$version" in
                 *-tri.*) ;;
                 *) echo "::error::ref $REF_NAME has version $version without a -tri.N marker; a release branch must set it (spec R-03)"; exit 1 ;;
