@@ -141,19 +141,25 @@ graph TD
 
 ## 安装（本 fork）
 
-你需要的所有东西都发布在本仓库的 [Releases 页面](https://github.com/Xxx91n/codex/releases)。每个版本恰好三个资产，每个平台一个，且每个资产名都带着它构建自的版本号。
+每个发行版恰好发布三个压缩包，每个平台一个；最新一版带 GitHub 的 **Latest** 徽标。从这里开始：
+**[releases/latest](https://github.com/Xxx91n/codex/releases/latest)**。
 
-1. 从最新的 `tri-v<version>-tri.N` 发行（[`tri-wire-test`](https://github.com/Xxx91n/codex/releases/tag/tri-wire-test) 只是索引页，指向最新版，不放文件），下载你平台的资产：
+| 平台 | 文件 |
+|---|---|
+| Windows x86_64 | `codex-<version>-win-x86_64-pc-windows-msvc.zip` |
+| Linux x86_64 | `codex-<version>-linux-x86_64-unknown-linux-gnu.tar.gz` |
+| macOS（Apple Silicon） | `codex-<version>-mac-aarch64-apple-darwin.tar.gz` |
 
-   | 平台 | 资产 |
-   |---|---|
-   | Windows x86_64 | `codex-<version>-win-x86_64-pc-windows-msvc.zip` |
-   | Linux x86_64 | `codex-<version>-linux-x86_64-unknown-linux-gnu.tar.gz` |
-   | macOS（Apple Silicon） | `codex-<version>-mac-aarch64-apple-darwin.tar.gz` |
-
+1. 从最新发行版下载你平台的压缩包。
 2. 解压——里面只有一个二进制。改名为 `codex`（Windows：`codex.exe`），放进 `PATH`。
-3. 验证：`codex --version` 输出 `X.Y.Z-tri.N`——fork 的版本标记。结尾不带 `-tri.N` 的，就不是本 fork 的构建。
+3. 验证构建：`codex --version` 输出 `X.Y.Z-tri.N`。结尾不带 `-tri.N` 的，不是本 fork 的构建。
+4. 验证完整性：从同一发行页下载 `SHA256SUMS`，运行 `sha256sum -c SHA256SUMS`（Windows：`certutil -hashfile <文件> SHA256`）。构建溯源：`gh attestation verify <文件> --repo Xxx91n/codex`。
 
+**macOS：** 二进制未公证。首次运行先清除隔离属性：`xattr -d com.apple.quarantine ./codex`。
+
+**升级：** 二进制不带自更新——下载新压缩包覆盖旧文件即可。
+
+**版本排序：** `-tri.N` 标记使版本在 semver 上低于同号上游版本，任何版本比较器都会认为官方更新。本仓库的发行页才是 fork 的权威。
 ### 在 Codex Desktop 应用中使用本 fork 的二进制（Windows）
 
 Codex Desktop 应用可以通过 `CODEX_CLI_PATH` 用户环境变量运行另一个 CLI 引擎——这就是在不碰应用安装的前提下给应用换上 fork 内核的方法：

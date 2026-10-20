@@ -129,19 +129,14 @@
 ## 14. 交付物（R-14）
 
 - 资产名带版本：`codex-<X.Y.Z-tri.N>-<platform>-<target>.<ext>`。
-- release 页正文用固定模板，不得自由发挥：
-
-```
-上游版本：rust-vX.Y.Z（切点 <sha>）
-本版内容：上游该版全部内容 + 三 wire 支持 + 下列 fork 修改
-fork 修改：<diff 门脚本自动生成>
-已知限制：<固定段落>
-校验和：<三平台 sha256>
-```
-
-- 滚动 release `tri-wire-test` 保留，但只做“最新已发布版本的索引”：只放说明与指向最新版页的链接，不重复上传资产。
-- 索引页的刷新**不得依赖任何构建产物**：它只从 release 列表推导。trunk 上更新索引不跑三平台构建、不跑 e2e；trunk 的编译面由 fork-health 的 seam 作业覆盖。版本号只在 `tri/v*` 路径上从资产名反推。
-
+- **版本页即下载页**：正文首段必须是平台下载表（直链 `https://github.com/<repo>/releases/download/<tag>/<asset>`），随后是升级说明与校验方式；元数据（上游版本、fork 修改清单、已知限制）放在其后。
+- 版本页一律 `prerelease=false`。旧版本不是预发布，不得打 Pre-release 徽标。
+- **Latest 只挂在最新版本页上**：`make_latest=true` 仅当本次版本号（按 X.Y.Z.tri.N 比较）不低于当前 Latest；否则 `false`。禁止按 `created_at` 判定——补发旧格 hotfix 会抢走徽标（spring-boot#50927）。
+- 必须发布 `SHA256SUMS` 资产，并在发布时生成 build provenance attestation。
+- **不再维护任何滚动索引 release**；`/releases/latest` 是唯一稳定入口。
+- 版本号 `X.Y.Z-tri.N` 在 semver 上低于同号上游版本；版本页必须写明，避免用户误判“官方更新”。
+- **发布与构建分离**：发布作业只消费某个已完成构建 run 的产物，且该 run 的 headSha 必须等于被发布 ref 的 head。禁止在同一次运行里用昂贵构建门控发布（Issue #4 根因）。
+- 发布前必须支持 dry-run：打印 tag、make_latest、资产与校验和，不写任何远端状态。
 ## 15. bug 验收（R-15）
 
 - Issue #2：配置解析必须接受 `wire_api = "chat"`。TUI 与 exec 共用同一个反序列化器，TUI 侧**不存在**独立的 wire 校验，也不得新增；由 CI 断言（选择器 `test(chat_wire)`）防止上游 merge 把拒绝机制带回来。

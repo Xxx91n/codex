@@ -1,0 +1,265 @@
+# fork-only workflow: publish one version from a completed build run.
+#
+# Publication is deliberately a separate workflow (spec R-14, D-007): a version
+# page only needs the three archives that a named run already built, so retrying
+# a publish costs seconds instead of three platform rebuilds, and a reclaimed
+# runner can no longer strand a finished release (issue #4). Only a run that
+# concluded successfully is accepted, which keeps the e2e coexistence gate in
+# force without coupling publication to a same-run build.
+# NOT upstream-shipped.
+name: fork-publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Build run id to publish (blank = newest successful fork-cli-test-release run on this ref)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Print the release plan and exit without touching tags or releases"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  publish:
+    # Only a release branch owns a version page; the trunk publishes nothing.
+    if: startsWith(github.ref_name, 'tri/v')
+    runs-on: ubuntu-latest
+    concurrency:
+      group: fork-publish
+      # No cancel-in-progress: a publish is never cut mid-flight.
+    steps:
+      - name: Resolve the build run
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_RUN: ${{ inputs.run_id }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          repo="${{ github.repository }}"
+          if [ -n "$INPUT_RUN" ]; then
+            run="$INPUT_RUN"
+          else
+            run=$(gh run list --repo "$repo" --workflow fork-cli-test-release.yml --branch "$REF_NAME" --limit 50 --json databaseId,conclusion --jq '[.[]|select(.conclusion=="success")][0].databaseId // empty')
+          fi
+          [ -n "$run" ] || { echo "::error::no successful fork-cli-test-release run on $REF_NAME"; exit 1; }
+          conclusion=$(gh run view "$run" --repo "$repo" --json conclusion --jq .conclusion)
+          sha=$(gh run view "$run" --repo "$repo" --json headSha --jq .headSha)
+          [ "$conclusion" = "success" ] || { echo "::error::run $run concluded $conclusion"; exit 1; }
+          # The tag must point at the commit those archives were built from.
+          [ "$sha" = "$HEAD_SHA" ] || { echo "::error::run $run built $sha but $REF_NAME is at $HEAD_SHA; rebuild first"; exit 1; }
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "publishing archives from run $run ($sha)"
+
+      - name: Fetch the three platform archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ steps.run.outputs.run }}
+        run: |
+          set -eu
+          rm -rf dist dl && mkdir -p dist
+          gh run download "$RUN" --repo "${{ github.repository }}" --pattern 'cli-*' --dir dl
+          # gh nests one directory per artifact; flatten so sha256sum sees files.
+          find dl -type f -exec cp {} dist/ \;
+          ls -l dist
+
+      - name: Validate the archive set
+        id: version
+        run: |
+          set -eu
+          count=$(find dist -maxdepth 1 -type f | wc -l)
+          [ "$count" -eq 3 ] || { echo "::error::expected 3 archives, found $count"; ls -l dist; exit 1; }
+          for suffix in win-x86_64-pc-windows-msvc.zip linux-x86_64-unknown-linux-gnu.tar.gz mac-aarch64-apple-darwin.tar.gz; do
+            ls dist/codex-*"$suffix" >/dev/null 2>&1 || { echo "::error::missing archive for $suffix"; ls -l dist; exit 1; }
+          done
+          first=$(ls dist | sed -n '1p')
+          version=$(echo "$first" | sed -E 's/^codex-//; s/-(win|linux|mac)-.*$//')
+          case "$version" in
+            *-tri.*) ;;
+            *) echo "::error::version $version lacks the -tri.N marker (spec R-03)"; exit 1 ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=tri-v$version" >> "$GITHUB_OUTPUT"
+          echo "upstream=rust-v${version%%-tri.*}" >> "$GITHUB_OUTPUT"
+          echo "resolved $version"
+
+      - name: Checksums
+        run: |
+          set -eu
+          cd dist
+          sha256sum codex-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Decide the Latest flag
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -eu
+          repo="${{ github.repository }}"
+          # Latest is a version decision, never a timestamp decision: a hotfix
+          # published later for an older cell must not steal the badge
+          # (spring-boot#50927 is the cautionary tale).
+          current=$(gh api "repos/$repo/releases/latest" --jq .tag_name 2>/dev/null || true)
+          current="${current#tri-v}"
+          if [ -z "$current" ]; then
+            latest=true
+          elif [ "$(printf '%s\n%s\n' "$VERSION" "$current" | sort -V | tail -1)" = "$VERSION" ]; then
+            latest=true
+          else
+            latest=false
+          fi
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "current latest: ${current:-none}; this version: $VERSION; make_latest=$latest"
+
+      - name: Compose release notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          UPSTREAM: ${{ steps.version.outputs.upstream }}
+        run: |
+          set -eu
+          repo="${{ github.repository }}"
+          base="https://github.com/$repo/releases/download/$TAG"
+          latest_url="https://github.com/$repo/releases/latest"
+          compare="https://github.com/openai/codex/compare/${UPSTREAM}...${repo%%/*}:${repo#*/}:$TAG"
+          {
+            echo "## Download / 下载"
+            echo
+            echo "| Platform | File |"
+            echo "|---|---|"
+            echo "| Windows x86_64 | [codex-$VERSION-win-x86_64-pc-windows-msvc.zip]($base/codex-$VERSION-win-x86_64-pc-windows-msvc.zip) |"
+            echo "| Linux x86_64 | [codex-$VERSION-linux-x86_64-unknown-linux-gnu.tar.gz]($base/codex-$VERSION-linux-x86_64-unknown-linux-gnu.tar.gz) |"
+            echo "| macOS Apple Silicon | [codex-$VERSION-mac-aarch64-apple-darwin.tar.gz]($base/codex-$VERSION-mac-aarch64-apple-darwin.tar.gz) |"
+            echo
+            echo "Permanent link to the newest build: <$latest_url> (redirects to the latest version page)."
+            echo "最新版永久链接：<$latest_url>（自动跳到最新版本页）。"
+            echo
+            echo "## Upgrade / 升级"
+            echo
+            echo "The binary has no self-updater: download the file for your platform and replace the old one."
+            echo "二进制不带自更新：重新下载对应平台文件覆盖旧文件即可。"
+            echo
+            echo "## Verify / 校验"
+            echo
+            echo "1. Download SHA256SUMS from this page and run: sha256sum -c SHA256SUMS (Windows: certutil -hashfile FILE SHA256)."
+            echo "2. Build provenance: gh attestation verify FILE --repo $repo"
+            echo
+            echo "macOS: the binary is not notarized; on first run clear the quarantine flag: xattr -d com.apple.quarantine ./codex"
+            echo "macOS：二进制未公证，首次运行先清除隔离属性：xattr -d com.apple.quarantine ./codex"
+            echo
+            echo "## Version ordering / 版本排序"
+            echo
+            echo "The fork marker makes X.Y.Z-tri.N sort BELOW the upstream X.Y.Z in semver, so version comparators report the official build as newer. This page is the authority for the fork."
+            echo "fork 标记使 X.Y.Z-tri.N 在 semver 上低于上游同号版本，任何版本比较器都会认为官方更新。以本页为准。"
+            echo
+            echo "## Upstream / 上游版本"
+            echo
+            echo "$UPSTREAM"
+            echo
+            echo "## Fork changes / fork 修改"
+            echo
+            echo "[compare]($compare)"
+            echo
+            echo "## Known limitations / 已知限制"
+            echo
+            echo "- Binaries are not code-signed or notarized. / 二进制未签名、未公证。"
+            echo "- Anthropic Messages wire: cross-vendor hosted file_id images degrade to a visible text placeholder. / 跳厂商托管的 file_id 图片降级为可见文本占位。"
+            echo "- Anthropic Messages wire: http(s) URL images are dropped. / http(s) URL 图片仍会被丢弃。"
+            echo "- Chat Completions wire: no image path. / Chat wire 无图片路径。"
+            echo "- Remote compaction degrades to local summarisation on chat/anthropic. / 远程压缩在 chat/anthropic 上降级为本地摘要。"
+            echo "- Checksum family follows the official platform family (Windows=CRLF, Linux/macOS=LF); on a mismatch run: codex state fix-checksums --family crlf --apply"
+          } > notes.md
+          wc -l notes.md
+
+      - name: Plan (dry run stops here)
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          LATEST: ${{ steps.latest.outputs.latest }}
+        run: |
+          set -eu
+          echo "tag:         $TAG"
+          echo "version:     $VERSION"
+          echo "make_latest: $LATEST"
+          echo "assets:"
+          sed 's/^/  /' dist/SHA256SUMS
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "dry run: stopping before any write"
+            exit 0
+          fi
+
+      - name: Create the immutable tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -eu
+          repo="${{ github.repository }}"
+          # Tags are immutable (spec R-03): create once, never move.
+          if gh api "repos/$repo/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            existing=$(gh api "repos/$repo/git/ref/tags/$TAG" --jq .object.sha)
+            [ "$existing" = "$GITHUB_SHA" ] || { echo "::error::tag $TAG already points at $existing, refusing to move it"; exit 1; }
+            echo "tag $TAG already at ${GITHUB_SHA:0:8}"
+          else
+            gh api -X POST "repos/$repo/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" >/dev/null
+            echo "tag $TAG created at ${GITHUB_SHA:0:8}"
+          fi
+
+      - name: Attest the archives
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/codex-*.zip
+            dist/codex-*.tar.gz
+
+      - name: Publish the version page
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          LATEST: ${{ steps.latest.outputs.latest }}
+        run: |
+          set -eu
+          repo="${{ github.repository }}"
+          title="$VERSION"
+          if id=$(gh api "repos/$repo/releases/tags/$TAG" --jq .id 2>/dev/null); then
+            jq -n --arg body "$(cat notes.md)" --arg name "$title" --arg latest "$LATEST" '{body:$body,name:$name,draft:false,prerelease:false,make_latest:$latest}' > payload.json
+            gh api -X PATCH "repos/$repo/releases/$id" --input payload.json >/dev/null
+            echo "updated release $TAG"
+          else
+            jq -n --arg tag "$TAG" --arg name "$title" --arg body "$(cat notes.md)" --arg latest "$LATEST" '{tag_name:$tag,name:$name,body:$body,draft:false,prerelease:false,make_latest:$latest}' > payload.json
+            gh api -X POST "repos/$repo/releases" --input payload.json >/dev/null
+            echo "created release $TAG"
+          fi
+          gh release upload "$TAG" dist/*.zip dist/*.tar.gz dist/SHA256SUMS --repo "$repo" --clobber
+
+      - name: Verify the published surface
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          LATEST: ${{ steps.latest.outputs.latest }}
+        run: |
+          set -eu
+          repo="${{ github.repository }}"
+          pre=$(gh api "repos/$repo/releases/tags/$TAG" --jq .prerelease)
+          [ "$pre" = "false" ] || { echo "::error::release is still marked prerelease"; exit 1; }
+          n=$(gh api "repos/$repo/releases/tags/$TAG" --jq '.assets|length')
+          [ "$n" -eq 4 ] || { echo "::error::expected 4 assets (3 archives + SHA256SUMS), found $n"; exit 1; }
+          if [ "$LATEST" = "true" ]; then
+            resolved=$(gh api "repos/$repo/releases/latest" --jq .tag_name)
+            [ "$resolved" = "$TAG" ] || { echo "::error::/releases/latest resolves to $resolved, expected $TAG"; exit 1; }
+            echo "/releases/latest -> $resolved"
+          fi
+          gh release view "$TAG" --repo "$repo" --json tagName,isPrerelease,assets

@@ -352,6 +352,9 @@ STOP report and waits for a human (spec R-13).
 - Autonomous: create branches, merge, cherry-pick, tag locally, run CI.
 - Gated: push `tri/v*` branches, push `tri-v*` tags, publish releases — only
   when the diff gate and CI gate scripts both exit zero.
+- Publishing is its own dispatch (`fork-publish.yml`), never a job inside the
+  build run: it consumes a named, successful build run whose headSha equals the
+  published ref head, and it supports `dry_run` (spec R-14).
 - Always forbidden: change the default branch, delete released branches/tags,
   touch `origin/main`, edit `.github/workflows`, edit `.gitattributes`, touch
   the real `~/.codex`.
@@ -386,9 +389,10 @@ reality in a way one sentence cannot settle. The queue stays on that cell.
    mirror / frozen release lines — nothing else may be pushed).
 3. [docs/specs/release-train/README.md](docs/specs/release-train/README.md) —
    behavior authority R-01..R-16 for the release train.
-4. CI: `.github/workflows/fork-health.yml` (seam watchdog, dispatchable) and
-   `fork-cli-test-release.yml` (`platforms=all` builds three platforms and
-   publishes: `tri/v*` → version page + immutable tag, trunk → index page only).
+4. CI: `.github/workflows/fork-health.yml` (seam watchdog, dispatchable);
+   `fork-cli-test-release.yml` builds three platforms and publishes nothing;
+   `fork-publish.yml` turns one successful build run into a version page
+   (`tri/v*` only — the trunk publishes nothing at all).
 5. Tags are immutable (spec R-03); all `tri-v*` / `rust-v*` tags stay (ADR-0017).
 
 ### Registration points (red line - do not move)

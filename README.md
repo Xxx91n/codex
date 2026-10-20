@@ -141,19 +141,34 @@ A new outbound protocol (say Gemini) follows the same blueprint that produced Ch
 
 ## Install (this fork)
 
-Everything you need is published on this repository's [Releases page](https://github.com/Xxx91n/codex/releases). Every version ships exactly three assets, one per platform, and every asset name carries the version it was built from.
+Every release publishes exactly three archives, one per platform, and the newest
+one carries GitHub's **Latest** badge. Start here:
+**[releases/latest](https://github.com/Xxx91n/codex/releases/latest)**.
 
-1. From the newest `tri-v<version>-tri.N` release (the [`tri-wire-test`](https://github.com/Xxx91n/codex/releases/tag/tri-wire-test) release is only an index pointing at the newest version, it hosts no files), download the asset for your platform:
+| Platform | File |
+|---|---|
+| Windows x86_64 | `codex-<version>-win-x86_64-pc-windows-msvc.zip` |
+| Linux x86_64 | `codex-<version>-linux-x86_64-unknown-linux-gnu.tar.gz` |
+| macOS (Apple Silicon) | `codex-<version>-mac-aarch64-apple-darwin.tar.gz` |
 
-   | Platform | Asset |
-   |---|---|
-   | Windows x86_64 | `codex-<version>-win-x86_64-pc-windows-msvc.zip` |
-   | Linux x86_64 | `codex-<version>-linux-x86_64-unknown-linux-gnu.tar.gz` |
-   | macOS (Apple Silicon) | `codex-<version>-mac-aarch64-apple-darwin.tar.gz` |
+1. Download the archive for your platform from the latest release.
+2. Extract it — it contains a single binary. Rename it to `codex` (Windows:
+   `codex.exe`) and put it on your `PATH`.
+3. Verify the build: `codex --version` prints `X.Y.Z-tri.N`. Anything not ending
+   in `-tri.N` is not this fork.
+4. Verify integrity: download `SHA256SUMS` from the same release page and run
+   `sha256sum -c SHA256SUMS` (Windows: `certutil -hashfile <file> SHA256`).
+   Build provenance: `gh attestation verify <file> --repo Xxx91n/codex`.
 
-2. Extract the archive — it contains a single binary. Rename it to `codex` (Windows: `codex.exe`) and put it on your `PATH`.
-3. Verify: `codex --version` prints `X.Y.Z-tri.N` — the fork's version marker. If it does not end in `-tri.N`, you are not running this fork's build.
+**macOS:** the binary is not notarized. On first run, clear the quarantine flag:
+`xattr -d com.apple.quarantine ./codex`.
 
+**Upgrading:** the binary has no self-updater — download the new archive and
+replace the binary.
+
+**Version ordering:** the `-tri.N` marker makes the version sort *below* the same
+upstream number, so a version comparator will report the official build as newer.
+The release page of this repository is the authority for the fork.
 ### Using the fork binary with the Codex Desktop app (Windows)
 
 The Codex Desktop app can run a different CLI engine through the `CODEX_CLI_PATH`
