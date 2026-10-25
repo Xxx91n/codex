@@ -174,7 +174,8 @@ impl ModelClientSession {
                 client_setup.api_auth.as_ref(),
                 client_setup.agent_identity_telemetry.clone(),
                 pending_retry,
-            );
+            )
+            .map_err(|error| self.client.state.provider.map_api_error(error))?;
             let (request_telemetry, sse_telemetry) = Self::build_streaming_telemetry(
                 session_telemetry,
                 request_auth_context,
