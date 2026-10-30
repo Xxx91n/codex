@@ -1462,7 +1462,9 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
         for wire_api in [WireApi::Chat, WireApi::Anthropic] {
             let mut info = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
             info.wire_api = wire_api;
-            let provider = ConfiguredModelProvider::new(info, /*auth_manager*/ None, /*gateway_auth_manager*/ None);
+            let provider = ConfiguredModelProvider::new(
+                info, /*auth_manager*/ None, /*gateway_auth_manager*/ None,
+            );
             assert_eq!(
                 provider.capabilities().remote_compaction,
                 RemoteCompactionSupport::Unsupported,
@@ -1471,8 +1473,11 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
         }
 
         let responses_info = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
-        let responses_provider =
-            ConfiguredModelProvider::new(responses_info, /*auth_manager*/ None, /*gateway_auth_manager*/ None);
+        let responses_provider = ConfiguredModelProvider::new(
+            responses_info,
+            /*auth_manager*/ None,
+            /*gateway_auth_manager*/ None,
+        );
         assert_eq!(
             responses_provider.capabilities().remote_compaction,
             RemoteCompactionSupport::V2
