@@ -696,6 +696,10 @@ other non-default provider fields are not supported"
             supports_websockets: false,
             supports_standalone_web_search: false,
             include_internal_metadata: false,
+            anthropic_max_tokens: None,
+            anthropic_thinking_budget: None,
+            anthropic_adaptive_thinking: false,
+            anthropic_prompt_caching: None,
         }
     }
 
