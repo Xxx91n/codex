@@ -31,6 +31,7 @@ fn preset_to_info(preset: &ModelPreset, priority: i32) -> ModelInfo {
         available_access_programs: preset.available_access_programs.clone(),
         upgrade: preset.upgrade.as_ref().map(Into::into),
         model_messages: Some(ModelMessages {
+            apps: None,
             content_filter_guidance: None,
             persistent_instructions: None,
             tools: None,
@@ -64,7 +65,6 @@ fn preset_to_info(preset: &ModelPreset, priority: i32) -> ModelInfo {
         max_output_tokens: None,
         experimental_supported_tools: Vec::new(),
         input_modalities: default_input_modalities(),
-        used_fallback_model_metadata: false,
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,

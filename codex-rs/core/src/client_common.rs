@@ -127,6 +127,7 @@ pub(crate) struct PreemptSeam {
 }
 
 pub struct ResponseStream {
+    pub(crate) routing_affinity: Option<codex_http_client::ChatGptRoutingAffinity>,
     pub(crate) rx_event: mpsc::Receiver<Result<ResponseEvent>>,
     pub(crate) interrupt: Option<oneshot::Sender<codex_api::ResponseInterrupt>>,
     /// Present only on the Chat and Messages wires, whose turns can be preempted

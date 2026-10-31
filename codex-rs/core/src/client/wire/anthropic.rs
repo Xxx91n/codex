@@ -228,6 +228,7 @@ impl ModelClientSession {
                         inference_trace_attempt,
                         Arc::clone(&self.client.state.provider),
                         interceptors,
+                        /*last_response_tx*/ None,
                         Some(reconcile_preempted),
                     );
                     return Ok(stream);

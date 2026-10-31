@@ -158,7 +158,6 @@ async fn models_client_hits_models_endpoint() {
             max_output_tokens: None,
             experimental_supported_tools: Vec::new(),
             input_modalities: default_input_modalities(),
-            used_fallback_model_metadata: false,
             supports_search_tool: false,
             supports_experimental_context: false,
             use_responses_lite: false,

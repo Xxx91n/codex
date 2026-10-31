@@ -77,13 +77,10 @@ impl App {
     }
 
     fn sync_owned_transcript(&mut self, width: u16) -> bool {
+        self.transcript_view.image_protocol = self.prepare_frame_images();
         let chat_widget = &self.chat_widget;
         let transcript_width = chat_widget.history_wrap_width(width);
         let view = &mut self.transcript_view;
-        view.image_protocol = chat_widget.pet_image_support().protocol().filter(|_| {
-            !self.app_server_target.uses_remote_workspace()
-                && crate::projectless::has_only_local_environments(&self.environment_manager)
-        });
         view.mouse_scroll_speed = self.local_settings.tui.mouse_scroll_speed.unwrap_or(1.0);
         view.primary_selection = self.right_click_paste_environment.primary;
         view.copy_on_select = self
@@ -330,6 +327,10 @@ impl App {
             .filter(|_| chat_widget.no_modal_or_popup_active());
             feedback_tick =
                 view.render_composer_gap(follow_area, composer_hint.as_ref(), frame.buffer, now);
+            chat_widget
+                .rendered_selection
+                .borrow_mut()
+                .register_layout(chat_widget.take_warning_body());
             if let Some((_, tip)) = &turn_tip
                 && let Some(area) = tip.rendered.get()
             {
@@ -363,7 +364,10 @@ impl App {
                 frame.set_cursor_position(position);
             }
             if chat_widget.no_modal_or_popup_active() {
-                frame.transcript_images = view.image_placements();
+                frame.image_placements = view.image_placements();
+                if let Some(previews) = &chat_widget.composer_images {
+                    frame.image_placements.extend(previews.placements.take());
+                }
             }
         })?;
         if let Some((surface, tip)) = &turn_tip
@@ -391,7 +395,7 @@ impl App {
         Ok(bottom_area)
     }
 
-    /// Keep modal input ownership while allowing selection and copying in the visible transcript.
+    /// Keep modal input ownership while allowing selection, copying, and disclosure in the visible transcript.
     pub(super) fn handle_owned_transcript_event(
         &mut self,
         tui: &mut tui::Tui,
@@ -485,6 +489,7 @@ impl App {
                         | crossterm::event::MouseEventKind::ScrollDown
                 ) {
                     self.transcript_view.end_selection(&self.transcript_cells);
+                    self.transcript_view.end_select_mode();
                     self.transcript_view.cancel_search();
                     self.transcript_view.clear_activity_focus();
                 }
@@ -532,11 +537,21 @@ impl App {
         {
             self.chat_widget.end_composer_drag();
         }
+        if let TuiEvent::Key(key) = event
+            && self.chat_widget.no_modal_or_popup_active()
+            && !self.transcript_view.is_select_mode()
+            && self.keymap.app.select_transcript.is_pressed(*key)
+        {
+            self.transcript_view
+                .begin_select_mode(&self.transcript_cells);
+            tui.frame_requester().schedule_frame();
+            return Ok(true);
+        }
         // Read-only Escape belongs to session navigation, even when the transcript is scrolled.
         // Search and selection still consume Escape first to dismiss their interaction.
         if let TuiEvent::Key(key) = event
             && !self.transcript_view.has_active_interaction()
-            && self.chat_widget.is_external_writer_view()
+            && (self.chat_widget.is_external_writer_view() || self.chat_widget.has_provider_error())
             && crate::key_hint::plain(KeyCode::Esc).is_press(*key)
         {
             return Ok(false);
@@ -627,7 +642,24 @@ impl App {
         {
             return Ok(false);
         }
+        let was_select_mode = self.transcript_view.is_select_mode();
+        let select_exit_key = Self::transcript_select_exit_key(event);
         let action = match event {
+            TuiEvent::Key(key) if was_select_mode && !self.transcript_view.is_search_editing() => {
+                if let Some(action) = self
+                    .transcript_view
+                    .handle_select_mode_key(*key, &self.transcript_cells)
+                {
+                    Some(action)
+                } else {
+                    if self.keymap.app.find_transcript.is_pressed(*key)
+                        || self.keymap.pager.find.is_pressed(*key)
+                    {
+                        self.transcript_view.begin_search();
+                    }
+                    Some(ViewAction::Changed)
+                }
+            }
             TuiEvent::Key(key)
                 if !self.transcript_view.is_search_editing()
                     && self.keymap.app.find_transcript.is_pressed(*key) =>
@@ -638,13 +670,22 @@ impl App {
             TuiEvent::Key(key) => self
                 .transcript_view
                 .handle_key(*key, &self.transcript_cells),
-            TuiEvent::Mouse(mouse) if modal_transcript_mouse => self
-                .transcript_view
-                .handle_selection_mouse(*mouse, &self.transcript_cells),
+            TuiEvent::Mouse(mouse) if modal_transcript_mouse => {
+                self.transcript_view.handle_selection_mouse(
+                    *mouse,
+                    &self.transcript_cells,
+                    self.chat_widget.current_patch_approval(),
+                )
+            }
             TuiEvent::Mouse(mouse) => self
                 .transcript_view
                 .handle_mouse(*mouse, &self.transcript_cells),
             TuiEvent::Paste(text) => {
+                if self.transcript_view.is_select_mode()
+                    && !self.transcript_view.is_search_editing()
+                {
+                    return Ok(true);
+                }
                 self.transcript_view.end_selection(&self.transcript_cells);
                 if self.transcript_view.paste_search(text) {
                     Some(ViewAction::Changed)
@@ -677,15 +718,39 @@ impl App {
             }
             return self.handle_owned_backtrack_event(tui, event);
         };
-        if let Some((characters, result)) = self.transcript_view.copy_action(
-            tui,
-            &self.transcript_cells,
-            &action,
-            crate::clipboard_copy::CopyFormat::Markdown,
-        ) {
-            self.transcript_view.show_copy_feedback(&result, characters);
-        } else if let ViewAction::OpenLink(url) = action {
-            self.open_url_in_browser(url);
+        let resume_following = matches!(action, ViewAction::CopyAndFollow(_));
+        if !matches!(action, ViewAction::ExitSelectMode) {
+            if let Some((characters, result)) = self.transcript_view.copy_action(
+                tui,
+                &self.transcript_cells,
+                &action,
+                crate::clipboard_copy::CopyFormat::Markdown,
+            ) {
+                self.transcript_view.show_copy_feedback(&result, characters);
+                if resume_following {
+                    match result {
+                        Ok(crate::clipboard_copy::CopyStatus::Confirmed) => {
+                            self.transcript_view.jump_to_latest();
+                        }
+                        Ok(crate::clipboard_copy::CopyStatus::Pending(id)) => {
+                            if let Some(key) = select_exit_key {
+                                self.backtrack.pending_select_exit_key = Some((id, key));
+                            }
+                        }
+                        Ok(
+                            crate::clipboard_copy::CopyStatus::Unconfirmed
+                            | crate::clipboard_copy::CopyStatus::Busy,
+                        )
+                        | Err(_) => {}
+                    }
+                }
+            } else if let ViewAction::OpenLink(url) = action {
+                self.open_url_in_browser(url);
+            }
+        }
+        if was_select_mode && !self.transcript_view.is_select_mode() {
+            self.backtrack.pending_select_exit_key = None;
+            self.backtrack.select_exit_key = select_exit_key;
         }
         self.request_owned_history(tui, app_server);
         tui.frame_requester().schedule_frame();
