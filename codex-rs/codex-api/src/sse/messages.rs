@@ -194,6 +194,7 @@ pub fn spawn_anthropic_messages_stream(
     });
 
     ResponseStream {
+        routing_affinity: None,
         rx_event,
         upstream_request_id,
         interrupt: None,

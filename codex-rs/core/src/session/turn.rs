@@ -2948,11 +2948,9 @@ async fn try_run_sampling_request(
                 if let Some(mut retained) = stream.take_preempted_history().await {
                     // Chat and Messages have no interrupt frame: the stream's own seam closed
                     // the HTTP read and reconciled what had already arrived, so this loop never
-                    // learns which wire it is running (ADR-0013, ADR-0015). Dropping `stream`
-                    // from inside this body relies on edition 2024's `if_let_rescope`, which
-                    // releases the scrutinee's borrow before the arm runs; under edition 2021
-                    // that borrow lived through the arm and this move did not compile.
-                    drop(stream);
+                    // learns which wire it is running (ADR-0013, ADR-0015). No drop here:
+                    // upstream consumes the stream after the loop, so moving it inside the
+                    // arm no longer compiles; the post-loop `drop(stream)` covers it.
                     if let Some(marker) = preempted_turn_history_marker(
                         InterruptedTurnHistoryMarker::from_config_and_version(
                             turn_context.config.as_ref(),
@@ -2974,7 +2972,6 @@ async fn try_run_sampling_request(
                 }
                 // Responses SSE asks for nothing here: the reconcile seam exists
                 // only for the Chat and Messages wires (spec N-02).
-                drop(stream);
                 break Ok(SamplingRequestResult {
                     needs_follow_up: true,
                     last_agent_message,

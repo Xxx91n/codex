@@ -164,11 +164,7 @@ impl ModelClientSession {
                 .client
                 .current_client_setup(ClientRouting::Workspace)
                 .await?;
-            let transport = self.client.build_api_transport(
-                &client_setup.api_provider,
-                ANTHROPIC_MESSAGES_ENDPOINT,
-                client_setup.redirect_policy,
-            )?;
+            let transport = client_setup.build_api_transport(ANTHROPIC_MESSAGES_ENDPOINT)?;
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
@@ -222,7 +218,7 @@ impl ModelClientSession {
             );
             match client.stream_request(request, options).await {
                 Ok(stream) => {
-                    let (stream, _) = map_response_stream(
+                    let stream = map_response_stream(
                         stream,
                         session_telemetry.clone(),
                         inference_trace_attempt,

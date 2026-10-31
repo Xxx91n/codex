@@ -663,13 +663,6 @@ other non-default provider fields are not supported"
         aws: Option<ModelProviderAwsAuthInfo>,
     ) -> ModelProviderInfo {
         ModelProviderInfo {
-            anthropic_max_tokens: None,
-
-            anthropic_thinking_budget: None,
-
-            anthropic_adaptive_thinking: false,
-
-            anthropic_prompt_caching: None,
             name: AMAZON_BEDROCK_PROVIDER_NAME.into(),
             // The runtime provider derives the regional Mantle endpoint when
             // this is unset. A configured value is therefore unambiguously an
@@ -706,6 +699,10 @@ other non-default provider fields are not supported"
             location: None,
             credential_file: None,
             include_internal_metadata: false,
+            anthropic_max_tokens: None,
+            anthropic_thinking_budget: None,
+            anthropic_adaptive_thinking: false,
+            anthropic_prompt_caching: None,
         }
     }
 
@@ -745,6 +742,10 @@ other non-default provider fields are not supported"
             location: None,
             credential_file: None,
             include_internal_metadata: false,
+            anthropic_max_tokens: None,
+            anthropic_thinking_budget: None,
+            anthropic_adaptive_thinking: false,
+            anthropic_prompt_caching: None,
         }
     }
 

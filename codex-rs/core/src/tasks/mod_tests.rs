@@ -649,6 +649,7 @@ fn preempted_marker_renders_the_spec_sentence_and_not_the_esc_wording() {
             .expect("the Esc marker stays available"),
         "preemption must not inherit the wording written for the user's Esc"
     );
+}
 
 struct UncooperativeTimedTask {
     entered: Arc<tokio::sync::Notify>,

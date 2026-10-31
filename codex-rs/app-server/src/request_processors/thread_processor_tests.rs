@@ -636,9 +636,8 @@ mod thread_processor_behavior_tests {
         let temp_dir = TempDir::new()?;
         let session_provider = ModelProviderInfo {
             anthropic_max_tokens: None,
-
             anthropic_thinking_budget: None,
-
+            anthropic_adaptive_thinking: false,
             anthropic_prompt_caching: None,
             name: "session".to_string(),
             base_url: Some("http://127.0.0.1:8061/api/codex".to_string()),

@@ -151,6 +151,7 @@ pub fn spawn_chat_completions_stream(
     });
 
     ResponseStream {
+        routing_affinity: None,
         rx_event,
         upstream_request_id,
         interrupt: None,
