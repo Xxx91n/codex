@@ -69,6 +69,17 @@ jobs:
         working-directory: codex-rs
     steps:
       - uses: actions/checkout@v4
+      # Upstream 0.166 made the v8 crate a git dependency whose chromium
+      # submodule checkout exceeds Windows MAX_PATH (260) — cargo fails with
+      # "path too long" (issue #12). Enable long paths for the runner user and
+      # git before any cargo invocation. Windows-only; no-op elsewhere.
+      - name: Enable Windows long paths (git + registry)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
+          git config --system core.longpaths true
+          git config --global core.longpaths true
       # Release artifacts compile with the channel the repo pins, the same
       # compiler fork-health's seam job uses, so a published binary can never be
       # built by a toolchain no gate checked (floating stable already broke the
@@ -218,6 +229,17 @@ jobs:
         working-directory: codex-rs
     steps:
       - uses: actions/checkout@v4
+      # Upstream 0.166 made the v8 crate a git dependency whose chromium
+      # submodule checkout exceeds Windows MAX_PATH (260) — cargo fails with
+      # "path too long" (issue #12). Enable long paths for the runner user and
+      # git before any cargo invocation. Windows-only; no-op elsewhere.
+      - name: Enable Windows long paths (git + registry)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
+          git config --system core.longpaths true
+          git config --global core.longpaths true
       # fmt/clippy here must run the same compiler the seam gate and the repo pin
       # name — see the build job for why floating stable was the wrong answer.
       - name: Resolve the repo-pinned toolchain channel
