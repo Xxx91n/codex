@@ -1174,4 +1174,5 @@ fn cyber_access_program_capability_uses_provider_identity_and_explicit_overrides
                 toml::from_str(&toml::to_string(&provider).unwrap()).unwrap();
             assert_eq!(round_trip, provider);
         }
-    }}
+    }
+}
