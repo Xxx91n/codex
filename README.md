@@ -11,37 +11,98 @@ If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="http
 
 ---
 
-## About this fork (tri-wire-api)
+## What this fork is
 
-This is a fork of `openai/codex` that restores and natively implements **three outbound wire protocols** on a single internal representation:
+`tri-wire-api` is a fork of `openai/codex` that gives the CLI three outbound
+wire protocols on one internal representation:
 
 - **Responses** (`/v1/responses`) — upstream's only remaining wire.
-- **Chat Completions** (`/v1/chat/completions`) — removed by upstream in Feb 2026 (PR #10157); reintroduced here as a first-class protocol.
-- **Anthropic Messages** (`/v1/messages`) — Claude-native, including the extended-thinking chain (`thinking_delta` / `signature_delta` SSE frames, `budget_tokens` clamping, `cache_control` ephemeral breakpoints, and verbatim signature-preserving replay of `thinking` blocks).
+- **Chat Completions** (`/v1/chat/completions`) — removed by upstream; restored
+  here as a first-class protocol.
+- **Anthropic Messages** (`/v1/messages`) — added by this fork, including the
+  extended-thinking chain (`thinking_delta` / `signature_delta` SSE frames,
+  `budget_tokens` clamping, `cache_control` ephemeral breakpoints, and
+  signature-preserving replay of `thinking` blocks).
 
-**Mental model (why the fork is shaped this way):**
+Pick the wire per provider with one config key, `wire_api`. There is no
+auto-negotiation and no failover: a provider speaks exactly the protocol you
+declare for it.
 
-1. **One IR, three spokes.** All wires share `ResponseItem` as the single internal representation (hub-and-spoke, not pairwise translation). Complexity stays O(N) instead of O(N²).
-2. **Minimal fork seam.** The divergence from upstream is contained to ~3 registration points: `WireApi`, `ModelProviderInfo`, and a per-wire dispatch in `core/src/client.rs`. Upstream still only defines `WireApi::Responses`, so our chat/messages variants never collide with upstream drift.
-3. **goose-blueprint Anthropic implementation.** The Anthropic SSE state machine in `codex-api/src/sse/messages.rs` is modeled on goose's pattern (Block's Rust agent), not a hand-rolled parser.
-4. **Real-gateway verified.** Every wire was tested end-to-end against a live combo gateway (H1 联调档案）：tool calls, parallel tool-call grouping, `max_tokens` hit signaling, and thinking-chain round trips. Any degradation is fail-loud, not silent — e.g., truncated `tool_use` JSON surfaces as `ApiError::Stream`, never a fabricated `{}`.
-5. **Per-provider tuning.** Additional `anthropic_max_tokens`, `anthropic_thinking_budget`, `anthropic_prompt_caching` `Option<_>` fields plus the `anthropic_adaptive_thinking` flag let each provider opt in without touching global defaults.
+## Should you use this fork?
 
-Upstream is tracked as `upstream/main`. This fork's local agent docs (`docs/agents`, `docs/specs`, `PONYTAIL-DEBT.md`, etc.) are intentionally **not** committed here — they live in an untracked sibling `docs/` directory on the working machine and are not pushed.
+| Your situation | Use |
+|---|---|
+| You only talk to OpenAI Responses (`/v1/responses`) | **upstream `openai/codex`** — this fork adds nothing you need |
+| You need Responses, Chat Completions, or Anthropic Messages behind one binary (gateways without `/v1/responses`: LM Studio, Ollama, DeepSeek-style chat endpoints, Anthropic-compatible gateways) | **this fork** — one binary, one config, three protocols |
+| Many non-Codex clients behind one endpoint | **LiteLLM Proxy / Portkey** — a standalone gateway is the right shape; this fork is an in-process wire layer, not a proxy |
 
-### Fork documentation map
+## Install
 
-Where to read what (link, don't copy — each layer stays the single source for its content):
+Every release publishes three archives plus a `SHA256SUMS`, one archive per
+platform. The newest release carries GitHub's **Latest** badge:
+**[releases/latest](https://github.com/Xxx91n/codex/releases/latest)**.
 
-1. **[CONTEXT.md](CONTEXT.md)** — the fork's vocabulary authority: tri-wire terms, usage/prohibited-usage pairs, sources. Read it before naming anything new.
-2. **[docs/adr/](docs/adr/)** — decision records, append-only ([index](docs/adr/README.md)): 0001 fork baseline & sync, 0002 merge rulings, 0003 Gemini verdict, 0004 reasoning_content passthrough, 0005 reasoning_effort translation, 0006 fork divergence patch queue.
-3. **[AGENTS.md](AGENTS.md)** — agent-facing rules; the "Fork maintenance constitution (tri-wire-api)" section holds the fork red lines and the executor rules. Nested chain (nearest file wins): [codex-rs/AGENTS.md](codex-rs/AGENTS.md) → [core/src/client/wire/AGENTS.md](codex-rs/core/src/client/wire/AGENTS.md) for the per-wire protocol red lines.
-4. **CI**: `.github/workflows/fork-health.yml` is the daily fork-seam watchdog (seam-crate clippy + wiremock suites + drift probe); `fork-cli-test-release.yml` runs the three-platform check + release build. Heavy builds run in CI only.
-5. **Version control**: maintained with [GitButler](https://gitbutler.com) (virtual branches, one lane per ticket); upstream sync merges `upstream/main` and never rebases (ADR-0001).
+| Platform | File |
+|---|---|
+| Windows x86_64 | `codex-<version>-win-x86_64-pc-windows-msvc.zip` |
+| Linux x86_64 | `codex-<version>-linux-x86_64-unknown-linux-gnu.tar.gz` |
+| macOS (Apple Silicon) | `codex-<version>-mac-aarch64-apple-darwin.tar.gz` |
 
-### Using the three wires (Responses / Chat / Anthropic Messages)
+1. Download the archive for your platform.
+2. Extract it — it contains a single binary. Rename it to `codex` (Windows:
+   `codex.exe`) and put it on your `PATH`.
+3. Verify the build: `codex --version` prints `X.Y.Z-tri.N`. Anything not
+   ending in `-tri.N` is not this fork.
+4. Verify integrity: download `SHA256SUMS` from the same release page and run
+   `sha256sum -c SHA256SUMS` (Windows: `certutil -hashfile <file> SHA256`).
+   Build provenance: `gh attestation verify <file> --repo Xxx91n/codex`.
 
-`wire_api` is **one protocol per provider** — there is no auto-negotiation and no failover. To use several protocols at once you declare multiple providers (they can even point at the same base URL) and pick one per run with `-p`:
+**macOS:** the binary is not notarized. On first run, clear the quarantine flag:
+`xattr -d com.apple.quarantine ./codex`.
+
+**Upgrading:** the binary has no self-updater — download the new archive and
+replace the binary.
+
+**Version ordering:** the `-tri.N` marker sorts below the same upstream version
+number, so a comparator will report the official build as newer. This
+repository's release page is the authority for the fork.
+
+### Swapping the Codex Desktop app's engine (Windows)
+
+The Codex Desktop app can run a different CLI engine through the
+`CODEX_CLI_PATH` user environment variable:
+
+```powershell
+setx CODEX_CLI_PATH "D:\path\to\codex.exe"
+```
+
+Fully restart the app afterwards (the variable is read at engine spawn). To roll
+back, clear the variable (`reg delete "HKCU\Environment" /v CODEX_CLI_PATH /f`
+or System Properties → Environment Variables) and restart again.
+
+**Checksum family (ADR-0011):** fork builds embed the same sqlx migration
+checksum family as an official build of the same platform (Windows = CRLF,
+Linux/macOS = LF), so swapping `CODEX_CLI_PATH` between this fork and the
+official CLI does not wall-lock the shared `~/.codex` databases. If a startup
+reports `checksum family mismatch`, run the repair command the error names
+once — e.g. `codex state fix-checksums --family crlf --apply` — then cold-start
+the official CLI to verify. The runbook is
+[docs/fork-checksum-family.md](./docs/fork-checksum-family.md).
+
+### Building from source
+
+See [docs/install.md](./docs/install.md). Note the repo's own rule: heavy
+builds and release acceptance run in CI; a local `codex-rs/target/` is a
+disposable cache.
+
+### Looking for the official Codex CLI?
+
+This repository only documents installing **this fork**. For the official
+OpenAI Codex CLI, go to [openai/codex](https://github.com/openai/codex).
+
+## Configuring the three wires
+
+One `wire_api` value per provider, declared in `~/.codex/config.toml`:
 
 ```toml
 # ~/.codex/config.toml
@@ -52,7 +113,7 @@ model_provider = "openai"
 # --- Responses wire (OpenAI native /v1/responses) ---
 [model_providers.gw-resp]
 name        = "gw-resp"
-base_url    = "https://example.com/v1"   # note: path stays at /v1; the wire appends /responses, /chat/completions, or /messages itself
+base_url    = "https://example.com/v1"   # path stays at /v1; the wire appends /responses, /chat/completions, or /messages itself
 wire_api    = "responses"
 env_key     = "MY_API_KEY"
 
@@ -70,51 +131,69 @@ base_url    = "https://example.com/v1"
 wire_api    = "anthropic"
 env_key     = "MY_API_KEY"
 
-# optional anthropic-only knobs (per-provider; leave unset to use built-in defaults):
-anthropic_max_tokens      = 128000   # output budget, otherwise a built-in default
+# optional anthropic-only knobs (per-provider; leave unset for built-in defaults):
+anthropic_max_tokens      = 128000   # output budget
 anthropic_thinking_budget = 8192     # extended-thinking budget_tokens (clamped to 1024..max_tokens-1)
 anthropic_prompt_caching  = true     # marks system prompt + last tool with cache_control: ephemeral
-anthropic_adaptive_thinking = false # Claude 4.6+: adaptive track sends thinking:{type:adaptive} + output_config.effort instead of budget_tokens
+anthropic_adaptive_thinking = false  # Claude 4.6+: sends thinking:{type:adaptive} + output_config.effort instead of budget_tokens
 ```
 
-Then select a wire and model per invocation:
-
-```shell
-codex -p gw-resp -m some-openai-model    "…"
-codex -p gw-chat -m deepseekpro          "…"
-codex -p gw-msg  -m claude-…             "…"   # thinking chain streams natively (TUI shows reasoning deltas)
-```
+To switch provider per run, override `model_provider` for that invocation — for
+example `codex -c model_provider="gw-msg" -m claude-… "…"`, or keep per-wire
+settings in `$CODEX_HOME/<name>.config.toml` profile files and select one with
+`codex -p <name>`. The `-m` flag selects the model.
 
 Behaviour notes:
 
-- **`experimental_bearer_token = "PROXY_MANAGED"`** (or a real token) also works in place of `env_key` for gateways that inject auth downstream.
-- The same physical gateway endpoints strike all three wires (`POST /v1/responses`, `POST /v1/chat/completions`, `POST /v1/messages`) — fork never strips or rewrites paths.
-- On the Anthropic wire, replay of the model's `thinking` blocks is done verbatim with the SSE `signature` (anthropic's tool-use round contract); unsigned reasonings are **dropped** rather than altered. Non-data-URI images are dropped loudly. Truncated tool-call JSON errors out — never silently fabricated.
-- **`reasoning_effort`** (session-level) translates per wire: Chat sends top-level `reasoning_effort` (portable vocabulary low/medium/high; `minimal`→`low`, `xhigh`/`max`→`high`); Anthropic routes by `anthropic_adaptive_thinking` — adaptive sends `output_config.effort`, manual buckets to `budget_tokens` (1024/2048/4096, clamped). Translation is pure and deterministic (cache-key stable) — see [docs/adr/0005](docs/adr/0005-reasoning-effort-translation.md).
-- A turn always runs on exactly one wire; switching wires mid-thread means starting a new turn with `-p`.
+- `experimental_bearer_token` can replace `env_key` when a gateway injects auth
+  downstream — point it at a real token or at the convention your gateway
+  expects.
+- The wire appends its own path (`POST /v1/responses`,
+  `POST /v1/chat/completions`, `POST /v1/messages`); the fork never strips or
+  rewrites base-URL paths.
+- On the Anthropic wire, `thinking` blocks with an SSE `signature` replay
+  verbatim. Unsigned blocks dispatch by upstream type (ADR-0009): first-party
+  `anthropic.com` endpoints may drop them with a warn-level log; compatible
+  third-party endpoints replay them verbatim. Non-data-URI images and truncated
+  tool-call JSON fail loudly rather than being silently fabricated.
+- `reasoning_effort` translates per wire: Chat sends a top-level
+  `reasoning_effort` field (`minimal`→`low`, `xhigh`/`max`→`high`); Anthropic
+  routes by `anthropic_adaptive_thinking` — adaptive sends
+  `output_config.effort`, manual buckets the effort into `budget_tokens`
+  (1024/2048/4096, clamped). Translation is pure and deterministic — see
+  [docs/adr/0005](docs/adr/0005-reasoning-effort-translation.md).
+- A turn always runs on exactly one wire; switching wires means starting a new
+  turn with a different provider selection.
 
-### Local dev vs. cloud CI
+## Limitations
 
-**Local machines only keep lightweight development — every heavy build, check, and release runs in GitHub Actions.** Locally you only need the Rust toolchain (pinned to `1.95.0` by `codex-rs/rust-toolchain.toml`) and `just` for quick `fmt`/`clippy`/`test` runs. The `fork-cli-test-release` workflow (triggered manually with `workflow_dispatch`) runs the `check` job (fmt + clippy + fork-scoped tests) and the release `build` job across Windows, macOS, and Linux, then publishes the rolling prerelease — so a local `codex-rs/target/` is just a disposable on-disk cache: delete it to reclaim ~110G of disk.
+- **Not a proxy.** `wire_api` is one protocol per provider — there is no
+  auto-negotiation and no failover between wires or providers.
+- **macOS binary is not notarized**; first run needs
+  `xattr -d com.apple.quarantine ./codex`.
+- **No self-updater.** Upgrading means downloading the new archive and
+  replacing the binary.
+- **Version ordering.** `-tri.N` sorts below the same upstream version, so
+  version comparators will report the official build as newer.
+- **Unsigned thinking blocks on first-party Anthropic endpoints** may be
+  dropped (with a warn-level log) rather than replayed; the conditional rule is
+  ADR-0009.
 
-## Why this fork exists
+## How it works
 
-The Codex model family was documented as Responses-only from the start, and OpenAI retired the exceptions in waves: `codex-mini-latest` left the API on 2026-02-12, the remaining Codex API models (`gpt-5-codex` through `gpt-5.2-codex`) were shut down on 2026-07-23, and on 2026-08-04 `gpt-5.3-codex` — the last model OpenAI had still transitionally accepted on the `/v1/chat/completions` endpoint — was pulled from it too. LiteLLM Proxy’s bridge router kept a wildcard route that still mapped that model to the removed endpoint, and for roughly 4 hours every request through it came back 404 — 1,700+ failed requests before the hotfix (LiteLLM issue #35879; OpenAI Deprecations page for the 02-12 and 07-23 waves). Nothing was wrong with the models or the clients: the outage lived inside a *server-side protocol bridge* that a third party operated and that clients passively depended on.
+The fork is hub-and-spoke: a single typed internal representation,
+`ResponseItem`, sits in the middle, and every wire is one spoke — a request
+builder plus an inbound SSE state machine. Adding a protocol costs O(N), not
+the O(N²) of pairwise translation. The divergence from upstream is contained to
+three registration points:
 
-A chat-wire client can avoid that entire failure class by refusing to delegate protocol translation to somebody else’s router. This fork builds all three wires — Responses, Chat Completions, Anthropic Messages — natively into the client itself, selected by one local config key (`wire_api`). There is no bridge to break, no wildcard to misroute, and no upstream hotfix to wait for: the translation lives in the binary you run, guarded end-to-end by the fork-seam CI.
+1. the `WireApi` enum in `codex-rs/model-provider-info/src/lib.rs`,
+2. the `ModelProviderInfo.wire_api` field in the same file,
+3. the dispatch `match` in `ModelClientSession::stream`
+   (`codex-rs/core/src/client.rs`).
 
-## When to use this fork vs upstream
-
-| Your situation | Use |
-|---|---|
-| You only ever speak OpenAI Responses (`/v1/responses`) with the Codex app | **upstream `openai/codex`** — this fork adds nothing you need |
-| You need any combination of Responses / Chat Completions / Anthropic Messages (gateways that don’t implement `/v1/responses`: LM Studio, Ollama pre-responses, DeepSeek-style chat endpoints) | **this fork** — one binary, one config, three protocols |
-| Non-Codex clients that need many providers behind one endpoint | **LiteLLM Proxy / Portkey** — a standalone gateway is the right shape there; this fork is an in-process wire layer, not a proxy |
-| Anthropic Messages direct, including the extended-thinking chain (verbatim signature replay, `budget_tokens`, `cache_control`) | **this fork** — goose-blueprint SSE state machine, real-gateway verified |
-
-## Architecture at a glance
-
-The fork is hub-and-spoke, not pairwise: one single typed internal representation (IR), `ResponseItem`, sits in the middle, and every wire is one spoke — a request builder plus an inbound SSE state machine. Adding a protocol therefore costs O(N), not the O(N²) of pairwise translation. The divergence from upstream is contained to exactly three registration points (`WireApi`, `ModelProviderInfo.wire_api`, and the dispatch match in `client.rs`).
+Upstream still only defines `WireApi::Responses`, so the fork's `chat` and
+`anthropic` variants never collide with upstream drift.
 
 ```mermaid
 graph TD
@@ -127,84 +206,85 @@ graph TD
     IR -->|"builder + SSE state machine"| A
 ```
 
-## How to add a 4th wire
+Per-wire code lives in two module pairs: outbound builders and streaming loops
+in `codex-rs/core/src/client/wire/` (`chat.rs`, `anthropic.rs`), inbound SSE
+state machines in `codex-rs/codex-api/src/sse/` (`chat_completions.rs`,
+`messages.rs`). The Anthropic state machine follows the goose blueprint
+(Block's Rust agent), not a hand-rolled parser.
 
-A new outbound protocol (say Gemini) follows the same blueprint that produced Chat and Anthropic. The binding rules are red lines 1–2 of [wire/AGENTS.md](codex-rs/core/src/client/wire/AGENTS.md) — a new protocol means a new module file plus registration at all three points, and it must follow the `chat.rs` shape (builder + streaming loop in the module, dispatch only in `client.rs`). Concretely, in five steps:
+### Adding a fourth wire
 
-1. **Add the module pair.** Outbound request builder + streaming loop in `codex-rs/core/src/client/wire/<new>.rs`; inbound SSE state machine in `codex-api/src/sse/<new>.rs`.
-2. **Update the three registration points together.** The `WireApi` variant and its `wire_api` config surface in `model-provider-info/src/lib.rs`, plus the dispatch branch in `ModelClientSession::stream` (`core/src/client.rs`).
-3. **Add wiremock fixtures.** Replay fixtures + round-trip tests for the new spoke in the seam suites, and register it in the cross-wire table, so `fork-health.yml` guards it from day one.
-4. **Add the vocabulary.** New terms go into [CONTEXT.md](CONTEXT.md) — the fork’s vocabulary authority — with usage and prohibited-usage pairs, before the code merges.
-5. **Record the decision.** An ADR under [docs/adr/](docs/adr/), plus an entry in the semantic patch queue (FORK_DIVERGENCE) with its classification and merge-base anchor, per [ADR-0006](docs/adr/0006-fork-divergence-patch-queue.md).
+A new outbound protocol follows the same blueprint. The binding rules are red
+lines 1–2 of [wire/AGENTS.md](codex-rs/core/src/client/wire/AGENTS.md): a new
+module file plus registration at all three points, following the `chat.rs`
+shape (builder + streaming loop in the module, dispatch only in `client.rs`):
 
----
+1. **Add the module pair.** Outbound request builder + streaming loop in
+   `codex-rs/core/src/client/wire/<new>.rs`; inbound SSE state machine in
+   `codex-rs/codex-api/src/sse/<new>.rs`.
+2. **Update the three registration points together.** `WireApi` variant and
+   `wire_api` config surface in `codex-rs/model-provider-info/src/lib.rs`;
+   dispatch branch in `ModelClientSession::stream`.
+3. **Add wiremock fixtures.** Replay fixtures + round-trip tests for the new
+   spoke in the seam suites, so `fork-health.yml` guards it from day one.
+4. **Add the vocabulary.** New terms go into [CONTEXT.md](CONTEXT.md) — the
+   fork's vocabulary authority — with usage and prohibited-usage pairs, before
+   the code merges.
+5. **Record the decision.** An ADR under [docs/adr/](docs/adr/), plus an entry
+   in the FORK_DIVERGENCE patch queue per
+   [ADR-0006](docs/adr/0006-fork-divergence-patch-queue.md).
 
-## Install (this fork)
+## Why this fork exists
 
-Every release publishes exactly three archives, one per platform, and the newest
-one carries GitHub's **Latest** badge. Start here:
-**[releases/latest](https://github.com/Xxx91n/codex/releases/latest)**.
+The Codex model family was documented as Responses-only from the start, and
+OpenAI retired the exceptions in waves: `codex-mini-latest` left the API on
+2026-02-12, the remaining Codex API models (`gpt-5-codex` through
+`gpt-5.2-codex`) were shut down on 2026-07-23, and on 2026-08-04
+`gpt-5.3-codex` — the last model still transitionally accepted on
+`/v1/chat/completions` — was pulled too. LiteLLM Proxy's bridge router kept a
+wildcard route mapping that model to the removed endpoint; for roughly 4 hours
+every request through it returned 404 — 1,700+ failed requests before the
+hotfix (LiteLLM issue #35879; OpenAI Deprecations page for the 02-12 and 07-23
+waves). The outage lived inside a *server-side protocol bridge* that clients
+passively depended on.
 
-| Platform | File |
-|---|---|
-| Windows x86_64 | `codex-<version>-win-x86_64-pc-windows-msvc.zip` |
-| Linux x86_64 | `codex-<version>-linux-x86_64-unknown-linux-gnu.tar.gz` |
-| macOS (Apple Silicon) | `codex-<version>-mac-aarch64-apple-darwin.tar.gz` |
+This fork avoids that failure class by refusing to delegate protocol
+translation to somebody else's router: all three wires are built natively into
+the client, selected by `wire_api`. There is no bridge to break and no wildcard
+to misroute — the translation lives in the binary you run, guarded end-to-end
+by the fork-seam CI.
 
-1. Download the archive for your platform from the latest release.
-2. Extract it — it contains a single binary. Rename it to `codex` (Windows:
-   `codex.exe`) and put it on your `PATH`.
-3. Verify the build: `codex --version` prints `X.Y.Z-tri.N`. Anything not ending
-   in `-tri.N` is not this fork.
-4. Verify integrity: download `SHA256SUMS` from the same release page and run
-   `sha256sum -c SHA256SUMS` (Windows: `certutil -hashfile <file> SHA256`).
-   Build provenance: `gh attestation verify <file> --repo Xxx91n/codex`.
+## Development and CI
 
-**macOS:** the binary is not notarized. On first run, clear the quarantine flag:
-`xattr -d com.apple.quarantine ./codex`.
+Local development only needs the Rust toolchain (pinned to `1.99.1` by
+`codex-rs/rust-toolchain.toml`) and `just` for `fmt`/`clippy`/`test`. Heavy
+work runs in GitHub Actions:
 
-**Upgrading:** the binary has no self-updater — download the new archive and
-replace the binary.
+- `fork-health.yml` — daily upstream-drift watchdog: fmt, clippy over the seam
+  crates, wiremock suites, and a merge-base drift probe.
+- `fork-cli-test-release.yml` — manual `workflow_dispatch` run: `check` job
+  plus three-platform release builds.
+- `fork-publish.yml` — publishes the archives of a completed build run as a
+  release with `SHA256SUMS` and build attestation (ADR-0018).
 
-**Version ordering:** the `-tri.N` marker makes the version sort *below* the same
-upstream number, so a version comparator will report the official build as newer.
-The release page of this repository is the authority for the fork.
-### Using the fork binary with the Codex Desktop app (Windows)
+## Fork documentation map
 
-The Codex Desktop app can run a different CLI engine through the `CODEX_CLI_PATH`
-user environment variable — this is how you swap the app's kernel for a fork build
-without touching the app install:
+Each layer is the single source for its content — read what you need, in this
+order:
 
-```powershell
-setx CODEX_CLI_PATH "D:\path\to\codex.exe"
-```
+1. **[CONTEXT.md](CONTEXT.md)** — tri-wire vocabulary authority: terms,
+   usage/prohibited-usage pairs, sources. Read it before naming anything new.
+2. **[docs/adr/](docs/adr/)** — append-only decision records
+   ([index](docs/adr/README.md)); 0001 covers the fork baseline and
+   merge-don't-rebase sync.
+3. **[AGENTS.md](AGENTS.md)** — agent-facing rules; the fork constitution holds
+   the red lines. Nested chain (nearest file wins):
+   [codex-rs/AGENTS.md](codex-rs/AGENTS.md) →
+   [core/src/client/wire/AGENTS.md](codex-rs/core/src/client/wire/AGENTS.md)
+   for per-wire protocol rules.
+4. **Upstream tracking:** the fork merges `upstream/main`; it never rebases
+   (ADR-0001).
 
-Fully restart the app afterwards (the variable is read at engine spawn time).
-To roll back, clear the variable (`reg delete "HKCU\Environment" /v CODEX_CLI_PATH /f`
-or System Properties → Environment Variables) and restart the app again. This fork's
-release packages are built for exactly this workflow — see the Releases page.
-
-**Kernel-swap checksum family (ticket 35 / ADR-0011):** fork builds embed the same
-sqlx migration checksum family as an official build of the same platform (Windows =
-CRLF, Linux/macOS = LF), so swapping `CODEX_CLI_PATH` between this fork and the
-official CLI no longer wall-locks the shared `~/.codex` databases. If a startup
-reports `checksum family mismatch` (typically a database left from the ticket 25
-LF-lock era), run the repair command the error names once —
-`codex state fix-checksums --family crlf --apply` — and cold-start the official CLI
-to verify; the full runbook is [docs/fork-checksum-family.md](./docs/fork-checksum-family.md).
-
-### Building from source
-
-See [docs/install.md](./docs/install.md). Remember the repo's rule: heavy builds and
-all release acceptance run in CI (see "Local dev vs. cloud CI" above); a local
-`codex-rs/target/` is a disposable cache.
-
-### Looking for the official Codex CLI?
-
-This repository only documents installing **this fork**. For the official OpenAI
-Codex CLI, go to [openai/codex](https://github.com/openai/codex).
-
----
 ## Docs
 
 - [**Codex Documentation**](https://developers.openai.com/codex)
