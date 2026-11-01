@@ -21,6 +21,10 @@ on:
         required: false
         type: boolean
         default: false
+      linux_archive_url:
+        description: "Optional release tag holding the locally-built linux tar.gz (maintainer-approved bypass for an ubuntu runner that cannot complete; archive must be built from the same headSha)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -70,6 +74,15 @@ jobs:
           gh run download "$RUN" --repo "${{ github.repository }}" --pattern 'cli-*' --dir dl
           # gh nests one directory per artifact; flatten so sha256sum sees files.
           find dl -type f -exec cp {} dist/ \;
+          # Maintainer-approved local-linux bypass (issue #12): when the build
+          # run was dispatched without ubuntu and linux_archive_url is given,
+          # fetch the locally-built archive from the named (draft) release
+          # instead of a runner artifact.
+          linux_rel="${{ inputs.linux_archive_url }}"
+          if [ -n "$linux_rel" ]; then
+            echo "linux archive: local bypass, downloading from release $linux_rel"
+            gh release download "$linux_rel" --repo "${{ github.repository }}" --pattern '*linux-x86_64*' --dir dist --clobber
+          fi
           ls -l dist
 
       - name: Validate the archive set
