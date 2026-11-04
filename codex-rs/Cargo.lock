@@ -3319,7 +3319,7 @@ dependencies = [
 
 [[package]]
 name = "codex-exec-server-cli"
-version = "0.0.0"
+version = "0.164.0-tri.1"
 dependencies = [
  "anyhow",
  "assert_matches",
@@ -3727,7 +3727,7 @@ dependencies = [
 
 [[package]]
 name = "codex-guardian-v3"
-version = "0.0.0"
+version = "0.164.0-tri.1"
 dependencies = [
  "codex-message-board",
  "codex-protocol",
@@ -4183,7 +4183,7 @@ dependencies = [
 
 [[package]]
 name = "codex-message-board-mcp"
-version = "0.0.0"
+version = "0.164.0-tri.1"
 dependencies = [
  "codex-attachment-store",
  "codex-message-board",
@@ -4470,7 +4470,7 @@ dependencies = [
 
 [[package]]
 name = "codex-plugin-host"
-version = "0.0.0"
+version = "0.164.0-tri.1"
 dependencies = [
  "codex-utils-cargo-bin",
  "codex-utils-process",
@@ -5299,7 +5299,7 @@ dependencies = [
 
 [[package]]
 name = "codex-utils-head-tail-buffer"
-version = "0.0.0"
+version = "0.164.0-tri.1"
 dependencies = [
  "pretty_assertions",
 ]
