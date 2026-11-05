@@ -153,6 +153,7 @@ pub fn spawn_chat_completions_stream(
     ResponseStream {
         rx_event,
         upstream_request_id,
+        routing_affinity: None,
         interrupt: None,
         preempt: Some(preempt),
     }

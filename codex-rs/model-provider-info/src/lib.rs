@@ -719,6 +719,13 @@ other non-default provider fields are not supported"
 
     pub fn create_gcp_provider() -> ModelProviderInfo {
         ModelProviderInfo {
+            anthropic_max_tokens: None,
+
+            anthropic_thinking_budget: None,
+
+            anthropic_adaptive_thinking: false,
+
+            anthropic_prompt_caching: None,
             name: GCP_PROVIDER_NAME.into(),
             base_url: None,
             model_catalog_url: None,
