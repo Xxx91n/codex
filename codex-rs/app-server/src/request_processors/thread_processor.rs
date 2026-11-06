@@ -1007,7 +1007,7 @@ impl ThreadRequestProcessor {
         &self,
         params: ThreadItemsReadParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.thread_items_read_response_inner(params)
+        Self::read_thread_items(self.thread_store.as_ref(), params)
             .await
             .map(|response| Some(response.into()))
     }
@@ -3762,11 +3762,11 @@ impl ThreadRequestProcessor {
         })
     }
 
-    async fn thread_items_read_response_inner(
-        &self,
+    pub(super) async fn read_thread_items(
+        store: &dyn ThreadStore,
         params: ThreadItemsReadParams,
     ) -> Result<ThreadItemsReadResponse, JSONRPCErrorError> {
-        if !(1..=100).contains(&params.item_ids.len()) {
+        if !(1..=THREAD_ITEMS_MAX_LIMIT).contains(&params.item_ids.len()) {
             return Err(invalid_request(
                 "itemIds must contain 1 to 100 IDs".to_string(),
             ));
@@ -3779,8 +3779,7 @@ impl ThreadRequestProcessor {
         let thread_id = ThreadId::from_string(&thread_id)
             .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
         let page_size = item_ids.len();
-        let page = self
-            .thread_store
+        let page = store
             .list_items(StoreListItemsParams {
                 item_ids: Some(item_ids),
                 thread_id,
@@ -6117,7 +6116,7 @@ fn xcode_26_4_mcp_elicitations_auto_deny(
 const THREAD_TURNS_DEFAULT_LIMIT: usize = 25;
 const THREAD_TURNS_MAX_LIMIT: usize = 100;
 const THREAD_ITEMS_DEFAULT_LIMIT: usize = 25;
-const THREAD_ITEMS_MAX_LIMIT: usize = 100;
+pub(super) const THREAD_ITEMS_MAX_LIMIT: usize = 100;
 const THREAD_SEARCH_OCCURRENCES_DEFAULT_LIMIT: usize = 50;
 const THREAD_SEARCH_OCCURRENCES_MAX_LIMIT: usize = 250;
 

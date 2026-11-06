@@ -398,6 +398,37 @@ impl ThreadHistoryBuilder {
             .map(|turn| turn.rollout_start_index)
     }
 
+    /// Keeps the latest assistant item in memory for live summaries. Full reconnects
+    /// load older text from history. Rollout replay uses the regular reducer.
+    pub fn handle_live_paginated_event(&mut self, event: &EventMsg) {
+        let previous_len = self
+            .current_turn
+            .as_ref()
+            .map_or(0, |turn| turn.items.len());
+        self.handle_event_for_history_mode(event, ThreadHistoryMode::Paginated);
+        if let EventMsg::ItemCompleted(completed) = event
+            && let codex_protocol::items::TurnItem::AgentMessage(item) = &completed.item
+            && let Some(turn) = self
+                .current_turn
+                .as_mut()
+                .filter(|turn| turn.id == completed.turn_id)
+        {
+            if turn.items.len() > previous_len {
+                if let Some(index) = turn.evictable_agent_item.replace(previous_len)
+                    && let ThreadItemPayload::AgentMessage { text, .. } = &mut turn.items[index]
+                {
+                    *text = String::new();
+                }
+            } else if turn
+                .evictable_agent_item
+                .is_some_and(|index| turn.items[index].id() == item.id)
+            {
+                // A read by ID could still find the prior version of a corrected item.
+                turn.evictable_agent_item = None;
+            }
+        }
+    }
+
     /// Shared reducer for persisted rollout replay and in-memory current-turn
     /// tracking used by running thread resume/rejoin.
     ///
@@ -1561,6 +1592,7 @@ impl ThreadHistoryBuilder {
             root_turn_id: None,
             items: Vec::new(),
             item_index: TurnItemIndex::default(),
+            evictable_agent_item: None,
             item_times: HashMap::new(),
             error: None,
             status: TurnStatus::Completed,
@@ -1889,6 +1921,7 @@ struct PendingTurn {
     root_turn_id: Option<String>,
     items: Vec<ThreadItemPayload>,
     item_index: TurnItemIndex,
+    evictable_agent_item: Option<usize>,
     item_times: HashMap<String, ItemTimes>,
     error: Option<TurnError>,
     status: TurnStatus,
@@ -4342,6 +4375,43 @@ mod tests {
                 }],
             }
         );
+    }
+
+    #[test]
+    fn live_paginated_turn_releases_superseded_agent_text() {
+        let mut builder = ThreadHistoryBuilder::new();
+        let turn_id = builder.ensure_turn().id.clone();
+        for (id, text) in [
+            ("a", "old"),
+            ("b", "draft"),
+            ("b", "corrected"),
+            ("c", "latest"),
+        ] {
+            builder.handle_live_paginated_event(&EventMsg::ItemCompleted(ItemCompletedEvent {
+                thread_id: ThreadId::default(),
+                turn_id: turn_id.clone(),
+                item: CoreTurnItem::AgentMessage(codex_protocol::items::AgentMessageItem {
+                    id: id.into(),
+                    content: vec![codex_protocol::items::AgentMessageContent::Text {
+                        text: text.into(),
+                    }],
+                    phase: None,
+                    memory_citation: None,
+                    delivery: None,
+                    questions: None,
+                }),
+                started_at_ms: None,
+                completed_at_ms: 1,
+            }));
+        }
+        let mut texts = builder.current_turn.unwrap().items.into_iter().map(|item| {
+            let ThreadItemPayload::AgentMessage { text, .. } = item else {
+                panic!("expected assistant item")
+            };
+            text
+        });
+        assert_eq!(texts.next().unwrap().capacity(), 0);
+        assert_eq!(texts.collect::<Vec<_>>(), ["corrected", "latest"]);
     }
 
     #[test]

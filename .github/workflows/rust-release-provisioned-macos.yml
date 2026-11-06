@@ -1,4 +1,4 @@
-# Verified Cargo and Bazel side packages, published by rust-release.yml when enabled.
+# Verified Cargo side packages, published by rust-release.yml when enabled.
 # The legacy CLI, npm, installer and DMG packages are unchanged.
 # Required secrets in the codesigning environment:
 # - CODEX_CLI_PROVISIONING_PROFILE_BASE64: profile approved for public distribution.
@@ -32,7 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build-system: [cargo, bazel]
+        build-system: [cargo] # Bazel releases are disabled while the BuildBuddy key is revoked.
         target: [aarch64-apple-darwin, x86_64-apple-darwin]
     env:
       TARGET: ${{ matrix.target }}
@@ -131,7 +131,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build-system: [cargo, bazel]
+        build-system: [cargo] # Bazel releases are disabled while the BuildBuddy key is revoked.
         target: [aarch64-apple-darwin, x86_64-apple-darwin]
         include:
           - target: aarch64-apple-darwin

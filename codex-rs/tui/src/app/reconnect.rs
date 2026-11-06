@@ -528,7 +528,6 @@ impl App {
                 return Err(err);
             }
             self.config = self.chat_widget.config_ref().clone();
-            self.refresh_pending_thread_approvals().await;
             if self.thread_unavailable(id) && !self.chat_widget.is_external_writer_view() {
                 self.agent_navigation.mark_stopped(id);
                 self.chat_widget.pause_unavailable_thread();
@@ -549,6 +548,7 @@ impl App {
             self.replace_chat_widget(ChatWidget::new_with_app_event(init));
             self.chat_widget.restore_reconnected_input(input, &[]);
         }
+        self.refresh_pending_thread_approvals().await;
         // Discover tasks whose notifications were missed, without clearing retained rows.
         // A hidden overview performs this discovery when it is next opened.
         self.agents_overview.initialized = false;

@@ -199,28 +199,38 @@ impl App {
 
     pub(super) fn thread_label(&self, thread_id: ThreadId) -> String {
         let is_primary = self.primary_thread_id == Some(thread_id);
-        let fallback_label = if is_primary {
-            "Main [default]".to_string()
-        } else {
-            let thread_id = thread_id.to_string();
-            let short_id: String = thread_id.chars().take(8).collect();
-            format!("Agent ({short_id})")
+        let anonymous = |label: &str| {
+            // Agents spawned together share the timestamp prefix of their UUIDv7 IDs.
+            let id = thread_id.to_string();
+            let suffix = id.rsplit('-').next().unwrap_or(&id);
+            format!("{label} ({suffix})")
         };
         if let Some(entry) = self.agent_navigation.get(&thread_id) {
+            if let Some(path) = entry.agent_path.as_deref().map(str::trim)
+                && !is_primary
+                && !path.is_empty()
+            {
+                return path.to_string();
+            }
             let label = format_agent_picker_item_name(
                 entry.agent_nickname.as_deref(),
                 entry.agent_role.as_deref(),
                 is_primary,
             );
-            if label == "Agent" {
-                let thread_id = thread_id.to_string();
-                let short_id: String = thread_id.chars().take(8).collect();
-                format!("{label} ({short_id})")
+            if !is_primary
+                && entry
+                    .agent_nickname
+                    .as_deref()
+                    .is_none_or(|name| name.trim().is_empty())
+            {
+                anonymous(&label)
             } else {
                 label
             }
+        } else if is_primary {
+            "Main [default]".to_string()
         } else {
-            fallback_label
+            anonymous("Agent")
         }
     }
 
@@ -1001,27 +1011,29 @@ impl App {
             .map(|(thread_id, channel)| (*thread_id, Arc::clone(&channel.store)))
             .collect();
 
-        let mut pending_thread_ids = Vec::new();
+        let mut pending_thread_ids = HashSet::new();
         for (thread_id, store) in channels {
             if Some(thread_id) == self.active_thread_id || Some(thread_id) == side_parent_thread_id
             {
                 continue;
             }
 
-            let store = store.lock().await;
-            if store.has_pending_thread_approvals() {
-                pending_thread_ids.push(thread_id);
+            if store.lock().await.has_pending_thread_approvals() {
+                pending_thread_ids.insert(thread_id);
+                // Approval requests can arrive before the thread's metadata.
+                if self.agent_navigation.get(&thread_id).is_none() {
+                    self.upsert_agent_picker_thread(
+                        thread_id, /*agent_nickname*/ None, /*agent_role*/ None,
+                        /*is_closed*/ false,
+                    );
+                }
             }
         }
 
-        pending_thread_ids.sort_by_key(ThreadId::to_string);
-
-        let threads = pending_thread_ids
-            .into_iter()
-            .map(|thread_id| self.thread_label(thread_id))
-            .collect();
-
-        self.chat_widget.set_pending_thread_approvals(threads);
+        if self.agent_navigation.pending_approvals != pending_thread_ids {
+            self.agent_navigation.pending_approvals = pending_thread_ids;
+            self.refresh_agent_picker();
+        }
     }
 
     pub(super) async fn refresh_side_parent_status_from_store(&mut self, thread_id: ThreadId) {
@@ -1128,6 +1140,11 @@ impl App {
                 started.thread.agent_role.clone(),
                 /*is_closed*/ false,
             );
+            self.agent_navigation.set_agent_path(
+                thread_id,
+                crate::app_server_session::source_agent_path(&started.thread.source),
+            );
+            self.sync_agent_picker_thread(thread_id);
 
             // Lifecycle responses already contain authoritative session state. Their rollout may
             // not exist until the first turn, so inferring it again can wait through reader retries.
@@ -1263,8 +1280,9 @@ impl App {
         if let Some(activity) =
             sub_agent_activity_item(notification).and_then(sub_agent_activity_display)
         {
+            let thread_id = activity.thread_id;
             self.agent_navigation.record_sub_agent_activity(activity);
-            self.sync_active_agent_label();
+            self.sync_agent_picker_thread(thread_id);
             return;
         }
 
@@ -1293,6 +1311,7 @@ impl App {
                 thread_id, /*agent_nickname*/ None, /*agent_role*/ None,
                 /*is_closed*/ false,
             );
+            self.sync_agent_picker_thread(thread_id);
         }
     }
 
@@ -1476,6 +1495,7 @@ impl App {
             thread_id, /*agent_nickname*/ None, /*agent_role*/ None,
             /*is_closed*/ false,
         );
+        self.sync_agent_picker_thread(thread_id);
         let channel = self.ensure_thread_channel(thread_id);
         {
             let mut store = channel.store.lock().await;

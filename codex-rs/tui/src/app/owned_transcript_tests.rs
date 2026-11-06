@@ -536,6 +536,157 @@ async fn owned_details_keep_the_composer_cursor_and_screen() -> Result<()> {
     assert!(rendered.contains("First prompt"));
     assert!(rendered.contains("Second prompt"));
     assert!(rendered.contains("preserved draft"));
+    app.transcript_cells
+        .push(Arc::new(history_cell::AgentMarkdownCell::new(
+            "For the complete instructions see the [manual](https://example.com/docs).".into(),
+            app.config.cwd.as_path(),
+        )));
+    let area = Rect::new(
+        /*x*/ 5, /*y*/ 2, /*width*/ 26, /*height*/ 14,
+    );
+    let outer = Size::new(/*width*/ 36, /*height*/ 18);
+    tui.screen_size_for_event(&TuiEvent::Resize(outer))?;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("preview.png");
+    image::RgbaImage::from_pixel(8, 16, image::Rgba([80, 30, 20, 255])).save(&path)?;
+    let protocol = crate::pets::ImageProtocol::KittyLocalFile;
+    let image = Arc::new(
+        crate::transcript_image::TranscriptImage::load(&path, area.width, protocol).unwrap(),
+    );
+    let neighbor = Rect::new(/*x*/ 4, /*y*/ 9, image.columns, image.rows);
+    let presented = |tui: &tui::Tui| {
+        tui.retained_images
+            .iter()
+            .map(|placement| {
+                assert!(placement.file.as_ref().unwrap().path().exists());
+                placement.area
+            })
+            .collect::<Vec<_>>()
+    };
+    let frames = tui.frame_requester();
+    let mut painted = Default::default();
+    tui.draw(outer.height, |frame| {
+        for cell in &mut frame.buffer.content {
+            cell.set_char('·');
+        }
+        let prepared = app.prepare_conversation(frame.area(), Some(area), &frames);
+        painted = app.paint_conversation(frame, &prepared);
+        frame
+            .image_placements
+            .push(crate::transcript_image::ImagePlacement {
+                image,
+                area: neighbor,
+                first_row: 0,
+                file: None,
+            });
+    })?;
+    app.finish_conversation(&mut tui, painted)?;
+    assert_eq!(presented(&tui), [neighbor]);
+    let buffer = crate::custom_terminal::test_support::last_rendered_buffer(&tui.terminal);
+    let screen = crate::terminal_hyperlinks::strip_osc8(&buffer_text(buffer));
+    let caret = tui.terminal.last_known_cursor_pos;
+    assert!(area.contains(caret));
+    assert_eq!(buffer[(caret.x - 1, caret.y)].symbol(), "t");
+    let (column, row) = screen
+        .lines()
+        .enumerate()
+        .find_map(|(row, line)| {
+            let prefix = line.split_once("manual")?.0;
+            Some((prefix.chars().count() as u16, row as u16))
+        })
+        .expect("visible wrapped link");
+    assert_eq!(
+        app.transcript_view.link_at(column, row).as_deref(),
+        Some("https://example.com/docs")
+    );
+    assert_eq!(app.transcript_view.link_at(area.x - 1, row), None);
+    let mut server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+    app.local_settings.tui.copy_on_select = CopyOnSelect::Never;
+    for (kind, x) in [
+        (Down(Left), column),
+        (Drag(Left), column + 6),
+        (Up(Left), column + 6),
+    ] {
+        app.handle_tui_event(
+            &mut tui,
+            &mut server,
+            TuiEvent::Mouse(MouseEvent {
+                kind,
+                column: x,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }),
+        )
+        .await?;
+        assert_eq!(presented(&tui), [neighbor], "after {kind:?}");
+    }
+    assert_eq!(
+        app.transcript_view
+            .selected_text(&app.transcript_cells)
+            .as_deref(),
+        Some("manual")
+    );
+    app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(KeyCode::Esc.into()))
+        .await?;
+    assert_eq!(presented(&tui), [neighbor]);
+    assert_eq!(
+        app.transcript_view.link_at(column, row).as_deref(),
+        Some("https://example.com/docs")
+    );
+    let guard = Arc::new(crate::copy_input_guard::CopyInputGuard(
+        app.app_event_tx.clone(),
+    ));
+    app.handle_event(
+        &mut tui,
+        &mut server,
+        AppEvent::SelectTranscriptCopy { guard },
+    )
+    .await?;
+    assert_eq!(presented(&tui), [neighbor]);
+    assert_eq!(
+        app.transcript_view.link_at(column, row).as_deref(),
+        Some("https://example.com/docs")
+    );
+    assert_eq!(tui.terminal.last_known_cursor_pos, caret);
+    let buffer = crate::custom_terminal::test_support::last_rendered_buffer(&tui.terminal);
+    for pos in Rect::from(outer)
+        .positions()
+        .filter(|pos| !area.contains(*pos))
+    {
+        assert_eq!(buffer[pos].symbol(), "·");
+    }
+    app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(KeyCode::Esc.into()))
+        .await?;
+    app.chat_widget
+        .set_pet_image_support_for_tests(crate::pets::PetImageSupport::Supported(protocol));
+    app.transcript_cells
+        .push(Arc::new(history_cell::new_image_generation_call(
+            "image-call".to_string(),
+            "completed",
+            Some("Preview".to_string()),
+            Some(AbsolutePathBuf::try_from(path)?),
+        )));
+    app.handle_tui_event(&mut tui, &mut server, TuiEvent::Draw)
+        .await?;
+    let images = presented(&tui);
+    assert_eq!(images.len(), 2);
+    assert_eq!(images[0], neighbor);
+    assert_eq!(area.intersection(images[1]), images[1]);
+    app.chat_widget.open_feature_enable_prompt(Feature::Collab);
+    app.handle_tui_event(&mut tui, &mut server, TuiEvent::Draw)
+        .await?;
+    assert!(presented(&tui).is_empty());
+    app.transcript_cells.pop();
+    app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(KeyCode::Esc.into()))
+        .await?;
+    app.handle_tui_event(&mut tui, &mut server, TuiEvent::Draw)
+        .await?;
+    assert_eq!(presented(&tui), [neighbor]);
+    server.shutdown().await?;
+    insta::assert_snapshot!(
+        "conversation_in_offset_rect",
+        normalize_snapshot_paths(screen)
+    );
     assert!(app.handle_owned_backtrack_event(
         &mut tui,
         &TuiEvent::Key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),

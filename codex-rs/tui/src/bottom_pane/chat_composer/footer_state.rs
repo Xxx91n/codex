@@ -82,6 +82,8 @@ pub(crate) struct ComposerRenderOptions<'a> {
     pub(crate) textarea_right_reserve: u16,
     /// Keep configured status below the composer while hints occupy the final row.
     pub(crate) separate_status_line: bool,
+    /// Topmost frame row available for suggestions overlaying the transcript.
+    pub(crate) overlay_top: u16,
     pub(crate) command_popup_placement: CommandPopupPlacement,
     pub(crate) footer: Option<&'a TranscriptFooter>,
 }

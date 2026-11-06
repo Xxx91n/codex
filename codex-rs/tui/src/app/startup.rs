@@ -999,6 +999,7 @@ See the Codex keymap documentation for supported actions and examples."
             native_history: Default::default(),
             turn_tips: Default::default(),
             transcript_view: Default::default(),
+            conversation_frame: Default::default(),
             last_rendered_history_tail: None,
             last_thread_usage_status_cell: None,
             pending_thread_usage_history_refresh: false,

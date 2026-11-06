@@ -4646,11 +4646,14 @@ impl ChatComposer {
             && options.command_popup_placement != CommandPopupPlacement::Hidden
         {
             let popup_rect = if options.command_popup_placement == CommandPopupPlacement::Overlay {
+                let rows_above_composer = composer_rect
+                    .y
+                    .saturating_sub(options.overlay_top.max(buf.area.y));
                 let height = self
                     .popups
                     .active
                     .required_height(composer_rect.width, /*footer_total_height*/ 0)
-                    .min(composer_rect.y.saturating_sub(buf.area.y));
+                    .min(rows_above_composer);
                 // Command and unified mention menus can render in a single row.
                 let height = if matches!(
                     self.popups.active,

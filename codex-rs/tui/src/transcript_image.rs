@@ -33,6 +33,18 @@ pub(crate) struct ImagePlacement {
     pub(crate) file: Option<tempfile::NamedTempFile>,
 }
 
+impl ImagePlacement {
+    /// Register the same pixels for another frame. The terminal owns the transport file.
+    pub(crate) fn registration(&self) -> Self {
+        Self {
+            image: Arc::clone(&self.image),
+            area: self.area,
+            first_row: self.first_row,
+            file: None,
+        }
+    }
+}
+
 impl PartialEq for ImagePlacement {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.image, &other.image)

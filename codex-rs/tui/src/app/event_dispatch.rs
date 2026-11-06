@@ -479,8 +479,7 @@ impl App {
                 self.chat_widget.maybe_send_next_queued_input();
             }
             AppEvent::SelectTranscriptCopy { guard } => {
-                let size = tui.prepare_draw_size()?;
-                self.render_owned_transcript(tui, size)?;
+                self.refresh_owned_transcript(tui)?;
                 if !self.transcript_view.begin_copy_mode(&self.transcript_cells, Some(guard)) {
                     self.chat_widget.add_info_message("Nothing to copy".into(), /*hint*/ None);
                 }

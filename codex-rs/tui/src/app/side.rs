@@ -785,6 +785,7 @@ impl App {
                     /*agent_role*/ None,
                     /*is_closed*/ false,
                 );
+                self.sync_agent_picker_thread(child_thread_id);
                 if let Err(err) = app_server
                     .thread_inject_items(child_thread_id, vec![Self::side_boundary_prompt_item()])
                     .await

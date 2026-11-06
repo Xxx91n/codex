@@ -2594,6 +2594,18 @@ async fn open_agent_picker_selects_path_backed_agent() -> Result<()> {
     .expect("embedded app server");
     let thread_id =
         ThreadId::from_string("00000000-0000-0000-0000-000000000123").expect("valid thread id");
+    let main = ThreadId::from_u128(/*value*/ 1);
+    let waiting = ThreadId::from_u128(/*value*/ 2);
+    app.enqueue_primary_thread_session(
+        test_thread_session(main, test_path_buf("/tmp/project")),
+        Vec::new(),
+    )
+    .await?;
+    app.enqueue_thread_request(
+        waiting,
+        exec_approval_request(waiting, "turn", "call", /*approval_id*/ None),
+    )
+    .await?;
     app.thread_event_channels
         .insert(thread_id, ThreadEventChannel::new(/*capacity*/ 1));
     app.agent_navigation
@@ -2605,9 +2617,56 @@ async fn open_agent_picker_selects_path_backed_agent() -> Result<()> {
 
     Box::pin(app.open_agent_picker(&mut app_server)).await;
 
+    // The second request arrives while the picker is open.
+    let request =
+        exec_approval_request(thread_id, "turn", "worker-call", /*approval_id*/ None);
+    app.thread_event_channels[&thread_id]
+        .store
+        .lock()
+        .await
+        .push_request(request);
+    app.refresh_pending_thread_approvals().await;
+    assert_eq!(
+        app.chat_widget.pending_thread_approvals(),
+        &["Agent (000000000002)", "/root/worker"]
+    );
+
+    // The first request gains its path without another approval event.
+    app.cache_collab_receiver_threads_for_notification(&ServerNotification::ItemStarted(
+        ItemStartedNotification::new(
+            main.to_string(),
+            "turn-1".to_string(),
+            ThreadItemPayload::SubAgentActivity {
+                id: "activity".to_string(),
+                kind: codex_app_server_protocol::SubAgentActivityKind::Started,
+                agent_thread_id: waiting.to_string(),
+                agent_path: "/root/review".to_string(),
+                model: None,
+                reasoning_effort: None,
+            },
+            /*started_at_ms*/ 0,
+        ),
+    ));
+    assert_eq!(
+        app.chat_widget.pending_thread_approvals(),
+        &["/root/review", "/root/worker"]
+    );
+
     assert_app_snapshot!(
         "path_backed_agent_picker",
         render_bottom_popup(&app.chat_widget, /*width*/ 80)
+    );
+    app.chat_widget
+        .handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    app.enqueue_thread_notification(
+        thread_id,
+        turn_completed_notification(thread_id, "turn", TurnStatus::Completed),
+    )
+    .await?;
+    assert_eq!(
+        app.chat_widget
+            .selected_index_for_present_view(agent_picker::AGENT_PICKER_VIEW_ID),
+        Some(2)
     );
     while app_event_rx.try_recv().is_ok() {}
     app.chat_widget
@@ -6513,6 +6572,7 @@ async fn make_test_app() -> Box<App> {
         native_history: Default::default(),
         turn_tips: Default::default(),
         transcript_view: Default::default(),
+        conversation_frame: Default::default(),
         last_rendered_history_tail: None,
         last_thread_usage_status_cell: None,
         pending_thread_usage_history_refresh: false,
@@ -6639,6 +6699,7 @@ pub(super) async fn make_test_app_with_channels() -> (
             native_history: Default::default(),
             turn_tips: Default::default(),
             transcript_view: Default::default(),
+            conversation_frame: Default::default(),
             last_rendered_history_tail: None,
             last_thread_usage_status_cell: None,
             pending_thread_usage_history_refresh: false,

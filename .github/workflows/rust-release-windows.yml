@@ -9,7 +9,7 @@ env:
 jobs:
   build-windows-binaries:
     name: Build Windows binaries - ${{ matrix.runner }} - ${{ matrix.target }} - ${{ matrix.bundle }} - ${{ matrix.build-system }}
-    # Desktop consumers require successful Cargo and Bazel release artifacts.
+    # Release Cargo artifacts only while Bazel releases are disabled.
     runs-on: ${{ matrix.runs_on }}
     environment:
       name: bazel
@@ -29,7 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build-system: [cargo, bazel]
+        build-system: [cargo] # Bazel releases are disabled while the BuildBuddy key is revoked.
         target:
           - x86_64-pc-windows-msvc
           - aarch64-pc-windows-msvc
@@ -252,7 +252,8 @@ jobs:
         env:
           ARCH: ${{ matrix.arch }}
           VOICE_ARCH: ${{ matrix.arch }}
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+          # Use local Bazel while BuildBuddy credentials are unavailable.
+          BUILDBUDDY_API_KEY: ""
         run: |
           (cd codex-rs && cargo update --workspace)
           python .github/scripts/watch_voice_bazel.py "$(cygpath -w "$BASH")" ./.github/scripts/run-bazel-ci.sh \
@@ -321,7 +322,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build-system: [cargo, bazel]
+        build-system: [cargo] # Bazel releases are disabled while the BuildBuddy key is revoked.
         target:
           - aarch64-pc-windows-msvc
           - x86_64-pc-windows-msvc
@@ -385,7 +386,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build-system: [cargo, bazel]
+        build-system: [cargo] # Bazel releases are disabled while the BuildBuddy key is revoked.
         target:
           - x86_64-pc-windows-msvc
           - aarch64-pc-windows-msvc

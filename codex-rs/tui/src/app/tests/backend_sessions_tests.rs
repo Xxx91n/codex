@@ -43,7 +43,10 @@ async fn backend_sessions_parked_request_does_not_hide_disconnect() -> Result<()
         )
     });
     let background_id = background.backend_id();
-    let mut backends = BackendSessions::from_initial(displayed, vec![background]);
+    let displayed_id = displayed.backend_id();
+    let mut backends = BackendSessions::new(displayed);
+    assert_eq!(backends.next_listening_backend(displayed_id), None);
+    backends.insert(background);
     let initial = backends.displayed;
     let thread_id = ThreadId::new();
 
@@ -185,6 +188,13 @@ async fn backend_sessions_poll_three_sources_and_isolate_closed_or_paused_stream
     }
     let mut sessions = sessions.into_iter();
     let mut backends = BackendSessions::from_initial(sessions.next().unwrap(), sessions.collect());
+    assert_eq!(
+        owners
+            .iter()
+            .map(|owner| backends.next_listening_backend(*owner))
+            .collect::<Vec<_>>(),
+        [Some(owners[1]), Some(owners[2]), Some(owners[0])]
+    );
     let mut unpaused = HashSet::new();
     for _ in 0..2 {
         let (owner, event) =
@@ -221,6 +231,8 @@ async fn backend_sessions_poll_three_sources_and_isolate_closed_or_paused_stream
         }
     }
     assert!(!backends.is_listening(owners[0]));
+    assert_eq!(backends.next_listening_backend(owners[2]), Some(owners[1]));
+    assert_eq!(backends.next_listening_backend(owners[0]), Some(owners[1]));
     for index in 1..3 {
         assert!(backends.is_listening(owners[index]));
         let _: ThreadSettingsUpdateResponse = backends

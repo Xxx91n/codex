@@ -571,6 +571,7 @@ pub(crate) struct App {
     native_history: native_history::NativeHistory,
     turn_tips: turn_tips::TurnTips,
     pub(crate) transcript_view: crate::transcript_view::TranscriptView,
+    conversation_frame: owned_transcript::ConversationFrame,
     last_rendered_history_tail: Option<history_ui::RenderedHistoryTail>,
     last_thread_usage_status_cell: Option<history_ui::ThreadUsageStatusHistory>,
     pub(crate) pending_thread_usage_history_refresh: bool,
@@ -1210,12 +1211,7 @@ impl App {
                         self.discard_startup_modal_input(tui)?;
                     }
                     if self.chat_widget.ambient_pet_image_enabled() {
-                        let ambient_pet_area = Rect::new(
-                            /*x*/ 0,
-                            /*y*/ 0,
-                            screen_size.width,
-                            screen_size.height,
-                        );
+                        let ambient_pet_area = self.conversation_area(screen_size.into());
                         if let Err(err) = tui.draw_ambient_pet_image(
                             self.chat_widget
                                 .ambient_pet_draw(ambient_pet_area, rendered_area.bottom()),

@@ -59,7 +59,7 @@ jobs:
   build:
     needs: tag-check
     name: Build - ${{ matrix.runner }} - ${{ matrix.target }} - ${{ matrix.bundle }} - ${{ matrix.build-system }}
-    # Desktop consumers require successful Cargo and Bazel release artifacts.
+    # Release Cargo artifacts only while Bazel releases are disabled.
     runs-on: ${{ matrix.runner }}
     environment:
       name: bazel
@@ -83,7 +83,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build-system: [cargo, bazel]
+        build-system: [cargo] # Bazel releases are disabled while the BuildBuddy key is revoked.
         target:
           - aarch64-apple-darwin
           - x86_64-apple-darwin
@@ -326,7 +326,8 @@ jobs:
         shell: bash
         env:
           APP_TARGET: ${{ matrix.target }}
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+          # Use local Bazel while BuildBuddy credentials are unavailable.
+          BUILDBUDDY_API_KEY: ""
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
@@ -605,7 +606,8 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           PREFIX: ${{ matrix.prefix }}
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+          # Use local Bazel while BuildBuddy credentials are unavailable.
+          BUILDBUDDY_API_KEY: ""
         run: |
           set -euo pipefail
           # Release tags bump Cargo.toml without rewriting the workspace lockfile.
@@ -651,7 +653,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build-system: [cargo, bazel]
+        build-system: [cargo] # Bazel releases are disabled while the BuildBuddy key is revoked.
         target:
           - aarch64-apple-darwin
           - x86_64-apple-darwin
@@ -895,7 +897,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build-system: [cargo, bazel]
+        build-system: [cargo] # Bazel releases are disabled while the BuildBuddy key is revoked.
         target:
           - aarch64-apple-darwin
           - x86_64-apple-darwin
@@ -1183,7 +1185,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build-system: [cargo, bazel]
+        build-system: [cargo] # Bazel releases are disabled while the BuildBuddy key is revoked.
         target:
           - aarch64-apple-darwin
           - x86_64-apple-darwin
@@ -1286,7 +1288,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build-system: [cargo, bazel]
+        build-system: [cargo] # Bazel releases are disabled while the BuildBuddy key is revoked.
         target:
           - aarch64-apple-darwin
           - x86_64-apple-darwin
@@ -1676,7 +1678,7 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
-          pattern: "{{aarch64,x86_64}-{apple-darwin{,-app-server},unknown-linux-musl{,-app-server},pc-windows-msvc}{,-bazel},*-symbols{,-bazel},argument-comment-lint-*,python-runtime-wheel-*,npm-packages}"
+          pattern: "{{aarch64,x86_64}-{apple-darwin{,-app-server},unknown-linux-musl{,-app-server},pc-windows-msvc},*-symbols,argument-comment-lint-*,python-runtime-wheel-*,npm-packages}"
 
       - name: Download verified provisioned macOS packages
         if: vars.CODEX_PROVISIONED_MACOS_CANDIDATE == 'true'

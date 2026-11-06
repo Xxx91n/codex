@@ -118,6 +118,34 @@ impl BackendSessions {
             .collect()
     }
 
+    #[expect(dead_code, reason = "used by the next stack stage")]
+    pub(super) fn displayed_name(&self) -> Option<String> {
+        let slot = self.displayed.0;
+        self.entries[slot].listening.then(|| match slot {
+            0 => "Local".to_string(),
+            index => format!("Backend {}", index + 1),
+        })
+    }
+
+    #[expect(dead_code, reason = "used by the next stack stage")]
+    pub(super) fn first_listening_backend(&self) -> Option<BackendId> {
+        self.entries
+            .iter()
+            .find(|entry| entry.listening)
+            .map(|entry| entry.session.backend_id())
+    }
+
+    /// Cycle through listening connections in registration order, excluding the current one.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by the next stack stage"))]
+    pub(super) fn next_listening_backend(&self, current: BackendId) -> Option<BackendId> {
+        let index = self.slot(current)?.0;
+        self.entries[index + 1..]
+            .iter()
+            .chain(&self.entries[..index])
+            .find(|entry| entry.listening)
+            .map(|entry| entry.session.backend_id())
+    }
+
     pub(super) fn session_at_mut(&mut self, slot: SessionSlot) -> &mut AppServerSession {
         &mut self.entries[slot.0].session
     }
