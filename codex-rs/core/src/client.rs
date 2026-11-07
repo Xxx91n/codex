@@ -2048,7 +2048,6 @@ impl ResponsesHttpExecutor<'_> {
                         inference_trace_attempt,
                         Arc::clone(&self.client.state.provider),
                         interceptors,
-                        /*last_response_tx*/ None,
                         /*preempt_reconciler*/ None,
                     );
                     return Ok(stream);
@@ -2387,14 +2386,12 @@ impl ModelClientSession {
                 );
                 err
             })?;
-            let (last_response_tx, last_response_rx) = oneshot::channel();
-            let stream = map_response_stream(
+            let (stream, last_response_rx) = map_response_stream(
                 stream_result,
                 request_session_telemetry,
                 inference_trace_attempt,
                 Arc::clone(&self.client.state.provider),
                 interceptors,
-                Some(last_response_tx),
                 /*preempt_reconciler*/ None,
             );
             self.websocket_session.last_response_rx = Some(last_response_rx);
@@ -2674,20 +2671,20 @@ fn map_response_stream(
     inference_trace_attempt: InferenceTraceAttempt,
     provider: SharedModelProvider,
     interceptors: Vec<Box<dyn codex_extension_api::ModelResponseInterceptor>>,
-    last_response_tx: Option<oneshot::Sender<LastResponse>>,
     preempt_reconciler: Option<fn(Vec<ResponseItem>) -> Vec<ResponseItem>>,
 ) -> (ResponseStream, oneshot::Receiver<LastResponse>) {
     let routing_affinity = api_stream.routing_affinity.take();
     let upstream_request_id = api_stream.upstream_request_id.take();
     let interrupt = api_stream.interrupt.take();
     let preempt = api_stream.preempt.take();
-    let (mut stream, last_response) = map_response_events(
+    let (last_response_tx, last_response_rx) = oneshot::channel();
+    let mut stream = map_response_events(
         upstream_request_id,
         crate::model_request::intercept_stream(Box::pin(api_stream), interceptors),
         session_telemetry,
         inference_trace_attempt,
         provider,
-        last_response_tx,
+        Some(last_response_tx),
     );
     stream.interrupt = interrupt;
     // The handle only means something paired with the wire's own reconciler; the
@@ -2696,7 +2693,7 @@ fn map_response_stream(
         .zip(preempt_reconciler)
         .map(|(handle, reconcile)| PreemptSeam { handle, reconcile });
     stream.routing_affinity = routing_affinity;
-    (stream, last_response)
+    (stream, last_response_rx)
 }
 
 fn map_response_events<S>(
@@ -2880,16 +2877,13 @@ where
         );
     });
 
-    (
-        ResponseStream {
-            routing_affinity: None,
-            rx_event,
-            interrupt: None,
-            preempt: None,
-            consumer_dropped: consumer_dropped_for_stream,
-        },
-        rx_last_response,
-    )
+    ResponseStream {
+        routing_affinity: None,
+        rx_event,
+        interrupt: None,
+        preempt: None,
+        consumer_dropped: consumer_dropped_for_stream,
+    }
 }
 
 /// Handles a 401 response by optionally refreshing ChatGPT tokens once.
