@@ -61,6 +61,15 @@ jobs:
         with:
           fetch-depth: 0 # full history: the drift-probe diff needs a merge-base
           ref: ${{ inputs.target_ref || github.ref }}
+      # v8 git dep's submodule checkout exceeds Windows MAX_PATH (issue #12):
+      # enable long paths for the runner user and git before any cargo run.
+      - name: Enable Windows long paths (git + registry)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
+          git config --system core.longpaths true
+          git config --global core.longpaths true
       # The seam gate lints with the compiler the repo pins, not the runner's
       # floating stable: new clippy lints land on stable between releases and
       # turned the daily watchdog red on files nobody touched (runs
