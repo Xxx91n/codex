@@ -2340,8 +2340,7 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
         }))
         .await?;
     drop(tx_event);
-    let (last_response_tx, last_response_rx) = tokio::sync::oneshot::channel();
-    let mut stream = super::map_response_stream(
+    let (mut stream, last_response_rx) = super::map_response_stream(
         codex_api::ResponseStream {
             routing_affinity: None,
             rx_event,
@@ -2353,7 +2352,6 @@ async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow:
         attempt,
         test_model_provider(),
         vec![Box::new(ReplaceOutput)],
-        /*last_response_tx*/ Some(last_response_tx),
         /*preempt_reconciler*/ None,
     );
     let mut delivered = Vec::new();
