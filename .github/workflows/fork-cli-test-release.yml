@@ -80,6 +80,28 @@ jobs:
           New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
           git config --system core.longpaths true
           git config --global core.longpaths true
+      # Same chromium.googlesource.com mirror mapping as the build job (issue
+      # #17): macOS runners cannot reach googlesource; map to GitHub mirrors.
+      - name: Mirror chromium.googlesource.com submodules to GitHub (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          git config --global url."https://ghfast.top/https://github.com/gsource-mirror/chromium-src-buildtools".insteadOf "https://chromium.googlesource.com/chromium/src/buildtools.git"
+          git config --global url."https://ghfast.top/https://github.com/mevanlc/chromium-tools-clang".insteadOf "https://chromium.googlesource.com/chromium/src/tools/clang.git"
+          git config --global url."https://ghfast.top/https://github.com/mevanlc/chromium-third_party-jinja2".insteadOf "https://chromium.googlesource.com/chromium/src/third_party/jinja2.git"
+          git config --global url."https://ghfast.top/https://github.com/mevanlc/chromium-third_party-markupsafe".insteadOf "https://chromium.googlesource.com/chromium/src/third_party/markupsafe.git"
+          git config --global url."https://ghfast.top/https://github.com/mevanlc/chromium-third_party-abseil-cpp".insteadOf "https://chromium.googlesource.com/chromium/src/third_party/abseil-cpp.git"
+          git config --global url."https://ghfast.top/https://github.com/mevanlc/chromium-third_party-simdutf".insteadOf "https://chromium.googlesource.com/chromium/src/third_party/simdutf"
+          git config --global url."https://ghfast.top/https://github.com/mevanlc/chromium-third_party-rust".insteadOf "https://chromium.googlesource.com/chromium/src/third_party/rust"
+          git config --global url."https://ghfast.top/https://github.com/mevanlc/chromium-base-allocator-partition_allocator".insteadOf "https://chromium.googlesource.com/chromium/src/base/allocator/partition_allocator.git"
+          git config --global url."https://ghfast.top/https://github.com/mevanlc/chromium-tools-win".insteadOf "https://chromium.googlesource.com/chromium/src/tools/win"
+          git config --global url."https://ghfast.top/https://github.com/jk-jeon/dragonbox".insteadOf "https://chromium.googlesource.com/external/github.com/jk-jeon/dragonbox.git"
+          git config --global url."https://ghfast.top/https://github.com/fastfloat/fast_float".insteadOf "https://chromium.googlesource.com/external/github.com/fastfloat/fast_float.git"
+          git config --global url."https://ghfast.top/https://github.com/google/highway".insteadOf "https://chromium.googlesource.com/external/github.com/google/highway.git"
+          git config --global url."https://ghfast.top/https://github.com/llvm/llvm-project".insteadOf "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libc.git"
+          git config --global url."https://ghfast.top/https://github.com/llvm/llvm-project".insteadOf "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxx.git"
+          git config --global url."https://ghfast.top/https://github.com/llvm/llvm-project".insteadOf "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxxabi.git"
+          git config --global url."https://ghfast.top/https://github.com/llvm/llvm-project".insteadOf "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libunwind.git"
       # Release artifacts compile with the channel the repo pins, the same
       # compiler fork-health's seam job uses, so a published binary can never be
       # built by a toolchain no gate checked (floating stable already broke the
@@ -240,6 +262,30 @@ jobs:
           New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
           git config --system core.longpaths true
           git config --global core.longpaths true
+      # chromium.googlesource.com is deterministically unreachable from macOS
+      # runners (SecureTransport connection resets on every retry; issue #17)
+      # — map its submodule URLs to GitHub mirrors that carry the pinned
+      # commits (same mirror set proven locally). No-op on other runners.
+      - name: Mirror chromium.googlesource.com submodules to GitHub (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          git config --global url."https://ghfast.top/https://github.com/gsource-mirror/chromium-src-buildtools".insteadOf "https://chromium.googlesource.com/chromium/src/buildtools.git"
+          git config --global url."https://ghfast.top/https://github.com/mevanlc/chromium-tools-clang".insteadOf "https://chromium.googlesource.com/chromium/src/tools/clang.git"
+          git config --global url."https://ghfast.top/https://github.com/mevanlc/chromium-third_party-jinja2".insteadOf "https://chromium.googlesource.com/chromium/src/third_party/jinja2.git"
+          git config --global url."https://ghfast.top/https://github.com/mevanlc/chromium-third_party-markupsafe".insteadOf "https://chromium.googlesource.com/chromium/src/third_party/markupsafe.git"
+          git config --global url."https://ghfast.top/https://github.com/mevanlc/chromium-third_party-abseil-cpp".insteadOf "https://chromium.googlesource.com/chromium/src/third_party/abseil-cpp.git"
+          git config --global url."https://ghfast.top/https://github.com/mevanlc/chromium-third_party-simdutf".insteadOf "https://chromium.googlesource.com/chromium/src/third_party/simdutf"
+          git config --global url."https://ghfast.top/https://github.com/mevanlc/chromium-third_party-rust".insteadOf "https://chromium.googlesource.com/chromium/src/third_party/rust"
+          git config --global url."https://ghfast.top/https://github.com/mevanlc/chromium-base-allocator-partition_allocator".insteadOf "https://chromium.googlesource.com/chromium/src/base/allocator/partition_allocator.git"
+          git config --global url."https://ghfast.top/https://github.com/mevanlc/chromium-tools-win".insteadOf "https://chromium.googlesource.com/chromium/src/tools/win"
+          git config --global url."https://ghfast.top/https://github.com/jk-jeon/dragonbox".insteadOf "https://chromium.googlesource.com/external/github.com/jk-jeon/dragonbox.git"
+          git config --global url."https://ghfast.top/https://github.com/fastfloat/fast_float".insteadOf "https://chromium.googlesource.com/external/github.com/fastfloat/fast_float.git"
+          git config --global url."https://ghfast.top/https://github.com/google/highway".insteadOf "https://chromium.googlesource.com/external/github.com/google/highway.git"
+          git config --global url."https://ghfast.top/https://github.com/llvm/llvm-project".insteadOf "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libc.git"
+          git config --global url."https://ghfast.top/https://github.com/llvm/llvm-project".insteadOf "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxx.git"
+          git config --global url."https://ghfast.top/https://github.com/llvm/llvm-project".insteadOf "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxxabi.git"
+          git config --global url."https://ghfast.top/https://github.com/llvm/llvm-project".insteadOf "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libunwind.git"
       # fmt/clippy here must run the same compiler the seam gate and the repo pin
       # name — see the build job for why floating stable was the wrong answer.
       - name: Resolve the repo-pinned toolchain channel
