@@ -99,9 +99,9 @@ jobs:
           git config --global url."https://ghfast.top/https://github.com/fastfloat/fast_float".insteadOf "https://chromium.googlesource.com/external/github.com/fastfloat/fast_float.git"
           git config --global url."https://ghfast.top/https://github.com/google/highway".insteadOf "https://chromium.googlesource.com/external/github.com/google/highway.git"
           git config --global url."https://ghfast.top/https://github.com/llvm/llvm-project".insteadOf "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libc.git"
-          git config --global url."https://ghfast.top/https://github.com/llvm/llvm-project".insteadOf "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxx.git"
-          git config --global url."https://ghfast.top/https://github.com/llvm/llvm-project".insteadOf "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxxabi.git"
-          git config --global url."https://ghfast.top/https://github.com/llvm/llvm-project".insteadOf "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libunwind.git"
+          git config --global url."https://ghfast.top/https://github.com/chromium-full-mirror/external_github.com_llvm_llvm-project_libcxx".insteadOf "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxx.git"
+          git config --global url."https://ghfast.top/https://github.com/chromium-full-mirror/external_github.com_llvm_llvm-project_libcxxabi".insteadOf "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxxabi.git"
+          git config --global url."https://ghfast.top/https://github.com/chromium-full-mirror/external_github.com_llvm_llvm-project_libunwind".insteadOf "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libunwind.git"
       # Release artifacts compile with the channel the repo pins, the same
       # compiler fork-health's seam job uses, so a published binary can never be
       # built by a toolchain no gate checked (floating stable already broke the
@@ -283,9 +283,9 @@ jobs:
           git config --global url."https://ghfast.top/https://github.com/fastfloat/fast_float".insteadOf "https://chromium.googlesource.com/external/github.com/fastfloat/fast_float.git"
           git config --global url."https://ghfast.top/https://github.com/google/highway".insteadOf "https://chromium.googlesource.com/external/github.com/google/highway.git"
           git config --global url."https://ghfast.top/https://github.com/llvm/llvm-project".insteadOf "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libc.git"
-          git config --global url."https://ghfast.top/https://github.com/llvm/llvm-project".insteadOf "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxx.git"
-          git config --global url."https://ghfast.top/https://github.com/llvm/llvm-project".insteadOf "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxxabi.git"
-          git config --global url."https://ghfast.top/https://github.com/llvm/llvm-project".insteadOf "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libunwind.git"
+          git config --global url."https://ghfast.top/https://github.com/chromium-full-mirror/external_github.com_llvm_llvm-project_libcxx".insteadOf "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxx.git"
+          git config --global url."https://ghfast.top/https://github.com/chromium-full-mirror/external_github.com_llvm_llvm-project_libcxxabi".insteadOf "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libcxxabi.git"
+          git config --global url."https://ghfast.top/https://github.com/chromium-full-mirror/external_github.com_llvm_llvm-project_libunwind".insteadOf "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libunwind.git"
       # fmt/clippy here must run the same compiler the seam gate and the repo pin
       # name — see the build job for why floating stable was the wrong answer.
       - name: Resolve the repo-pinned toolchain channel
