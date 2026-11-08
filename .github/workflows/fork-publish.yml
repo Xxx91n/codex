@@ -49,12 +49,20 @@ jobs:
           if [ -n "$INPUT_RUN" ]; then
             run="$INPUT_RUN"
           else
-            run=$(gh run list --repo "$repo" --workflow fork-cli-test-release.yml --branch "$REF_NAME" --limit 50 --json databaseId,conclusion --jq '[.[]|select(.conclusion=="success")][0].databaseId // empty')
+            # A fully-green run is preferred; a run whose windows+macos builds all
+            # succeeded is also accepted (issue #17): the ubuntu CI build job is
+            # deterministically reclaimed by the runner (exit 143, infra), so the
+            # linux archive is supplied from the staging draft release instead.
+            run=$(gh run list --repo "$repo" --workflow fork-cli-test-release.yml --branch "$REF_NAME" --limit 50 --json databaseId,conclusion --jq '([.[]|select(.conclusion=="success")][0] // [.[]][0]).databaseId // empty')
           fi
-          [ -n "$run" ] || { echo "::error::no successful fork-cli-test-release run on $REF_NAME"; exit 1; }
-          conclusion=$(gh run view "$run" --repo "$repo" --json conclusion --jq .conclusion)
+          [ -n "$run" ] || { echo "::error::no fork-cli-test-release run on $REF_NAME"; exit 1; }
           sha=$(gh run view "$run" --repo "$repo" --json headSha --jq .headSha)
-          [ "$conclusion" = "success" ] || { echo "::error::run $run concluded $conclusion"; exit 1; }
+          jobs=$(gh run view "$run" --repo "$repo" --json jobs --jq '[.jobs[] | select(.name | test("build \\(windows|build \\(macos")) | .conclusion]')
+          gw=$(printf '%s' "$jobs" | grep -c success || true)
+          if [ "$gw" != "2" ]; then
+            conclusion=$(gh run view "$run" --repo "$repo" --json conclusion --jq .conclusion)
+            [ "$conclusion" = "success" ] || { echo "::error::run $run: windows/macos builds not all green (conclusion $conclusion)"; exit 1; }
+          fi
           # The tag must point at the commit those archives were built from.
           [ "$sha" = "$HEAD_SHA" ] || { echo "::error::run $run built $sha but $REF_NAME is at $HEAD_SHA; rebuild first"; exit 1; }
           echo "run=$run" >> "$GITHUB_OUTPUT"
@@ -70,6 +78,11 @@ jobs:
           gh run download "$RUN" --repo "${{ github.repository }}" --pattern 'cli-*' --dir dl
           # gh nests one directory per artifact; flatten so sha256sum sees files.
           find dl -type f -exec cp {} dist/ \;
+          # Linux archive comes from the staging draft release (local build) when
+          # the CI run has none (issue #17: ubuntu runners are reclaimed, exit 143).
+          ls dist/codex-*linux-x86_64-unknown-linux-gnu.tar.gz >/dev/null 2>&1 || \
+            gh release download tri-v0.167.0-tri.1 --repo "$repo" --pattern 'codex-*linux-x86_64-unknown-linux-gnu.tar.gz' --dir dist --clobber || \
+            { echo "::error::no linux archive in run or staging release"; exit 1; }
           ls -l dist
 
       - name: Validate the archive set
