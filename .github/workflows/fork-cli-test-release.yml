@@ -88,7 +88,7 @@ jobs:
         run: |
           git config --global url."https://ghfast.top/https://github.com/gsource-mirror/chromium-src-buildtools".insteadOf "https://chromium.googlesource.com/chromium/src/buildtools.git"
           git config --global url."https://ghfast.top/https://github.com/chromium-full-mirror/chromium_src_tools_clang".insteadOf "https://chromium.googlesource.com/chromium/src/tools/clang.git"
-          git config --global url."https://ghfast.top/https://github.com/chromium-full-mirror/chromium_src_third_party_jinja22".insteadOf "https://chromium.googlesource.com/chromium/src/third_party/jinja2.git"
+          git config --global url."https://ghfast.top/https://github.com/chromium-full-mirror/chromium_src_third_party_jinja2".insteadOf "https://chromium.googlesource.com/chromium/src/third_party/jinja2.git"
           git config --global url."https://ghfast.top/https://github.com/chromium-full-mirror/chromium_src_third_party_markupsafe".insteadOf "https://chromium.googlesource.com/chromium/src/third_party/markupsafe.git"
           git config --global url."https://ghfast.top/https://github.com/chromium-full-mirror/chromium_src_third_party_abseil-cpp".insteadOf "https://chromium.googlesource.com/chromium/src/third_party/abseil-cpp.git"
           git config --global url."https://ghfast.top/https://github.com/chromium-full-mirror/chromium_src_third_party_simdutf".insteadOf "https://chromium.googlesource.com/chromium/src/third_party/simdutf"
@@ -272,7 +272,7 @@ jobs:
         run: |
           git config --global url."https://ghfast.top/https://github.com/gsource-mirror/chromium-src-buildtools".insteadOf "https://chromium.googlesource.com/chromium/src/buildtools.git"
           git config --global url."https://ghfast.top/https://github.com/chromium-full-mirror/chromium_src_tools_clang".insteadOf "https://chromium.googlesource.com/chromium/src/tools/clang.git"
-          git config --global url."https://ghfast.top/https://github.com/chromium-full-mirror/chromium_src_third_party_jinja22".insteadOf "https://chromium.googlesource.com/chromium/src/third_party/jinja2.git"
+          git config --global url."https://ghfast.top/https://github.com/chromium-full-mirror/chromium_src_third_party_jinja2".insteadOf "https://chromium.googlesource.com/chromium/src/third_party/jinja2.git"
           git config --global url."https://ghfast.top/https://github.com/chromium-full-mirror/chromium_src_third_party_markupsafe".insteadOf "https://chromium.googlesource.com/chromium/src/third_party/markupsafe.git"
           git config --global url."https://ghfast.top/https://github.com/chromium-full-mirror/chromium_src_third_party_abseil-cpp".insteadOf "https://chromium.googlesource.com/chromium/src/third_party/abseil-cpp.git"
           git config --global url."https://ghfast.top/https://github.com/chromium-full-mirror/chromium_src_third_party_simdutf".insteadOf "https://chromium.googlesource.com/chromium/src/third_party/simdutf"
