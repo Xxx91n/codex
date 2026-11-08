@@ -81,7 +81,7 @@ jobs:
           # Linux archive comes from the staging draft release (local build) when
           # the CI run has none (issue #17: ubuntu runners are reclaimed, exit 143).
           ls dist/codex-*linux-x86_64-unknown-linux-gnu.tar.gz >/dev/null 2>&1 || \
-            gh release download tri-v0.167.0-tri.1 --repo "$repo" --pattern 'codex-*linux-x86_64-unknown-linux-gnu.tar.gz' --dir dist --clobber || \
+            gh release download tri-v0.167.0-tri.1 --repo "${{ github.repository }}" --pattern 'codex-*linux-x86_64-unknown-linux-gnu.tar.gz' --dir dist --clobber || \
             { echo "::error::no linux archive in run or staging release"; exit 1; }
           ls -l dist
 
