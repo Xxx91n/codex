@@ -73,6 +73,12 @@
 | `codex-rs/core/src/client_common.rs` | `ResponseStream` / `PreemptSeam` 保留，上游改动并入 |
 | `codex-rs/core/src/tools/registry.rs` | namespace 限定名回环保留 |
 | `codex-rs/core/src/tools/spec_plan.rs` | tool_search 仅 Responses 的判据保留 |
+| `codex-rs/codex-api/src/lib.rs` | 导出行取并集：`PreemptHandle`（fork）与 `PromptCacheOptions`（上游）同时保留，按字母序 |
+| `codex-rs/core/src/client.rs` | `map_response_stream` 用上游签名（`client: &ModelClientState`，provider / item_id_generator 由 client 派生），保留 fork 的 `(ResponseStream, Receiver<LastResponse>)` 返回与 preempt 装配；冲突调用写 `client, Some(last_response_tx)` |
+| `codex-rs/model-provider/src/models_endpoint.rs` | 取上游拆分 `#[path = "models_endpoint_tests.rs"] mod tests;`，删除 fork 内联副本；fork 的 3 个 anthropic 字段并入 `models_endpoint_tests.rs::provider_info_with_command_auth` |
+| `codex-rs/model-provider/src/provider.rs` | 保留 fork 的 `RemoteCompactionSupport` 导入与 `capabilities()` 非 Responses 降级；`models_manager_with_cache` 取上游 `ModelCatalogSettings::with_cache`；测试取上游 `provider_tests.rs` 拆分，fork 的 5 处 anthropic 字段与 `capabilities_remote_compaction_follows_wire_api` 迁入该文件 |
+| `codex-rs/otel/src/metrics/names.rs` | 常量取并集：保留 `STOP_REASON_*`，并入上游 websocket / critical-path 常量 |
+| `codex-rs/state/src/sqlite.rs` | 迁移执行用上游 `retry_on_busy` + 单事务 `run_direct` 包装；`MigrateError::VersionMismatch` 时先回滚，再走 fork 的 drift 检测 / `repair_eol_checksum_family`，然后重跑同一包装一次；fork 的 maintained-family 收尾块保留 |
 
 白名单是活表：新增冲突文件必须经人确认后入表，不得由执行者自行判断。
 
