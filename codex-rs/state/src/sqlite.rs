@@ -494,9 +494,7 @@ impl SqliteConfig {
                             );
                             Err(anyhow::anyhow!(drift.guidance()))
                         }
-                        None => {
-                            anyhow::bail!("checksum family mismatch persisted after retry")
-                        }
+                        None => Err(anyhow::Error::from(result.unwrap_err())),
                     };
                 }
                 // Ticket 31 explicit opt-in (crlf/lf): when every applied

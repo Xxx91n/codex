@@ -742,3 +742,20 @@ impl ModelProvider for ConfiguredModelProvider {
 #[cfg(test)]
 #[path = "provider_tests.rs"]
 mod tests;
+
+pub(crate) mod test_support {
+    use super::*;
+
+    /// Use an injected runtime with a local transport fixture. Production callers use the
+    /// destination-aware `ProviderAuthContext::model_provider` factory.
+    pub fn runtime_model_provider(
+        info: ModelProviderInfo,
+        credentials: Arc<AuthManager>,
+        runtime: (Arc<RuntimeAuthManager>, RuntimeAuthMode),
+    ) -> SharedModelProvider {
+        let mut provider =
+            ConfiguredModelProvider::new(info, Some(credentials), Some(runtime.clone()));
+        provider.runtime_auth = Some(runtime);
+        Arc::new(provider)
+    }
+}

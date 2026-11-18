@@ -2676,10 +2676,10 @@ fn build_messages_request_emits_thinking_and_cache_control_when_configured() {
     provider.anthropic_thinking_budget = Some(8_192);
     provider.anthropic_prompt_caching = Some(true);
     let client = ModelClient::new(
-        None,
+        codex_model_provider::create_model_provider(provider, /*auth_manager*/ None),
         AgentIdentityAuthPolicy::JwtOnly,
         ThreadId::new(),
-        provider,
+        uuid_v7_item_id_generator_for_test(),
         SessionSource::Cli,
         "test_originator".to_string(),
         None,
@@ -2730,10 +2730,10 @@ fn build_messages_request_clamps_thinking_budget_below_max_tokens() {
     provider.anthropic_max_tokens = Some(4_096);
     provider.anthropic_thinking_budget = Some(100_000);
     let client = ModelClient::new(
-        None,
+        codex_model_provider::create_model_provider(provider, /*auth_manager*/ None),
         AgentIdentityAuthPolicy::JwtOnly,
         ThreadId::new(),
-        provider,
+        uuid_v7_item_id_generator_for_test(),
         SessionSource::Cli,
         "test_originator".to_string(),
         None,
@@ -2772,10 +2772,10 @@ fn build_messages_request_metadata_max_tokens_relaxes_thinking_clamp() {
     provider.anthropic_max_tokens = None;
     provider.anthropic_thinking_budget = Some(100_000);
     let client = ModelClient::new(
-        None,
+        codex_model_provider::create_model_provider(provider, /*auth_manager*/ None),
         AgentIdentityAuthPolicy::JwtOnly,
         ThreadId::new(),
-        provider,
+        uuid_v7_item_id_generator_for_test(),
         SessionSource::Cli,
         "test_originator".to_string(),
         None,
@@ -2813,10 +2813,10 @@ fn build_messages_request_metadata_max_tokens_relaxes_thinking_clamp() {
     provider.anthropic_max_tokens = None;
     provider.anthropic_thinking_budget = Some(100_000);
     let client = ModelClient::new(
-        None,
+        codex_model_provider::create_model_provider(provider, /*auth_manager*/ None),
         AgentIdentityAuthPolicy::JwtOnly,
         ThreadId::new(),
-        provider,
+        uuid_v7_item_id_generator_for_test(),
         SessionSource::Cli,
         "test_originator".to_string(),
         None,
@@ -2899,10 +2899,10 @@ fn build_messages_request_session_effort_buckets_to_budget_tokens() {
     provider.anthropic_max_tokens = Some(128_000);
     provider.anthropic_thinking_budget = Some(8_192);
     let client = ModelClient::new(
-        None,
+        codex_model_provider::create_model_provider(provider, /*auth_manager*/ None),
         AgentIdentityAuthPolicy::JwtOnly,
         ThreadId::new(),
-        provider,
+        uuid_v7_item_id_generator_for_test(),
         SessionSource::Cli,
         "test_originator".to_string(),
         None,
@@ -2946,10 +2946,10 @@ fn build_messages_request_adaptive_mode_maps_effort_to_output_config() {
         create_oss_provider_with_base_url("https://example.com/v1", WireApi::Anthropic);
     provider.anthropic_adaptive_thinking = true;
     let client = ModelClient::new(
-        None,
+        codex_model_provider::create_model_provider(provider, /*auth_manager*/ None),
         AgentIdentityAuthPolicy::JwtOnly,
         ThreadId::new(),
-        provider,
+        uuid_v7_item_id_generator_for_test(),
         SessionSource::Cli,
         "test_originator".to_string(),
         None,
@@ -3251,10 +3251,10 @@ fn thinking_replay_client(base_url: &str, adaptive: bool) -> ModelClient {
     provider.anthropic_thinking_budget = Some(4_096);
     provider.anthropic_adaptive_thinking = adaptive;
     ModelClient::new(
-        None,
+        codex_model_provider::create_model_provider(provider, /*auth_manager*/ None),
         AgentIdentityAuthPolicy::JwtOnly,
         ThreadId::new(),
-        provider,
+        uuid_v7_item_id_generator_for_test(),
         SessionSource::Cli,
         "test_originator".to_string(),
         None,

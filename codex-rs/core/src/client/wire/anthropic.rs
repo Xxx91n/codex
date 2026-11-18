@@ -2,8 +2,6 @@
 //! dispatch for `WireApi::Anthropic` providers (goose-blueprint in-process
 //! transport).
 
-use std::sync::Arc;
-
 use codex_api::ApiError;
 use codex_api::MessagesClient as ApiMessagesClient;
 use codex_api::MessagesOptions as ApiMessagesOptions;
@@ -164,7 +162,7 @@ impl ModelClientSession {
                 .client
                 .current_client_setup(ClientRouting::Workspace)
                 .await?;
-            let transport = client_setup.build_api_transport(ANTHROPIC_MESSAGES_ENDPOINT)?;
+            let transport = client_setup.http_transport(ANTHROPIC_MESSAGES_ENDPOINT)?;
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
@@ -222,7 +220,7 @@ impl ModelClientSession {
                         stream,
                         session_telemetry.clone(),
                         inference_trace_attempt,
-                        Arc::clone(&self.client.state.provider),
+                        &self.client.state,
                         interceptors,
                         Some(reconcile_preempted),
                     );

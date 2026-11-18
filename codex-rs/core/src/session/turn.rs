@@ -3125,6 +3125,7 @@ async fn try_run_sampling_request(
                     .await;
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
+                        mailbox_preempted: false,
                         last_agent_message,
                     });
                 }

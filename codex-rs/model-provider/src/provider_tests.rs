@@ -89,6 +89,10 @@ fn provider_for(base_url: String) -> ModelProviderInfo {
         location: None,
         credential_file: None,
         include_internal_metadata: false,
+        anthropic_max_tokens: None,
+        anthropic_thinking_budget: None,
+        anthropic_adaptive_thinking: false,
+        anthropic_prompt_caching: None,
     }
 }
 

@@ -88,6 +88,7 @@ mod tests {
             default_service_tier: None,
             availability_nux: None,
             upgrade: None,
+            web_search_provider: None,
             model_messages: None,
             include_skills_usage_instructions: false,
             include_plugin_usage_instructions: false,

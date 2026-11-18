@@ -1,8 +1,6 @@
 //! Chat Completions wire (fork addition): request building and streaming
 //! dispatch for `WireApi::Chat` providers, adapted from PR #12234.
 
-use std::sync::Arc;
-
 use codex_api::ApiError;
 use codex_api::ChatCompletionsClient as ApiChatCompletionsClient;
 use codex_api::ChatCompletionsOptions as ApiChatCompletionsOptions;
@@ -62,7 +60,7 @@ impl ModelClientSession {
                 .client
                 .current_client_setup(ClientRouting::Workspace)
                 .await?;
-            let transport = client_setup.build_api_transport(CHAT_COMPLETIONS_ENDPOINT)?;
+            let transport = client_setup.http_transport(CHAT_COMPLETIONS_ENDPOINT)?;
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
@@ -118,7 +116,7 @@ impl ModelClientSession {
                         stream,
                         session_telemetry.clone(),
                         inference_trace_attempt,
-                        Arc::clone(&self.client.state.provider),
+                        &self.client.state,
                         interceptors,
                         Some(reconcile_preempted),
                     );
