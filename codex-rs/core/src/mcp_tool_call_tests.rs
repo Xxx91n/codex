@@ -107,6 +107,13 @@ fn approval_config(turn_context: &TurnContext) -> codex_mcp::McpConfig {
     (*mcp_config_for_test(&turn_context.config)).clone()
 }
 
+fn thread_permission_source(turn_context: &TurnContext) -> McpPermissionSource<'_> {
+    McpPermissionSource::Thread {
+        profile: turn_context.config.permissions.permission_profile(),
+        host_cwd: &turn_context.config.cwd,
+    }
+}
+
 #[test_case::test_case(false, None, Ok(Some("default_link")); "catalog_account")]
 #[test_case::test_case(true, None, Err(McpToolAccountError::InvalidSelector); "required_selector_omitted")]
 #[test_case::test_case(true, Some(serde_json::json!(null)), Err(McpToolAccountError::InvalidSelector); "null_selector")]
@@ -1366,7 +1373,7 @@ async fn mcp_sandbox_cwd_uses_matching_server_environment_uri() -> anyhow::Resul
         .initial_environments
         .primary()
         .expect("primary environment")
-        .environment
+        .environment()
         .clone();
     turn_context
         .initial_environments
@@ -2054,6 +2061,7 @@ fn guardian_mcp_review_request_includes_invocation_metadata() {
             tool_title: Some("Navigate".to_string()),
             tool_description: Some("Open a page".to_string()),
             annotations: None,
+            prompt_permissions: None,
         }
     );
 }
@@ -2101,6 +2109,7 @@ fn guardian_mcp_review_request_includes_annotations_when_present() {
                 open_world_hint: Some(true),
                 read_only_hint: Some(false),
             }),
+            prompt_permissions: None,
         }
     );
 }
@@ -2135,6 +2144,7 @@ fn guardian_mcp_review_request_ignores_untrusted_connected_account_email() {
             tool_title: None,
             tool_description: None,
             annotations: None,
+            prompt_permissions: None,
         }
     );
 }
@@ -2372,6 +2382,7 @@ async fn dispatched_mcp_approval_with_closed_response_is_classified_as_approval(
         approval_mode: AppToolApproval::Auto,
         allow_session_remember: true,
         allow_persistent_approval: true,
+        prompt_permissions: None,
     };
     let approval = tokio::spawn({
         let session = Arc::clone(&session);
@@ -2906,7 +2917,7 @@ async fn approve_mode_skips_when_annotations_do_not_require_approval() {
         &HookToolName::new("mcp__test__tool"),
         &metadata,
         &approval_config(&turn_context),
-        turn_context.config.permissions.permission_profile(),
+        thread_permission_source(&turn_context),
         test_environment_id(&turn_context),
         McpToolApprovalPolicy::for_server(AppToolApproval::Approve),
     )
@@ -2989,7 +3000,7 @@ async fn guardian_mode_skips_auto_when_annotations_do_not_require_approval() {
         &HookToolName::new("mcp__test__tool"),
         &metadata,
         &approval_config(&turn_context),
-        turn_context.config.permissions.permission_profile(),
+        thread_permission_source(&turn_context),
         test_environment_id(&turn_context),
         McpToolApprovalPolicy::for_server(AppToolApproval::Auto),
     )
@@ -3054,7 +3065,7 @@ async fn permission_request_hook_allows_mcp_tool_call() {
         &HookToolName::new("mcp__memory__create_entities"),
         &metadata,
         &approval_config(&turn_context),
-        turn_context.config.permissions.permission_profile(),
+        thread_permission_source(&turn_context),
         test_environment_id(&turn_context),
         McpToolApprovalPolicy::for_server(AppToolApproval::Auto),
     )
@@ -3133,7 +3144,7 @@ async fn permission_request_hook_uses_hook_tool_name_without_metadata() {
         &HookToolName::new("mcp__memory__create_entities"),
         &metadata,
         &approval_config(&turn_context),
-        turn_context.config.permissions.permission_profile(),
+        thread_permission_source(&turn_context),
         test_environment_id(&turn_context),
         McpToolApprovalPolicy::for_server(AppToolApproval::Auto),
     )
@@ -3228,7 +3239,7 @@ async fn permission_request_hook_runs_after_remembered_mcp_approval() {
         &HookToolName::new("mcp__memory__create_entities"),
         &metadata,
         &approval_config(&turn_context),
-        turn_context.config.permissions.permission_profile(),
+        thread_permission_source(&turn_context),
         test_environment_id(&turn_context),
         McpToolApprovalPolicy::for_server(AppToolApproval::Auto),
     )
@@ -3336,7 +3347,10 @@ async fn strict_auto_review_forces_guardian_for_mcp_policy_skip() {
         &HookToolName::new("mcp__test__tool"),
         &metadata,
         &captured_mcp_config,
-        &captured_mcp_config.permission_profile,
+        McpPermissionSource::Thread {
+            profile: &captured_mcp_config.permission_profile,
+            host_cwd: &captured_mcp_config.host_cwd,
+        },
         test_environment_id(&turn_context),
         McpToolApprovalPolicy::for_server(AppToolApproval::Approve),
     )
@@ -3421,7 +3435,7 @@ async fn assert_mcp_user_approval_persistence(
                 &HookToolName::new("mcp__memory__create_entities"),
                 &metadata,
                 &approval_config(&turn_context),
-                turn_context.config.permissions.permission_profile(),
+                thread_permission_source(&turn_context),
                 test_environment_id(&turn_context),
                 McpToolApprovalPolicy::for_server(AppToolApproval::Auto),
             )
@@ -3513,7 +3527,7 @@ async fn prompt_mode_waits_for_approval_when_annotations_do_not_require_approval
                 &HookToolName::new("mcp__test__tool"),
                 &metadata,
                 &approval_config(&turn_context),
-                turn_context.config.permissions.permission_profile(),
+                thread_permission_source(&turn_context),
                 test_environment_id(&turn_context),
                 McpToolApprovalPolicy::for_server(AppToolApproval::Prompt),
             )
@@ -3581,7 +3595,7 @@ async fn full_access_mode_skips_mcp_tool_approval_for_all_approval_modes() {
             &HookToolName::new("mcp__test__tool"),
             &metadata,
             &approval_config(&turn_context),
-            turn_context.config.permissions.permission_profile(),
+            thread_permission_source(&turn_context),
             test_environment_id(&turn_context),
             McpToolApprovalPolicy::for_server(approval_mode),
         )
@@ -3677,7 +3691,7 @@ async fn approve_mode_skips_guardian_in_every_permission_mode() {
             &HookToolName::new("mcp__test__tool"),
             &metadata,
             &approval_config(&turn_context),
-            turn_context.config.permissions.permission_profile(),
+            thread_permission_source(&turn_context),
             test_environment_id(&turn_context),
             McpToolApprovalPolicy::for_server(AppToolApproval::Approve),
         )
@@ -3709,6 +3723,7 @@ async fn approval_metadata_is_released_when_the_invocation_future_is_dropped() {
             &invocation,
             metadata.clone(),
             review_context.clone(),
+            /*environment_permissions*/ None,
         );
         std::future::pending::<()>().await;
     });
@@ -3718,6 +3733,7 @@ async fn approval_metadata_is_released_when_the_invocation_future_is_dropped() {
         &invocation,
         metadata.clone(),
         review_context.clone(),
+        /*environment_permissions*/ None,
     );
     assert_eq!(
         session
@@ -3741,6 +3757,7 @@ async fn approval_metadata_is_released_when_the_invocation_future_is_dropped() {
         &invocation,
         metadata,
         review_context,
+        /*environment_permissions*/ None,
     );
     let registry = session.mcp_tool_approval_metadata.lock().unwrap();
     let mut keys = registry.keys().cloned().collect::<Vec<_>>();

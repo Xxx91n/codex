@@ -1009,6 +1009,13 @@ pub struct InternalChatMessageMetadataPassthrough {
     #[schemars(skip)]
     #[ts(skip)]
     pub create_time: Option<serde_json::Number>,
+    /// Native content-token count for this sampled message, including its sampled footer.
+    /// Read from the producer only; do not replay telemetry into subsequent model requests.
+    #[serde_as(deserialize_as = "serde_with::DefaultOnError")]
+    #[serde(default, skip_serializing)]
+    #[schemars(skip)]
+    #[ts(skip)]
+    pub content_token_count: Option<u64>,
     /// Harness-owned classifications aligned with the item's content entries.
     #[serde_as(deserialize_as = "serde_with::DefaultOnError")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1897,6 +1904,28 @@ pub fn is_audio_open_tag_text(text: &str) -> bool {
 
 pub fn is_audio_close_tag_text(text: &str) -> bool {
     text == AUDIO_CLOSE_TAG
+}
+
+/// Whether this text opens a harness label for the adjacent media part.
+pub fn is_opening_media_label(text: &str, media: &ContentItem) -> bool {
+    match media {
+        ContentItem::InputImage { .. } => {
+            is_local_image_open_tag_text(text) || is_image_open_tag_text(text)
+        }
+        ContentItem::InputAudio { .. } => {
+            is_local_audio_open_tag_text(text) || is_audio_open_tag_text(text)
+        }
+        ContentItem::InputText { .. } | ContentItem::OutputText { .. } => false,
+    }
+}
+
+/// Whether this text closes a harness label for the adjacent media part.
+pub fn is_closing_media_label(text: &str, media: &ContentItem) -> bool {
+    match media {
+        ContentItem::InputImage { .. } => is_image_close_tag_text(text),
+        ContentItem::InputAudio { .. } => is_audio_close_tag_text(text),
+        ContentItem::InputText { .. } | ContentItem::OutputText { .. } => false,
+    }
 }
 
 fn invalid_image_error_placeholder(

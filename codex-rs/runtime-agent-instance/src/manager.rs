@@ -9,6 +9,7 @@ use crate::RuntimeAuth;
 use crate::RuntimeRegistration;
 use crate::RuntimeRegistrationClient;
 use crate::RuntimeRegistrationMetadata;
+use codex_agent_identity::ChatGptEnvironment;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::NetworkPolicyDenied;
 use codex_login::AuthChangeState;
@@ -23,10 +24,50 @@ use url::Url;
 /// Owned alongside an AuthManager, not created for every thread or request.
 pub struct RuntimeAuthManager {
     credentials: Arc<AuthManager>,
-    host: AgentHostAuthorization,
+    registration: RegistrationTarget,
     metadata: RuntimeRegistrationMetadata,
-    registration_url: Url,
     state: Mutex<Option<CachedRuntime>>,
+}
+
+enum RegistrationTarget {
+    Explicit {
+        host: AgentHostAuthorization,
+        url: Url,
+    },
+    ChatGpt {
+        installation_id: String,
+        base_url: String,
+    },
+}
+
+impl RegistrationTarget {
+    fn host(&self) -> Result<AgentHostAuthorization, RegistrationError> {
+        match self {
+            Self::Explicit { host, .. } => Ok(host.clone()),
+            Self::ChatGpt {
+                installation_id, ..
+            } => Ok(AgentHostAuthorization::InstallationId {
+                installation_id: installation_id
+                    .parse()
+                    .map_err(|_| RegistrationError::InvalidRequest)?,
+            }),
+        }
+    }
+
+    fn url(&self) -> Result<Url, RegistrationError> {
+        match self {
+            Self::Explicit { url, .. } => Ok(url.clone()),
+            Self::ChatGpt { base_url, .. } => {
+                let url = match ChatGptEnvironment::from_chatgpt_base_url(base_url)
+                    .map_err(|_| RegistrationError::InvalidEndpoint)?
+                {
+                    ChatGptEnvironment::Production => crate::DEFAULT_REGISTRATION_URL,
+                    ChatGptEnvironment::Staging => "https://auth.api.openai.org/agent/register",
+                };
+                url.parse().map_err(|_| RegistrationError::InvalidEndpoint)
+            }
+        }
+    }
 }
 
 struct CachedRuntime {
@@ -61,9 +102,29 @@ impl RuntimeAuthManager {
     ) -> Self {
         Self {
             credentials,
-            host,
+            registration: RegistrationTarget::Explicit {
+                host,
+                url: registration_url,
+            },
             metadata,
-            registration_url,
+            state: Mutex::new(None),
+        }
+    }
+
+    /// Resolve the ChatGPT registration origin only when a first-party request needs a runtime.
+    pub fn for_chatgpt(
+        credentials: Arc<AuthManager>,
+        installation_id: String,
+        base_url: String,
+        metadata: RuntimeRegistrationMetadata,
+    ) -> Self {
+        Self {
+            credentials,
+            registration: RegistrationTarget::ChatGpt {
+                installation_id,
+                base_url,
+            },
+            metadata,
             state: Mutex::new(None),
         }
     }
@@ -74,16 +135,25 @@ impl RuntimeAuthManager {
     }
 
     /// Select auth and a runtime for the requested organization and project.
-    #[expect(
-        clippy::await_holding_invalid_type,
-        reason = "runtime initialization serializes registration and refresh for one credential source"
-    )]
     pub async fn auth_with_selection(
         &self,
         selection: &PlatformResourceSelection,
     ) -> Result<RuntimeAuth, RuntimeAuthError> {
+        self.select_auth(selection, /*expected_source*/ None).await
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "runtime initialization serializes registration and refresh for one credential source"
+    )]
+    async fn select_auth(
+        &self,
+        selection: &PlatformResourceSelection,
+        expected_source: Option<u64>,
+    ) -> Result<RuntimeAuth, RuntimeAuthError> {
         // This initializer's lock can span IO. No AuthManager lock is held across registration.
         let mut state = self.state.lock().await;
+        self.check_source(expected_source)?;
         let (auth, http_client_factory) = self
             .credentials
             .auth_with_http_client_factory()
@@ -91,7 +161,13 @@ impl RuntimeAuthManager {
             .ok_or(RuntimeAuthError::Unavailable)?;
         let mut recovery = self.credentials.unauthorized_recovery();
         let mut result = self
-            .auth_once(&mut state, auth, http_client_factory, selection)
+            .auth_once(
+                &mut state,
+                auth,
+                http_client_factory,
+                selection,
+                expected_source,
+            )
             .await;
         while matches!(
             &result,
@@ -103,6 +179,7 @@ impl RuntimeAuthManager {
             ))
         ) && recovery.has_next()
         {
+            self.check_source(expected_source)?;
             recovery.next().await.map_err(|error| match error {
                 RefreshTokenError::Policy(denied) => RuntimeAuthError::Policy(denied),
                 RefreshTokenError::Permanent(_) | RefreshTokenError::Transient(_) => {
@@ -115,7 +192,13 @@ impl RuntimeAuthManager {
                 .await
                 .ok_or(RuntimeAuthError::Unavailable)?;
             result = self
-                .auth_once(&mut state, auth, http_client_factory, selection)
+                .auth_once(
+                    &mut state,
+                    auth,
+                    http_client_factory,
+                    selection,
+                    expected_source,
+                )
                 .await;
         }
         result
@@ -127,10 +210,12 @@ impl RuntimeAuthManager {
         auth: CodexAuth,
         http_client_factory: HttpClientFactory,
         selection: &PlatformResourceSelection,
+        expected_source: Option<u64>,
     ) -> Result<RuntimeAuth, RuntimeAuthError> {
         let actor_auth = actor_authorization(&auth, selection)?;
         let http_client_factory = http_client_factory.with_sensitive_header_protection();
         let change_state = self.auth_state(&auth)?;
+        self.check_source(expected_source)?;
         // Registered runtimes can serve different projects. Pending and denied
         // registrations retain their original scope and idempotency key.
         if state.as_ref().is_some_and(|cached| {
@@ -149,7 +234,7 @@ impl RuntimeAuthManager {
                 state: RuntimeState::Pending {
                     registration: RuntimeRegistration::new(
                         actor_auth.clone(),
-                        self.host.clone(),
+                        self.registration.host()?,
                         self.metadata.clone(),
                     )
                     .map_err(|_| RuntimeAuthError::KeyGeneration)?,
@@ -172,10 +257,8 @@ impl RuntimeAuthManager {
                 registration
             }
         };
-        let client = RuntimeRegistrationClient::new(
-            http_client_factory.clone(),
-            self.registration_url.clone(),
-        )?;
+        let client =
+            RuntimeRegistrationClient::new(http_client_factory.clone(), self.registration.url()?)?;
         let result = client.register(registration).await;
         if self.auth_state(&auth)?.source_generation != change_state.source_generation {
             // A late response must not publish an old identity after a credential switch.
@@ -208,6 +291,45 @@ impl RuntimeAuthManager {
             }
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// Resolve auth for work whose routing, cache key, or payload uses a captured credential.
+    /// A same-source refresh is allowed; a different source must not take over that work.
+    /// This binds credential identity, not when the caller captured it. Restoring the exact
+    /// same credential can select a new runtime after logout; a different source cannot.
+    pub async fn auth_for(
+        &self,
+        expected: &CodexAuth,
+        selection: &PlatformResourceSelection,
+    ) -> Result<RuntimeAuth, RuntimeAuthError> {
+        let source = self
+            .credentials
+            .auth_change_state_for(expected)
+            .ok_or(RuntimeAuthError::Changed)?;
+        self.auth_for_source(source.source_generation, selection)
+            .await
+    }
+
+    /// Select another request within a reusable client's original credential source.
+    pub async fn auth_for_source(
+        &self,
+        source_generation: u64,
+        selection: &PlatformResourceSelection,
+    ) -> Result<RuntimeAuth, RuntimeAuthError> {
+        self.select_auth(selection, Some(source_generation)).await
+    }
+
+    fn check_source(&self, expected: Option<u64>) -> Result<(), RuntimeAuthError> {
+        if expected.is_some_and(|expected| {
+            self.credentials
+                .auth_change_state_receiver()
+                .borrow()
+                .source_generation
+                != expected
+        }) {
+            return Err(RuntimeAuthError::Changed);
+        }
+        Ok(())
     }
 
     fn auth_state(&self, auth: &CodexAuth) -> Result<AuthChangeState, RuntimeAuthError> {

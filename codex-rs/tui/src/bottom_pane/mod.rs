@@ -29,6 +29,8 @@ pub(crate) use footer::inset_footer_hint_area;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
+use crate::activation_key_guard::ActivationKeyGuard;
+use crate::activation_key_guard::ActivationKeySuppression;
 use crate::app::app_server_requests::ResolvedAppServerRequest;
 use crate::app_event::AppEvent;
 use crate::app_event::ConnectorsSnapshot;
@@ -272,6 +274,7 @@ pub(crate) use chat_composer::InputResult;
 pub(crate) use chat_composer::KillBufferSnapshot;
 pub(crate) use chat_composer::QueuedInputAction;
 pub(crate) use chat_composer::RestrictedInputMode;
+pub(crate) use chat_composer::ShellPrefixHandling;
 pub(crate) use chat_composer_history::HistoryEntry;
 
 use crate::status_indicator_widget::StatusDetailsCapitalization;
@@ -566,6 +569,10 @@ impl BottomPane {
     /// Slash recall records the submitted command text regardless of whether the command succeeds.
     pub(crate) fn record_pending_slash_command_history(&mut self) {
         self.composer.record_pending_slash_command_history();
+    }
+
+    pub(super) fn keymap(&self) -> &RuntimeKeymap {
+        &self.keymap
     }
 
     /// Replace all bottom-pane keymap caches from one resolved runtime keymap.
@@ -944,21 +951,19 @@ impl BottomPane {
                 let view = &mut self.view_stack[last_index];
                 let prefer_esc =
                     key_event.code == KeyCode::Esc && view.prefer_esc_to_handle_key_event();
-                let ctrl_c_completed = key_event.code == KeyCode::Esc
+                let cancel_handled = key_event.code == KeyCode::Esc
                     && !prefer_esc
-                    && matches!(view.on_ctrl_c(), CancellationEvent::Handled)
-                    && view.is_complete();
-                if ctrl_c_completed {
-                    (true, true, view.completion(), false)
-                } else {
+                    && matches!(view.on_ctrl_c(), CancellationEvent::Handled);
+                if !cancel_handled {
                     view.handle_key_event_with_activation_key(key_event, activation_key);
-                    (
-                        false,
-                        view.is_complete(),
-                        view.completion(),
-                        view.is_in_paste_burst(),
-                    )
                 }
+                let complete = view.is_complete();
+                (
+                    cancel_handled && complete,
+                    complete,
+                    view.completion(),
+                    view.is_in_paste_burst(),
+                )
             };
 
             if ctrl_c_completed {
@@ -1185,13 +1190,15 @@ impl BottomPane {
         text_elements: Vec<TextElement>,
         local_image_paths: Vec<PathBuf>,
         mention_bindings: Vec<MentionBinding>,
+        shell_prefix: ShellPrefixHandling,
     ) {
         self.composer.edit_stored_draft(|composer| {
-            composer.set_text_content_with_mention_bindings(
+            composer.set_text_content_with_shell_prefix(
                 text,
                 text_elements,
                 local_image_paths,
                 mention_bindings,
+                shell_prefix,
             );
             composer.move_cursor_to_end();
         });
@@ -1378,7 +1385,6 @@ impl BottomPane {
         self.status_widget().is_some()
     }
 
-    #[cfg(test)]
     pub(crate) fn status_line_content(&self) -> Option<&footer_content::FooterContent> {
         self.composer.status_line_content()
     }
@@ -1444,23 +1450,24 @@ impl BottomPane {
 
     pub(crate) fn ensure_status_indicator(&mut self) {
         if self.status.is_none() {
-            self.status.get_or_insert_with(|| {
-                StatusIndicatorWidget::new(
-                    self.app_event_tx.clone(),
-                    self.frame_requester.clone(),
-                    self.animations_enabled,
-                    self.effects,
-                )
-            });
-            if let Some(status) = self.status.as_mut() {
-                status.set_interrupt_binding(
-                    self.keymap
-                        .primary_hint(KeymapContext::Chat, "interrupt_turn"),
-                );
-            }
+            self.status = Some(self.new_status_indicator());
             self.sync_status_inline_message();
             self.request_redraw();
         }
+    }
+
+    pub(crate) fn new_status_indicator(&self) -> StatusIndicatorWidget {
+        let mut status = StatusIndicatorWidget::new(
+            self.app_event_tx.clone(),
+            self.frame_requester.clone(),
+            self.animations_enabled,
+            self.effects,
+        );
+        status.set_interrupt_binding(
+            self.keymap
+                .primary_hint(KeymapContext::Chat, "interrupt_turn"),
+        );
+        status
     }
 
     pub(crate) fn set_interrupt_hint_visible(&mut self, visible: bool) {
@@ -2021,13 +2028,15 @@ impl BottomPane {
         &mut self,
         key: KeyBinding,
         activated_at: Instant,
+        suppression: ActivationKeySuppression,
     ) {
-        self.view_transition_key_guard =
-            Some(crate::activation_key_guard::ActivationKeyGuard::new_at(
-                key,
-                activated_at,
-                self.enhanced_keys_supported,
-            ));
+        let reported_repeats_only = self.enhanced_keys_supported
+            || matches!(suppression, ActivationKeySuppression::ReportedRepeats);
+        self.view_transition_key_guard = Some(ActivationKeyGuard::new_at(
+            key,
+            activated_at,
+            reported_repeats_only,
+        ));
     }
 
     pub(crate) fn consume_view_transition_key_event(&mut self, key_event: KeyEvent) -> bool {
@@ -2965,7 +2974,11 @@ mod tests {
         let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
         let mut pane = test_pane(AppEventSender::new(tx_raw));
         let activation_key = crate::key_hint::plain(KeyCode::Enter);
-        pane.suppress_current_view_key_until_release(activation_key, Instant::now());
+        pane.suppress_current_view_key_until_release(
+            activation_key,
+            Instant::now(),
+            ActivationKeySuppression::ViewTransition,
+        );
         pane.push_view(Box::new(DismissibleView::default()));
 
         assert!(pane.consume_view_transition_key(activation_key, KeyEventKind::Repeat));

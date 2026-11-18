@@ -329,7 +329,7 @@ impl McpRuntime {
         &self,
         thread_id: ThreadId,
         call_id: &str,
-        uri: &str,
+        params: ReadResourceRequestParams,
     ) -> anyhow::Result<ReadResourceResult> {
         let origin = self
             .resource_origins
@@ -341,7 +341,7 @@ impl McpRuntime {
             .await
             .ok_or_else(|| anyhow::anyhow!("codex_apps MCP server is unavailable"))?;
 
-        origin.read(&binding, thread_id, uri).await
+        origin.read(&binding, thread_id, params).await
     }
 
     pub async fn new(input: McpRuntimeInput) -> Self {
@@ -764,6 +764,24 @@ impl McpRuntime {
             .await
     }
 
+    pub async fn latest_call_tool_without_attribution(
+        &self,
+        server: &str,
+        tool: &str,
+        arguments: Option<serde_json::Value>,
+        meta: Option<serde_json::Value>,
+    ) -> anyhow::Result<CallToolResult> {
+        let connections = self.latest_connections();
+        connections.validate_tool_call(server, tool, /*environment_id*/ None)?;
+        connections.wait_for_server_startup(server).await;
+        connections
+            .call_tool(
+                server, tool, /*environment_id*/ None, arguments, meta,
+                /*requested_timeout*/ None, /*wait_for_server*/ true,
+            )
+            .await
+    }
+
     /// Calls a tool for the host, retaining attribution while its catalogs stay unchanged.
     /// Waiting calls capture a binding after the selected server starts; non-waiting calls
     /// use the cached binding. Missing or changed catalogs leave the namespace unknown.
@@ -1129,7 +1147,6 @@ pub(crate) fn emit_duration(metric: &str, duration: Duration, tags: &[(&str, &st
 
 #[cfg(test)]
 mod tests {
-    use codex_protocol::models::PermissionProfile;
     use codex_utils_path_uri::PathUri;
     use std::collections::HashMap;
 
@@ -1142,6 +1159,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
+    use crate::McpServerPermissions;
 
     fn stdio_server(environment_id: &str) -> McpServerConfig {
         McpServerConfig {
@@ -1208,9 +1226,9 @@ mod tests {
         // Complete the fixture's shared startup future before testing stable reuse.
         connections.list_all_tools().await;
         let mut config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
-        config.server_permission_profiles.insert(
+        config.server_permissions.insert(
             CODEX_APPS_MCP_SERVER_NAME.to_string(),
-            PermissionProfile::default(),
+            McpServerPermissions::Thread,
         );
         let published = Arc::new(PublishedMcpRuntime {
             connections: Arc::clone(&connections),
@@ -1226,6 +1244,17 @@ mod tests {
             ready_environments: HashMap::new(),
             cached_binding: Mutex::new(None),
         });
+        let runtime = McpRuntime::empty(/*prefix_mcp_tool_names*/ true);
+        runtime.current.store(Arc::clone(&published));
+        runtime
+            .latest_call_tool_without_attribution(
+                CODEX_APPS_MCP_SERVER_NAME,
+                "search",
+                /*arguments*/ None,
+                /*meta*/ None,
+            )
+            .await?;
+        assert!(published.cached_binding.lock().unwrap().is_none());
         let before = McpRuntime::binding_from_published_runtime(
             Arc::clone(&published),
             /*required_servers*/ &[],

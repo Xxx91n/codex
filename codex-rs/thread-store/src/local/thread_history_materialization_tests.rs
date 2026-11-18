@@ -1573,6 +1573,7 @@ async fn projection_preserves_exact_lifecycle_timestamps() {
     for (index, (started_at_ms, completed_at_ms)) in timestamps.iter().enumerate() {
         items.push(RolloutItem::EventMsg(EventMsg::ItemCompleted(
             ItemCompletedEvent {
+                content_token_count: None,
                 thread_id,
                 turn_id: "turn-1".to_string(),
                 item: TurnItem::UserMessage(UserMessageItem {
@@ -2524,7 +2525,10 @@ async fn paused_projection_releases_writer_and_retains_progress_when_stopped() {
             rollout_line_byte_offsets(rollout_path.as_path(), /*ordinal*/ 1);
         let (sender, receiver) = tokio::sync::mpsc::channel(2);
         super::read_projection_batches(
-            rollout_path.as_path(),
+            &super::ProjectionRollout {
+                path: rollout_path.clone(),
+                reads: Default::default(),
+            },
             before.0 as u64,
             before.1 as u64,
             thread_id,
@@ -2718,7 +2722,10 @@ async fn blank_and_rejected_rollout_lines_advance_projection() {
     let checks = Cell::new(0);
     assert!(
         super::read_projection_batches(
-            rollout_path.as_path(),
+            &super::ProjectionRollout {
+                path: rollout_path.clone(),
+                reads: Default::default(),
+            },
             /*start_offset*/ 0,
             /*expected_ordinal*/ 0,
             thread_id,
@@ -3165,6 +3172,7 @@ fn contains_user_message(items: &[RolloutItem], expected: &str) -> bool {
 
 fn completed_item(thread_id: ThreadId, turn_id: &str, item: TurnItem) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+        content_token_count: None,
         thread_id,
         turn_id: turn_id.to_string(),
         item,

@@ -21,8 +21,8 @@ use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_login::auth_env_telemetry::collect_auth_env_telemetry;
 use codex_login::default_client::originator;
 use codex_model_provider::ModelProvider;
+use codex_model_provider::ProviderAuthContext;
 use codex_model_provider::SharedModelProvider;
-use codex_model_provider::create_model_provider;
 use codex_otel::SessionTelemetry;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::MemoryVersion;
@@ -139,6 +139,10 @@ fn build_session_telemetry(
 }
 
 impl MemoryStartupContext {
+    pub(crate) fn item_id_generator(&self) -> &codex_protocol::ItemIdGenerator {
+        self.thread.item_id_generator()
+    }
+
     pub(crate) fn new(
         thread_manager: Arc<ThreadManager>,
         auth_manager: Arc<AuthManager>,
@@ -147,13 +151,19 @@ impl MemoryStartupContext {
         config: &Config,
         source: SessionSource,
     ) -> Self {
-        let provider = create_model_provider(
-            config.model_provider.clone(),
-            Some(Arc::clone(&auth_manager)),
-        );
+        let auth = thread
+            .thread_extension_data()
+            .get::<ProviderAuthContext>()
+            .unwrap_or_else(|| {
+                Arc::new(ProviderAuthContext {
+                    credentials: auth_manager,
+                    runtime_auth: None,
+                })
+            });
+        let provider = auth.model_provider(config.model_provider.clone());
         Self::new_with_provider(
             thread_manager,
-            auth_manager,
+            Arc::clone(&auth.credentials),
             thread_id,
             thread,
             config,
@@ -327,10 +337,10 @@ impl MemoryStartupContext {
         let session_id = SessionId::from(self.thread_id);
         let session_id_string = session_id.to_string();
         let model_client = ModelClient::new(
-            Some(Arc::clone(&self.auth_manager)),
+            Arc::clone(&self.provider),
             AgentIdentityAuthPolicy::JwtOnly,
             self.thread_id,
-            config.model_provider.clone(),
+            Arc::clone(self.item_id_generator()),
             session_source.clone(),
             config_snapshot.originator,
             config.model_verbosity,

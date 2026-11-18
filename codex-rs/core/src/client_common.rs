@@ -40,6 +40,8 @@ pub struct Prompt {
     /// Whether the Responses API should strictly validate `output_schema`.
     pub output_schema_strict: bool,
 
+    pub(crate) prompt_cache_ttl: Option<crate::PromptCacheTtl>,
+
     pub(crate) cyber_access_program: Option<codex_protocol::turn_input::CyberAccessProgram>,
 }
 
@@ -52,6 +54,7 @@ impl Default for Prompt {
             base_instructions: BaseInstructions::default(),
             output_schema: None,
             output_schema_strict: true,
+            prompt_cache_ttl: None,
             cyber_access_program: None,
         }
     }

@@ -326,6 +326,7 @@ fn delivered_assistant_rollout_survives_an_earlier_read_and_rewrite() -> Result<
                 phase: None,
             },
             RetainedInputSource::Local(metadata.user_input_order),
+            &codex_protocol_test_support::uuid_v7_item_id_generator_for_test(),
         );
         let rewritten_checkpoint =
             serde_json::from_value(serde_json::to_value(earlier_checkpoint)?)?;
@@ -358,6 +359,8 @@ fn response_item_envelope_stores_metadata_beside_rollout_payload() -> Result<()>
         item: RolloutItem::ResponseItem(ResponseItemEnvelope {
             item: response_item.clone(),
             metadata: Some(CodexHarnessMetadata {
+                history_sequence: Some(9),
+                sampled_through_sequence: Some(7),
                 client_authored: true,
                 history_truncation_token_limit: Some(20_000),
                 inherited_user_message: true,
@@ -375,6 +378,8 @@ fn response_item_envelope_stores_metadata_beside_rollout_payload() -> Result<()>
             "type": "response_item",
             "payload": response_item,
             "metadata": {
+                "history_sequence": 9,
+                "sampled_through_sequence": 7,
                 "client_authored": true,
                 "fallback_token_limit_override": 20_000,
                 "inherited_user_message": true,
@@ -390,6 +395,8 @@ fn response_item_envelope_stores_metadata_beside_rollout_payload() -> Result<()>
     assert_eq!(
         envelope.metadata,
         Some(CodexHarnessMetadata {
+            history_sequence: Some(9),
+            sampled_through_sequence: Some(7),
             client_authored: true,
             history_truncation_token_limit: Some(20_000),
             inherited_user_message: true,
@@ -585,6 +592,7 @@ fn compacted_replacement_history_stores_metadata_in_an_aligned_sidecar() -> Resu
 #[test]
 fn compacted_resume_metadata_presence_round_trips_empty_values() -> Result<()> {
     let resume_metadata = CompactionResumeMetadata {
+        rejected_audio_file_ids: Default::default(),
         dynamic_tools: None,
         multi_agent_version: None,
         last_started_turn_id: None,
@@ -697,6 +705,7 @@ fn compacted_metadata_remains_compatible_with_legacy_response_item_readers() -> 
         compaction_response_id: None,
         latest_token_usage_record: None,
         resume_metadata: Some(CompactionResumeMetadata {
+            rejected_audio_file_ids: Default::default(),
             dynamic_tools: None,
             multi_agent_version: Some(MultiAgentVersion::V2),
             last_started_turn_id: Some("turn-1".to_string()),

@@ -95,6 +95,9 @@ fn is_unsupported_untrusted_approval_policy_error(err: &std::io::Error) -> bool 
     )
 }
 
+pub use codex_agent_message_board_host::delete_agent_message_boards;
+pub use codex_agent_message_board_host::install_agent_message_board;
+
 mod analytics_utils;
 mod app_info;
 mod app_server_tracing;
@@ -715,8 +718,15 @@ pub async fn run_main_with_transport_options(
         });
     }
 
-    let analytics_events_client =
-        analytics_events_client_from_config(Arc::clone(&auth_manager), &config);
+    let runtime_auth_slot = config
+        .features
+        .enabled(Feature::RuntimeAgentInstances)
+        .then(codex_runtime_agent_instance::RuntimeAuthSlot::default);
+    let analytics_events_client = analytics_events_client_from_config(
+        Arc::clone(&auth_manager),
+        &config,
+        runtime_auth_slot.clone(),
+    );
     let outgoing_message_sender = Arc::new(OutgoingMessageSender::new(
         outgoing_tx,
         analytics_events_client.clone(),
@@ -1025,6 +1035,7 @@ pub async fn run_main_with_transport_options(
                 &auth_manager,
             ))),
             auth_manager,
+            runtime_auth_slot,
             installation_id,
             code_mode_session_provider,
             rpc_transport: analytics_rpc_transport(&transport),

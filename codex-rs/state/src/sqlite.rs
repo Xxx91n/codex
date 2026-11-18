@@ -2,6 +2,7 @@
 //! New databases use DELETE on NFS and WAL elsewhere.
 //! Writable pools preserve existing settings unless managed policy requires DELETE on NFS.
 //! Startup retries SQLITE_BUSY and reports other errors to callers.
+//! Schema version checks and migrations share one transaction and retry contention together.
 //! The configured logs directory is created and locked only when opening its database.
 
 #![expect(
@@ -445,13 +446,32 @@ impl SqliteConfig {
             if matches!(spec.kind, DbKind::State) {
                 repair_legacy_recency_migration_version(&pool, migrator).await?;
             }
-            if let Err(error) = migrator.run(&pool).await.map_err(anyhow::Error::from) {
-                let version_mismatch = matches!(
-                    error.downcast_ref::<MigrateError>(),
-                    Some(MigrateError::VersionMismatch(_))
-                );
-                if !version_mismatch {
-                    return Err(error);
+            // SQLx's SQLite migration lock is a no-op. Keep version checks and changes in
+            // one transaction, retrying from a fresh snapshot after a concurrent migration.
+            // A current schema needs only a read lock, including when opened on NFS.
+            // Fork (checksum family, tickets 29/31/35): on `VersionMismatch`, run the
+            // family drift detection / EOL repair first, then retry the same wrapped
+            // migration once before giving up.
+            let migration = || async {
+                let result = retry_on_busy(|| async {
+                    let mut transaction = pool.begin().await?;
+                    if let Err(error) = migrator
+                        .run_direct(/*target*/ None, &mut *transaction, /*skip*/ false)
+                        .await
+                    {
+                        transaction.rollback().await?;
+                        return Err(error.into());
+                    }
+                    transaction.commit().await.map_err(anyhow::Error::from)
+                })
+                .await;
+                match &result {
+                    Err(error)
+                        if matches!(
+                            error.downcast_ref::<MigrateError>(),
+                            Some(MigrateError::VersionMismatch(_))
+                        ) => {}
+                    _ => return result,
                 }
                 let binary_family = embedded_binary_family(migrator);
                 if self.maintained_checksum_family.is_none() {
@@ -474,9 +494,11 @@ impl SqliteConfig {
                             );
                             Err(anyhow::anyhow!(drift.guidance()))
                         }
-                        None => Err(error),
+                        None => {
+                            anyhow::bail!("checksum family mismatch persisted after retry")
+                        }
                     };
-                };
+                }
                 // Ticket 31 explicit opt-in (crlf/lf): when every applied
                 // checksum is a pure line-ending image of the embedded SQL
                 // and the schema still matches, rewrite the stored checksums
@@ -484,9 +506,20 @@ impl SqliteConfig {
                 // migration, then land the history in the configured family
                 // below. Anything else keeps failing loudly.
                 repair_eol_checksum_family(&pool, migrator, binary_family).await?;
-                migrator.run(&pool).await.map_err(anyhow::Error::from)?;
-            }
-            Ok(())
+                retry_on_busy(|| async {
+                    let mut transaction = pool.begin().await?;
+                    if let Err(error) = migrator
+                        .run_direct(/*target*/ None, &mut *transaction, /*skip*/ false)
+                        .await
+                    {
+                        transaction.rollback().await?;
+                        return Err(error.into());
+                    }
+                    transaction.commit().await.map_err(anyhow::Error::from)
+                })
+                .await
+            };
+            migration().await
         }
         .await;
         telemetry::record_init_result(

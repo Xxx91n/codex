@@ -1025,6 +1025,16 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
+    // Bind before starting the agent. Sandbox activity cannot redirect the final write.
+    let bound_output = last_message_file
+        .as_deref()
+        .map(|path| {
+            codex_exec_server::BoundOutput::open(path).map_err(|error| {
+                anyhow::anyhow!("Failed to open last message file {path:?}: {error}")
+            })
+        })
+        .transpose()?;
+
     let mut request_ids = RequestIdSequencer::new();
     let mut client = InProcessAppServerClient::start(in_process_start_args)
         .await
@@ -1212,7 +1222,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 .shutdown()
                 .await
                 .map_err(|err| anyhow::anyhow!("in-process app-server shutdown failed: {err}"))?;
-            event_processor.print_final_output();
+            event_processor.print_final_output(bound_output)?;
             return Ok(());
         }
         InitialOperation::UserTurn {
@@ -1412,7 +1422,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     if let Err(err) = client.shutdown().await {
         warn!("in-process app-server shutdown failed: {err}");
     }
-    event_processor.print_final_output();
+    event_processor.print_final_output(bound_output)?;
     if error_seen {
         std::process::exit(1);
     }
@@ -1778,6 +1788,7 @@ async fn maybe_backfill_turn_completed_items(
                         cursor,
                         limit: None,
                         sort_direction: None,
+                        defer_output: None,
                     },
                 })
                 .await
@@ -1788,7 +1799,17 @@ async fn maybe_backfill_turn_completed_items(
                     return;
                 }
             };
-            items.extend(page.data.into_iter().map(ThreadItem::from));
+            for entry in page.data {
+                match ThreadItem::try_from(entry) {
+                    Ok(item) => items.push(item),
+                    Err(err) => {
+                        warn!(
+                            "thread/items/list returned an incomplete item during turn completion: {err}"
+                        );
+                        return;
+                    }
+                }
+            }
             let Some(next) = page.next_cursor else { break };
             if !seen_cursors.insert(next.clone()) {
                 warn!("thread/items/list returned a repeated cursor during turn completion");
@@ -1929,6 +1950,7 @@ async fn resolve_resume_thread_id(
                 ClientRequest::ThreadList {
                     request_id: RequestId::Integer(0),
                     params: ThreadListParams {
+                        current_account_only: true,
                         excluded_thread_ids: None,
                         attached_to_thread_id: None,
                         originators: None,
@@ -2017,6 +2039,7 @@ async fn resolve_resume_thread_id(
             ClientRequest::ThreadList {
                 request_id: RequestId::Integer(0),
                 params: ThreadListParams {
+                    current_account_only: false,
                     excluded_thread_ids: None,
                     attached_to_thread_id: None,
                     originators: None,

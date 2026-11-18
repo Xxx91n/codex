@@ -11,7 +11,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
-use crossterm::cursor::MoveTo;
 use crossterm::cursor::RestorePosition;
 use crossterm::cursor::SavePosition;
 use crossterm::queue;
@@ -22,6 +21,7 @@ use image::RgbaImage;
 use ratatui::layout::Rect;
 
 use crate::pets::ImageProtocol;
+use crate::pets::KittyPlacement;
 
 // Separate from the two image ids reserved for pets (0xC0DE and 0xC0DF).
 pub(crate) const FIRST_IMAGE_ID: u32 = 0xC100;
@@ -138,7 +138,7 @@ impl TranscriptImage {
         writer: &mut impl Write,
         area: Rect,
         first_row: usize,
-        id: u32,
+        placement: KittyPlacement,
     ) -> Result<Option<tempfile::NamedTempFile>> {
         let (top, bottom) = match self.protocol {
             ImageProtocol::Sixel => (
@@ -173,7 +173,7 @@ impl TranscriptImage {
                     } else {
                         crate::pets::kitty_transmit_png_with_id
                     };
-                    let command = transmit(png.path(), self.columns, area.height, Some(id))?;
+                    let command = transmit(png.path(), self.columns, area.height, placement)?;
                     file = (self.protocol == ImageProtocol::KittyLocalFile).then_some(png);
                     command.into_bytes()
                 }
@@ -185,8 +185,8 @@ impl TranscriptImage {
         let Ok(payload) = payload else {
             return Ok(None);
         };
-        queue!(writer, SavePosition, MoveTo(area.x, area.y))?;
-        writer.write_all(&payload)?;
+        queue!(writer, SavePosition)?;
+        placement.draw(writer, area, &payload)?;
         queue!(writer, RestorePosition)?;
         Ok(file)
     }

@@ -12,6 +12,136 @@ use crossterm::event::KeyModifiers;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
+async fn new_session_refreshes_account_for_the_started_provider() -> Result<()> {
+    let (mut app, _events, _ops) = make_test_app_with_channels().await;
+    let home = tempdir()?;
+    app.config.codex_home = home.path().abs();
+    app.config.sqlite = SqliteConfig::new_for_testing(home.path().abs());
+    app.config.cli_auth_credentials_store_mode = codex_login::AuthCredentialsStoreMode::File;
+    app_test_support::write_chatgpt_auth(
+        home.path(),
+        app_test_support::ChatGptAuthFixture::new("test-token")
+            .email("user@example.com")
+            .plan_type("pro"),
+        codex_login::AuthCredentialsStoreMode::File,
+    )
+    .expect("write synthetic auth");
+    let backend = wiremock::MockServer::start().await;
+    let catalog_path = home.path().join("models.json");
+    std::fs::write(
+        &catalog_path,
+        serde_json::to_vec(&codex_models_manager::bundled_models_response()?)?,
+    )?;
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!(
+            "model_provider = 'amazon-bedrock'\nmodel = 'test-model'\ncli_auth_credentials_store = 'file'\nchatgpt_base_url = {:?}\nmodel_catalog_json = {catalog_path:?}\nfeatures.apps = true\n",
+            backend.uri(),
+        ),
+    )?;
+    let (mut server, _requests, proxy) = Box::pin(start_recording_app_server(
+        &app.config,
+        /*blocked_thread_list*/ None,
+        /*failed_thread_name*/ None,
+    ))
+    .await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    for provider in ["amazon-bedrock", "openai", "amazon-bedrock"] {
+        crate::config_update::write_config_batch(
+            server.request_handle(),
+            vec![crate::config_update::replace_config_value(
+                "model_provider",
+                provider.into(),
+            )],
+        )
+        .await?;
+        *app.model_catalog.provider_write.lock().await = true;
+        Box::pin(app.start_fresh_session(
+            &mut tui,
+            &mut server,
+            /*session_start_source*/ None,
+            /*initial_user_message*/ None,
+            /*new_thread_name*/ None,
+        ))
+        .await;
+        let chatgpt = provider == "openai";
+        assert_eq!(
+            (
+                app.chat_widget.config_ref().model_provider_id.as_str(),
+                app.chat_widget.has_chatgpt_account(),
+                app.chat_widget.has_codex_backend_auth(),
+                app.chat_widget.requires_openai_auth,
+                app.chat_widget.current_plan_type()
+            ),
+            (
+                provider,
+                chatgpt,
+                chatgpt,
+                chatgpt,
+                chatgpt.then_some(codex_protocol::account::PlanType::Pro)
+            )
+        );
+    }
+    server.shutdown().await?;
+    proxy.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_account_uses_only_a_matching_server_default() -> Result<()> {
+    let (client, mut commands, _events) =
+        codex_app_server_client::CloudClient::channel(/*capacity*/ 1);
+    let mut server = AppServerSession::new(
+        crate::backend_id::BackendId::new(),
+        codex_app_server_client::AppServerClient::Cloud(client),
+        crate::app_server_session::ThreadParamsMode::Remote,
+    );
+    for (provider, default_at_config_read) in [
+        ("openai", "openai"),
+        ("amazon-bedrock", "openai"),
+        // The server switched to Bedrock after account/read returned ChatGPT.
+        ("amazon-bedrock", "amazon-bedrock"),
+    ] {
+        let id = ThreadId::new();
+        let mut session = test_thread_session(id, test_path_buf("/project"));
+        session.model_provider_id = provider.to_string();
+        let (account, ()) = tokio::join!(server.read_thread_account(&session), async {
+            use codex_app_server_client::CloudOperation::Request;
+            let command = commands.recv().await.unwrap();
+            assert!(matches!(command.operation, Request(req) if matches!(
+                req.as_ref(),
+                ClientRequest::GetAccount { .. }
+            )));
+            command
+                .response
+                .send(Ok(Ok(serde_json::json!({
+                    "account": {"type": "chatgpt", "email": "user@example.com", "planType": "pro"},
+                    "requiresOpenaiAuth": true
+                }))))
+                .unwrap();
+            let command = commands.recv().await.unwrap();
+            assert!(matches!(command.operation, Request(req) if matches!(
+                req.as_ref(),
+                ClientRequest::ConfigRead { params, .. } if params.cwd.is_none()
+            )));
+            command
+                .response
+                .send(Ok(Ok(serde_json::json!({
+                    "config": { "model_provider": default_at_config_read },
+                    "origins": {}
+                }))))
+                .unwrap();
+        });
+        if provider == "openai" {
+            assert!(account?.has_chatgpt_account());
+        } else {
+            assert!(account.is_err());
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn new_sessions_preserve_yolo_launch_and_later_permission_choices() -> Result<()> {
     let (mut app, _events, _ops) = make_test_app_with_channels().await;
     app.harness_overrides.approval_policy = Some(AskForApproval::Never.to_core());
@@ -452,10 +582,80 @@ async fn replacement_failure_keeps_current_task_and_restores_input() -> Result<(
             .join("\n");
         if fail_read {
             insta::assert_snapshot!(errors, @"■ Failed to read new session defaults: config/read failed in TUI");
+            server.shutdown().await?;
         } else {
             insta::assert_snapshot!(errors, @"■ Failed to start a fresh session through the app server: thread/start failed during TUI bootstrap: thread/start failed: replacement unavailable (code -32603)");
+
+            let source = crate::start_embedded_app_server_for_picker(&app.config).await?;
+            let source_id = source.backend_id();
+            let destination = server.backend_id();
+            let mut backends = BackendSessions::from_initial(source, vec![server]);
+            let destination_cwd = tempdir()?;
+            std::fs::create_dir(destination_cwd.path().join(".codex"))?;
+            std::fs::write(
+                destination_cwd.path().join(".codex/hooks.json"),
+                r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"x"}]}]}}"#,
+            )?;
+            // Model a destination whose trust was saved before thread/start failed.
+            crate::legacy_core::config::set_project_trust_level(
+                home.path(),
+                destination_cwd.path(),
+                codex_protocol::config_types::TrustLevel::Trusted,
+            )
+            .map_err(std::io::Error::other)?;
+            let mut settings = app.backend_settings();
+            settings.config.cwd = destination_cwd.path().to_path_buf().abs();
+            backends.settings.insert(destination, settings.clone());
+            backends.set_preference_key(destination, "remote.work");
+            let preference_path = app.local_settings.user_config_path.clone();
+            let original_preferences = std::fs::read(&preference_path).ok();
+            let error = app
+                .start_new_session_on_other_backend(
+                    &mut tui,
+                    &mut backends,
+                    destination,
+                    crate::app::backend_selection::NewBackendSession::CarryDraft,
+                )
+                .await
+                .unwrap_err();
+            assert!(error.contains("replacement unavailable"));
+            assert_eq!(std::fs::read(&preference_path).ok(), original_preferences);
+            assert_eq!(backends.displayed_owner(), source_id);
+            assert_eq!(app.config, original_config);
+            assert_eq!(app.active_thread_id, Some(current));
+            assert!(app.active_thread_rx.is_some());
+            assert_eq!(app.chat_widget.thread_id(), Some(current));
+            assert_eq!(
+                app.chat_widget.composer_text_with_pending(),
+                "keep this request"
+            );
+            let (retry, retry_requests, retry_proxy) = start_recording_app_server(
+                &app.config,
+                /*blocked_thread_list*/ None,
+                /*failed_thread_name*/ None,
+            )
+            .await?;
+            let retry_id = retry.backend_id();
+            backends.insert(retry);
+            backends.settings.insert(retry_id, settings);
+            app.start_new_session_on_other_backend(
+                &mut tui,
+                &mut backends,
+                retry_id,
+                crate::app::backend_selection::NewBackendSession::CarryDraft,
+            )
+            .await
+            .expect("retry switching to the trusted destination");
+            assert_eq!(backends.displayed_owner(), retry_id);
+            assert_eq!(recorded_params(&retry_requests, "thread/start").len(), 1);
+            assert_eq!(
+                recorded_params(&retry_requests, "hooks/list")[0]["cwds"],
+                serde_json::json!([destination_cwd.path()])
+            );
+            assert!(render_bottom_popup(&app.chat_widget, /*width*/ 80).contains("SessionStart"));
+            backends.shutdown().await?;
+            retry_proxy.await??;
         }
-        server.shutdown().await?;
         proxy.await??;
     }
     Ok(())
@@ -465,7 +665,7 @@ async fn replacement_failure_keeps_current_task_and_restores_input() -> Result<(
 async fn backend_handoff_errors_are_snapshotted() -> Result<()> {
     let (mut app, mut events, _ops) = make_test_app_with_channels().await;
     let source = crate::start_embedded_app_server_for_picker(&app.config).await?;
-    let (destination, _, destination_proxy) = start_recording_app_server_with_history(
+    let (destination, requests, destination_proxy) = start_recording_app_server_with_history(
         &app.config,
         HistoryCapabilities::ConfigReadFails,
         /*blocked_thread_list*/ None,
@@ -487,14 +687,27 @@ async fn backend_handoff_errors_are_snapshotted() -> Result<()> {
 
     app.resume_backend_session(&mut tui, &mut backends, target.clone())
         .await?;
-    insta::assert_snapshot!(next_history_message(&mut events), @"■ This backend has no connection settings. Open the session picker again.");
+    insta::assert_snapshot!(next_history_message(&mut events), @"■ Connection settings are unavailable. Open the session picker again.");
 
     backends
         .settings
         .insert(destination_id, app.backend_settings());
     app.resume_backend_session(&mut tui, &mut backends, target)
         .await?;
-    insta::assert_snapshot!(next_history_message(&mut events), @"■ Unable to check folder trust: config/read failed while checking remote project trust");
+    let trust_error = next_history_message(&mut events);
+    insta::assert_snapshot!(trust_error, @"■ Unable to check folder trust: config/read failed while checking remote project trust");
+
+    // Starting a fresh thread must observe the same destination trust check as resuming one.
+    app.start_new_session_on_other_backend(
+        &mut tui,
+        &mut backends,
+        destination_id,
+        crate::app::backend_selection::NewBackendSession::Fresh { name: None },
+    )
+    .await
+    .expect("trust failure is shown in the conversation");
+    assert_eq!(next_history_message(&mut events), trust_error);
+    assert!(recorded_params(&requests, "thread/start").is_empty());
 
     backends.shutdown().await?;
     destination_proxy.await??;
@@ -794,6 +1007,52 @@ async fn provider_continuation_starts_current_provider_and_drafts_saved_referenc
         tui.set_owned_screen(/*owned*/ false)?;
         server.shutdown().await?;
         proxy.await??;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn backend_cycling_waits_for_foreground_and_parked_voice_calls() -> Result<()> {
+    for parked in [false, true] {
+        let (mut app, _events, _ops) = make_test_app_with_channels().await;
+        let source = crate::start_embedded_app_server_for_picker(&app.config).await?;
+        let destination = crate::start_embedded_app_server_for_picker(&app.config).await?;
+        let source_id = source.backend_id();
+        let destination_id = destination.backend_id();
+        let thread_id = ThreadId::new();
+        app.enqueue_primary_thread_session(
+            test_thread_session(thread_id, app.config.cwd.to_path_buf()),
+            Vec::new(),
+        )
+        .await?;
+        assert!(app.can_cycle_conversation_backend());
+        crate::chatwidget::activate_voice_for_thread(&mut app.chat_widget, thread_id);
+        if parked {
+            let (visible, _, _, _) =
+                crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
+            app.background_voice = Some(Box::new(std::mem::replace(&mut app.chat_widget, visible)));
+        }
+        app.chat_widget
+            .restore_user_message_to_composer("keep draft".into());
+        assert!(!app.can_cycle_conversation_backend());
+        let mut backends = BackendSessions::from_initial(source, vec![destination]);
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+        let error = app
+            .start_new_session_on_other_backend(
+                &mut tui,
+                &mut backends,
+                destination_id,
+                crate::app::backend_selection::NewBackendSession::CarryDraft,
+            )
+            .await
+            .unwrap_err();
+        insta::allow_duplicates! {
+            insta::assert_snapshot!(error, @"End the voice call before switching.");
+        }
+        assert_eq!(backends.displayed_owner(), source_id);
+        assert_eq!(app.voice_owner_thread_id(), Some(thread_id));
+        assert_eq!(app.chat_widget.composer_text_with_pending(), "keep draft");
+        backends.shutdown().await?;
     }
     Ok(())
 }

@@ -215,6 +215,8 @@ pub(super) struct SideThreadState {
     pub(super) parent_thread_id: ThreadId,
     /// Parent-thread condition that changed while this side thread is visible.
     pub(super) parent_status: Option<SideParentStatus>,
+    /// A hidden pane keeps its child and parked display for the next focus switch.
+    pub(super) pane_open: bool,
 }
 
 impl SideThreadState {
@@ -222,6 +224,7 @@ impl SideThreadState {
         Self {
             parent_thread_id,
             parent_status: None,
+            pane_open: true,
         }
     }
 }
@@ -237,6 +240,9 @@ impl App {
     }
 
     pub(super) fn sync_side_thread_ui(&mut self) {
+        if self.zoomed_thread.is_some() && self.zoomed_thread != self.open_pane_focus() {
+            self.zoomed_thread = None;
+        }
         let clear_side_ui = |chat_widget: &mut crate::chatwidget::ChatWidget| {
             chat_widget.set_side_conversation_context_label(/*label*/ None);
             chat_widget.set_side_conversation_active(/*active*/ false);
@@ -306,6 +312,42 @@ impl App {
         self.current_displayed_thread_id()
             .and_then(|thread_id| self.side_threads.get(&thread_id))
             .map(|state| state.parent_thread_id)
+    }
+
+    pub(super) fn side_retention_enabled(&self, tui: &tui::Tui) -> bool {
+        self.local_settings.workspace_enabled(&self.config) && tui.is_owned_screen()
+    }
+
+    pub(super) fn conversation_focus_available(&self, tui: &tui::Tui) -> bool {
+        self.side_retention_enabled(tui)
+            && self.overlay.is_none()
+            && self.chat_widget.no_modal_or_popup_active()
+    }
+
+    pub(super) fn main_composer_shortcut_available(&self) -> bool {
+        !self.reconnect.offline || self.active_side_parent_thread_id().is_none()
+    }
+
+    /// Zoom follows the displayed conversation even when its peer cannot be selected offline.
+    pub(super) fn open_pane_focus(&self) -> Option<ThreadId> {
+        let focused = self.current_displayed_thread_id()?;
+        let child = self.side_pair_key(focused)?;
+        self.side_threads.get(&child)?.pane_open.then_some(focused)
+    }
+
+    pub(super) fn switchable_side_child(&self) -> Option<ThreadId> {
+        if self.reconnect.offline {
+            return None;
+        }
+        self.side_pair_key(self.current_displayed_thread_id()?)
+    }
+
+    pub(super) fn side_pair_key(&self, thread_id: ThreadId) -> Option<ThreadId> {
+        if self.side_threads.contains_key(&thread_id) {
+            Some(thread_id)
+        } else {
+            self.side_thread_for_parent(thread_id)
+        }
     }
 
     pub(super) fn side_thread_for_parent(&self, parent_thread_id: ThreadId) -> Option<ThreadId> {
@@ -432,6 +474,29 @@ impl App {
         Ok(())
     }
 
+    pub(super) async fn hide_focused_side_pane(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+    ) -> Result<()> {
+        let Some(child) = self.current_displayed_thread_id() else {
+            return Ok(());
+        };
+        let Some(side) = self.side_threads.get(&child) else {
+            return Ok(());
+        };
+        let parent = side.parent_thread_id;
+        self.select_agent_thread(tui, app_server, parent).await?;
+        if self.current_displayed_thread_id() == Some(parent)
+            && let Some(side) = self.side_threads.get_mut(&child)
+        {
+            side.pane_open = false;
+            tui.frame_requester().schedule_frame();
+            self.focus_returned_parent_composer(parent).await?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn discard_side_thread(
         &mut self,
         app_server: &mut AppServerSession,
@@ -543,6 +608,7 @@ impl App {
         self.pending_server_profiles.remove(&thread_id);
         self.agents_overview.activity.remove(&thread_id);
         self.side_threads.remove(&thread_id);
+        self.side_companions.remove(&thread_id);
         self.agent_navigation.remove(thread_id);
         if self.active_thread_id == Some(thread_id) {
             self.clear_active_thread().await;

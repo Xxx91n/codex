@@ -1,5 +1,11 @@
 //! Immutable MCP catalog and execution handles.
 
+#[path = "model_search.rs"]
+mod model_search;
+pub use model_search::SEARCH_CONNECTOR;
+pub use model_search::SearchDiscovery;
+pub use model_search::is_model_search_tool;
+
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
@@ -9,6 +15,7 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use codex_config::AppToolApproval;
+use codex_exec_server::FileSystemSandboxContext;
 use codex_protocol::mcp::CallToolResult;
 use codex_protocol::models::PermissionProfile;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -22,6 +29,7 @@ use rmcp::model::ResourceTemplate;
 use serde_json::Value as JsonValue;
 
 use crate::McpConfig;
+use crate::McpServerPermissions;
 use crate::binding_clients::McpBindingClients;
 use crate::client_tool_catalog::ToolCatalogSnapshot;
 use crate::connection_manager::McpConnectionSet;
@@ -191,6 +199,27 @@ pub struct PreparedMcpCall {
     selected_plugin_server: bool,
 }
 
+/// The rules for a prepared call and the folders used to interpret them.
+pub enum McpPermissionSource<'a> {
+    Environment {
+        environment_id: &'a str,
+        sandbox: &'a Arc<FileSystemSandboxContext>,
+    },
+    Thread {
+        profile: &'a PermissionProfile,
+        host_cwd: &'a AbsolutePathBuf,
+    },
+}
+
+impl<'a> McpPermissionSource<'a> {
+    pub fn profile(&self) -> &'a PermissionProfile {
+        match self {
+            Self::Environment { sandbox, .. } => &sandbox.permissions,
+            Self::Thread { profile, .. } => profile,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct PreparedToolInfo {
     catalog: Arc<[ToolInfo]>,
@@ -260,13 +289,24 @@ impl PreparedMcpCall {
         &self.config
     }
 
+    /// A hosted app can run through the local server but use thread rules, not local environment rules.
+    pub fn permission_source(&self) -> McpPermissionSource<'_> {
+        // The constructor only prepares calls with an entry in this immutable config.
+        match &self.config.server_permissions[&self.server_name] {
+            McpServerPermissions::Environment(sandbox) => McpPermissionSource::Environment {
+                environment_id: self.server_environment_id(),
+                sandbox,
+            },
+            McpServerPermissions::Thread => McpPermissionSource::Thread {
+                profile: &self.config.permission_profile,
+                host_cwd: &self.config.host_cwd,
+            },
+        }
+    }
+
     /// Returns the owner permissions validated when this immutable call was prepared.
     pub fn permission_profile(&self) -> &PermissionProfile {
-        let Some(permission_profile) = self.config.permission_profile_for_server(&self.server_name)
-        else {
-            unreachable!("prepared MCP calls retain their immutable permission authority");
-        };
-        permission_profile
+        self.permission_source().profile()
     }
 
     /// Attach policy aliases and the server-host launcher, replacing stale authority.

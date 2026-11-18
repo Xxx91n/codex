@@ -56,6 +56,7 @@ mod apply_patch_serialization;
 mod apply_patch_system_aliases;
 #[cfg(not(target_os = "windows"))]
 mod approvals;
+mod audio_duration_store;
 mod audio_truncation;
 mod auth_recovery_policy;
 mod auto_review;
@@ -211,6 +212,7 @@ mod rmcp_client;
 mod rollout_budget;
 mod rollout_compression;
 mod rollout_list_find;
+mod runtime_auth;
 mod safety_buffering;
 mod safety_check_downgrade;
 mod scenarios;

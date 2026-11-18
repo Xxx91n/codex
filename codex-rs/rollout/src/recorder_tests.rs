@@ -214,6 +214,7 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
 
     let session_meta_line = SessionMetaLine {
         meta: SessionMeta {
+            account_scoped: false,
             attached_thread: false,
             creator_user_id: None,
             creator_account_id: None,
@@ -697,7 +698,7 @@ async fn recorder_materializes_on_flush_with_pending_items() -> std::io::Result<
     let config = test_config(home.path());
     let session_id = SessionId::default();
     let thread_id = ThreadId::new();
-    let initial_window_id = Uuid::now_v7().to_string();
+    let initial_window_id = codex_protocol::ContextWindowId::new_uuid_v7().to_string();
     let recorder = RolloutRecorder::new(
         &config,
         RolloutRecorderParams::new(
@@ -1505,7 +1506,7 @@ async fn list_threads_db_enabled_preserves_metadata_for_missing_rollout_paths()
         .expect("state db lookup should succeed");
     assert_eq!(stored_metadata, Some(metadata));
     let cursor = page.next_cursor.expect("another thread remains");
-    assert_eq!(cursor.thread_id(), None);
+    assert_eq!(cursor.thread_id(), Some(valid_thread_id));
     runtime.close().await;
     let fallback = RolloutRecorder::list_threads(
         Some(runtime),
@@ -2012,6 +2013,7 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
         item: RolloutItem::TurnContext(TurnContextItem {
             turn_id: Some("turn-1".to_string()),
             root_turn_id: None,
+            direct_only_tool_namespaces: None,
             disabled_plugin_ids: None,
             cwd: serde_json::from_value(serde_json::json!(&latest_cwd))
                 .expect("absolute latest cwd"),

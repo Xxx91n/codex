@@ -204,7 +204,7 @@ impl CatalogRequestProcessor {
                     .load_latest_config(/*fallback_cwd*/ None)
                     .await
                     .map_err(|err| config_load_error(&err))?;
-                // Configuration edits without an account transition still require a restart to refresh the model catalog.
+                // A direct config file edit can leave the catalog using the previous gateway.
                 if current.model_provider_id != config.model_provider_id
                     || current.model_provider != config.model_provider
                 {
@@ -580,6 +580,14 @@ impl CatalogRequestProcessor {
                         config.config_layer_stack,
                     )
                     .with_plugin_skill_snapshots(plugin_skill_snapshots);
+                    let skills_input = match self
+                        .thread_manager
+                        .environment_manager()
+                        .default_environment_id()
+                    {
+                        Some(environment_id) => skills_input.with_environment_id(environment_id),
+                        None => skills_input,
+                    };
                     let snapshot = skills_request
                         .snapshot_for_cwd(&skills_input, force_reload, fs)
                         .await;

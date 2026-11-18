@@ -574,17 +574,13 @@ pub(super) async fn run_main_inner(
         && !app_server_target.uses_remote_workspace();
     if auto_start_daemon
         && daemon_exclusion.is_none()
-        && [Feature::BedrockSetupWizard, Feature::GcpSetupWizard]
-            .into_iter()
-            .any(|feature| {
-                should_show_provider_setup_wizard(
-                    LoginStatus::NotAuthenticated,
-                    config.model_provider.requires_openai_auth,
-                    &config,
-                    &AppServerTarget::Embedded,
-                    feature,
-                )
-            })
+        && should_show_provider_setup_wizard(
+            LoginStatus::NotAuthenticated,
+            config.model_provider.requires_openai_auth,
+            &config,
+            &AppServerTarget::Embedded,
+            Feature::GcpSetupWizard,
+        )
         && startup_draft
             .run_until(
                 config
@@ -596,8 +592,8 @@ pub(super) async fn run_main_inner(
             .flatten()
             .is_none()
     {
-        // Provider setup wizards configure their provider through the embedded server.
-        daemon_exclusion = Some("Cloud provider sign-in");
+        // GCP setup resolves credential paths and runs gcloud in the launch environment.
+        daemon_exclusion = Some("GCP sign-in");
         app_server_target = AppServerTarget::Embedded;
     }
     if auto_start_daemon
@@ -615,9 +611,10 @@ pub(super) async fn run_main_inner(
                 // responsive while it checks the running server or prepares an installation.
                 // Preserve saved daemon settings until any mismatch is confirmed in recovery.
                 let result =
-                    codex_app_server_daemon::start_with_features(&Default::default()).await;
+                    codex_app_server_daemon::start_with_features_classified(&Default::default())
+                        .await;
                 daemon_telemetry::record_start(&config, &result).await;
-                match result {
+                match result.map_err(|err| err.error) {
                     Ok(output) => Ok(Some(output)),
                     #[cfg(windows)]
                     Err(err) if err.is::<codex_app_server_daemon::DetachedLaunchRestricted>() => {
@@ -759,16 +756,9 @@ pub(super) async fn run_main_inner(
         ),
     ]);
     let selected_local_daemon = matches!(app_server_target, AppServerTarget::LocalDaemon { .. });
-    // Record the first connection attempt's actual mode, including embedded fallback; never reconnects.
-    let launch_telemetry = move |target: &AppServerTarget, connected: bool| {
+    let launch_telemetry = move |app_server_mode| {
         let Some(metrics) = metrics else {
             return Vec::new();
-        };
-        let app_server_mode = match (connected, target) {
-            (false, _) => "unconfirmed",
-            (true, AppServerTarget::Embedded) => "in_process",
-            (true, AppServerTarget::LocalDaemon { .. }) => "local_daemon",
-            (true, AppServerTarget::Remote { .. }) => "remote",
         };
         // Use a fixed category, not the versioned or user-provided terminal identifier.
         let terminal_info = codex_terminal_detection::terminal_info();
@@ -820,7 +810,7 @@ pub(super) async fn run_main_inner(
                         "config_override"
                     }
                 }
-                Some("Bedrock sign-in") => "bedrock_sign_in",
+                Some("GCP sign-in") => "gcp_sign_in",
                 Some(daemon_startup::WSL_DRVFS_EXCLUSION) => "wsl_drvfs",
                 Some("this Windows launcher") => "windows_detach_restricted",
                 Some("daemon feature settings") => "daemon_compatibility",
@@ -872,7 +862,7 @@ pub(super) async fn run_main_inner(
             if let Some(worktree) = managed_worktree.as_ref() {
                 worktree.report_startup_failure();
             }
-            launch_telemetry.record(&app_server_target, /*connected*/ false);
+            drop(launch_telemetry);
             if let Some(otel) = otel {
                 let _ = otel
                     .shutdown_with_timeout(INTERACTIVE_OTEL_SHUTDOWN_TIMEOUT)
@@ -893,7 +883,7 @@ pub(super) async fn run_main_inner(
             if let Some(worktree) = managed_worktree.as_ref() {
                 worktree.report_startup_failure();
             }
-            launch_telemetry.record(&app_server_target, /*connected*/ false);
+            drop(launch_telemetry);
             if let Some(otel) = otel {
                 let _ = otel
                     .shutdown_with_timeout(INTERACTIVE_OTEL_SHUTDOWN_TIMEOUT)

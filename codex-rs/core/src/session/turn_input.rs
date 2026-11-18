@@ -60,6 +60,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
+#[path = "turn_input_agent.rs"]
+mod agent;
+
 #[cfg(test)]
 #[path = "turn_input_tests.rs"]
 mod tests;
@@ -148,7 +151,9 @@ impl PreparedTurnInputSettings {
         let TurnStartOptions {
             turn_trigger,
             final_output_json_schema,
+            direct_only_tool_namespaces,
             service_tier,
+            prompt_cache_ttl,
             parent_turn_id,
             initiating_agent_path,
             root_turn_id,
@@ -164,7 +169,9 @@ impl PreparedTurnInputSettings {
         updates.service_tier_for_turn = service_tier;
 
         let options = NewTurnContextOptions {
+            direct_only_tool_namespaces,
             final_output_json_schema,
+            prompt_cache_ttl,
             cyber_access_program,
         };
         let turn_context = match kind {
@@ -244,12 +251,20 @@ pub(super) async fn handle(
     {
         validate_injected_response_item(item)?;
     }
-    request
-        .request
-        .additional_context
-        .values()
-        .try_for_each(AdditionalContextEntry::validate)
-        .map_err(|message| CodexErr::InvalidRequest(message.to_owned()))?;
+    // Native agent follow-ups do not use the request's additional context.
+    if !(matches!(mode, TurnInputMode::StartOrSteer)
+        && matches!(
+            request.request.input,
+            SubmittedTurnInput::InterAgentCommunication(_)
+        ))
+    {
+        request
+            .request
+            .additional_context
+            .values()
+            .try_for_each(AdditionalContextEntry::validate)
+            .map_err(|message| CodexErr::InvalidRequest(message.to_owned()))?;
+    }
     let result = match mode {
         TurnInputMode::StartOrSteer => start_or_steer(session, request, submission_id).await,
         TurnInputMode::StartIfIdle => {
@@ -345,6 +360,7 @@ fn user_input_metadata(request: &TurnInputRequest) -> UserInputMetadata {
     UserInputMetadata {
         origin: UserInputOrigin::from_turn_trigger(request.start.turn_trigger.as_deref()),
         response_item_uuid: request.user_item_uuid,
+        extension_data: request.user_input_extension_data.clone(),
         ..Default::default()
     }
 }
@@ -354,6 +370,12 @@ async fn start_or_steer(
     request: WithTurnExtensionData<TurnInputRequest>,
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
+    if matches!(
+        request.request.input,
+        SubmittedTurnInput::InterAgentCommunication(_)
+    ) {
+        return agent::submit(session, request, submission_id).await;
+    }
     let WithTurnExtensionData {
         request,
         turn_extension_init,
@@ -379,7 +401,7 @@ async fn start_or_steer(
         }) => true,
         _ => {
             return Err(CodexErr::InvalidRequest(
-                "only user input or standalone function-call outputs can start or steer a turn"
+                "only user input, agent messages, or standalone function-call outputs can start or steer a turn"
                     .to_string(),
             ));
         }
@@ -402,7 +424,7 @@ async fn start_or_steer(
             /*expected_turn_id*/ None,
             settings.required_active_final_output_json_schema(),
             responsesapi_client_metadata.clone(),
-            input_metadata,
+            input_metadata.clone(),
         )
         .await
     {
@@ -725,7 +747,7 @@ impl Session {
         &self,
     ) -> Option<(Arc<tokio::sync::Mutex<TurnState>>, TurnStartOptions)> {
         let mut active_turn = self.active_turn.lock().await;
-        if active_turn.is_some() {
+        if active_turn.is_some() || self.outcome_handoffs_closed() {
             return None;
         }
         let has_trigger_turn = self.input_queue.has_trigger_turn_mailbox_items().await;
@@ -816,6 +838,9 @@ impl Session {
         )
         .await;
         match submission {
+            Ok(TurnInputSubmission::Accepted) => {
+                unreachable!("realtime user input returns a turn outcome")
+            }
             Ok(TurnInputSubmission::Started { .. } | TurnInputSubmission::Steered { .. }) => {}
             Ok(TurnInputSubmission::NotSubmitted {
                 reason: NotSubmittedReason::ServerDraining,
@@ -829,6 +854,7 @@ impl Session {
                         misalignment: None,
                         message: format!("failed to submit turn input: {reason:?}"),
                         codex_error_info: Some(CodexErrorInfo::BadRequest),
+                        rejected_audio_file_ids: Vec::new(),
                     }),
                 })
                 .await;
@@ -950,7 +976,7 @@ impl Session {
         };
         pending_input.push(input);
         self.input_queue
-            .extend_pending_input_and_accept_mailbox_delivery_for_turn_state(
+            .extend_pending_input_and_notify_for_turn_state(
                 active_turn.turn_state.as_ref(),
                 pending_input,
             )
@@ -997,7 +1023,7 @@ async fn capture_sender_user_messages(
     if !matches!(item, ResponseItem::FunctionCallOutput { call_id: None, .. }) {
         return None;
     }
-    Session::assign_missing_response_item_id(item);
+    session.assign_missing_response_item_id(item);
     session
         .services
         .local_agent_runtime

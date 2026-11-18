@@ -25,6 +25,7 @@ use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadHistoryMode;
+use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadItemEntry;
 use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::ThreadItemsListAnchor;
@@ -63,14 +64,17 @@ use codex_core::ARCHIVED_SESSIONS_SUBDIR;
 use codex_core::config::ConfigBuilder;
 use codex_exec_server::EnvironmentManager;
 use codex_feedback::CodexFeedback;
+use codex_protocol::ContextWindowId;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
+use codex_protocol::items::CommandExecutionItem;
 use codex_protocol::items::TurnItem as CoreTurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::protocol::AgentMessageEvent;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::ExecCommandSource;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::SessionSource as ProtocolSessionSource;
 use codex_protocol::protocol::ThreadMemoryMode;
@@ -411,6 +415,7 @@ async fn paginated_stored_thread_routes_projected_turns() -> Result<()> {
 
     let list_id = mcp
         .send_thread_list_request(ThreadListParams {
+            current_account_only: false,
             excluded_thread_ids: None,
             attached_to_thread_id: None,
             originators: None,
@@ -652,7 +657,7 @@ async fn thread_search_occurrences_reads_paginated_projection() -> Result<()> {
             history_mode: codex_protocol::protocol::ThreadHistoryMode::Paginated,
             history_base: None,
             subagent_history_start_ordinal: None,
-            initial_window_id: Uuid::now_v7().to_string(),
+            initial_window_id: ContextWindowId::new_uuid_v7().to_string(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.path().to_path_buf()),
@@ -1153,6 +1158,7 @@ async fn thread_list_includes_store_thread_without_rollout_path() -> Result<()> 
         .request(ClientRequest::ThreadList {
             request_id: RequestId::Integer(1),
             params: ThreadListParams {
+                current_account_only: false,
                 excluded_thread_ids: None,
                 attached_to_thread_id: None,
                 originators: None,
@@ -1231,6 +1237,105 @@ async fn thread_read_can_return_archived_threads_by_id() -> Result<()> {
     let path = thread.path.expect("thread path");
     assert_eq!(path.canonicalize()?, archived_rollout_path.canonicalize()?);
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn cold_resume_pages_inherited_history_when_active_ancestor_is_short() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    let filename_ts = "2025-01-05T12-00-00";
+    let parent_id = create_fake_paginated_rollout(
+        codex_home.path(),
+        filename_ts,
+        "2025-01-05T12:00:00Z",
+        "Saved user message",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    let active = rollout_path(codex_home.path(), filename_ts, &parent_id);
+    for item in [
+        paginated_turn_started("turn-1"),
+        paginated_completed_item(
+            codex_protocol::ThreadId::from_string(&parent_id)?,
+            "turn-1",
+            CoreTurnItem::UserMessage(UserMessageItem {
+                id: "user-1".to_string(),
+                client_id: None,
+                content: Vec::new(),
+            }),
+        ),
+        paginated_turn_completed("turn-1"),
+    ] {
+        codex_rollout::append_rollout_item_to_path(&active, &item).await?;
+    }
+
+    let mut app = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+    let fork: ThreadForkResponse = app
+        .request(|request_id| ClientRequest::ThreadFork {
+            request_id,
+            params: ThreadForkParams {
+                thread_id: parent_id,
+                ..Default::default()
+            },
+        })
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, app.shutdown_gracefully()).await??;
+
+    // Leave the preferred copy readable, but shorter than the child's inherited bookmark.
+    let archive = codex_home.path().join(ARCHIVED_SESSIONS_SUBDIR);
+    std::fs::create_dir_all(&archive)?;
+    let filename = active.file_name().expect("rollout filename");
+    std::fs::copy(&active, archive.join(filename))?;
+    let contents = std::fs::read_to_string(&active)?;
+    let (header, _) = contents.split_once('\n').expect("rollout body");
+    std::fs::write(&active, format!("{header}\n"))?;
+
+    let mut app = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+    let child_id = codex_protocol::ThreadId::from_string(&fork.thread.id)?;
+    let resumed: ThreadResumeResponse = app
+        .request(|request_id| ClientRequest::ThreadResume {
+            request_id,
+            params: ThreadResumeParams {
+                thread_id: fork.thread.id,
+                exclude_turns: true,
+                ..Default::default()
+            },
+        })
+        .await?;
+    assert!(resumed.thread.turns.is_empty());
+    let turn_cursor = resumed.turns_backwards_cursor.expect("turn cursor");
+    let item_cursor = resumed.items_backwards_cursor.expect("item cursor");
+    let turns = read_turns_page(
+        &mut app,
+        child_id,
+        Some(turn_cursor),
+        Some(1),
+        SortDirection::Desc,
+        Some(TurnItemsView::NotLoaded),
+    )
+    .await?;
+    let items = read_items_page(
+        &mut app,
+        child_id,
+        /*turn_id*/ None,
+        Some(item_cursor),
+        Some(1),
+        SortDirection::Desc,
+    )
+    .await?;
+    assert_eq!(turns.data[0].id, "turn-1");
+    assert_eq!(items.data[0].turn_id, "turn-1");
+    assert_eq!(items.data[0].item.id(), "user-1");
     Ok(())
 }
 
@@ -1536,6 +1641,7 @@ async fn paginated_thread_name_set_is_reflected_in_read_list_and_metadata_resume
     // List should also surface the name.
     let list_id = mcp
         .send_thread_list_request(ThreadListParams {
+            current_account_only: false,
             excluded_thread_ids: None,
             attached_to_thread_id: None,
             originators: None,
@@ -1726,54 +1832,173 @@ async fn thread_turns_list_rejects_unmaterialized_loaded_thread() -> Result<()> 
 }
 
 #[tokio::test]
+async fn thread_items_list_defers_successful_command_output() -> Result<()> {
+    use codex_protocol::items::CommandExecutionStatus::Completed;
+    use codex_protocol::items::CommandExecutionStatus::Declined;
+    use codex_protocol::items::CommandExecutionStatus::Failed;
+    use codex_protocol::items::CommandExecutionStatus::InProgress;
+
+    async fn list(server: &mut TestAppServer, params: Value) -> Result<Value> {
+        let id = server
+            .send_request("thread/items/list", Some(params))
+            .await?;
+        timeout(DEFAULT_READ_TIMEOUT, server.read_response(id)).await?
+    }
+
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    let thread_id = codex_protocol::ThreadId::default();
+    let store = create_paginated_thread(codex_home.path(), thread_id).await?;
+    let large = "é".repeat(2048);
+    let small = "x".to_owned();
+    let empty = String::new();
+    let commands = [
+        ("large", Completed, Some(0), Some(&large)),
+        ("small", Completed, Some(0), Some(&small)),
+        ("empty", Completed, Some(0), Some(&empty)),
+        ("missing-output", Completed, Some(0), None),
+        ("missing-exit", Completed, None, Some(&large)),
+        ("nonzero", Completed, Some(1), Some(&large)),
+        ("failed", Failed, Some(0), Some(&large)),
+        ("declined", Declined, Some(0), Some(&large)),
+        ("running", InProgress, Some(0), Some(&large)),
+    ];
+    let mut items = vec![paginated_turn_started("turn")];
+    for (id, status, exit_code, output) in commands {
+        items.push(paginated_completed_item(
+            thread_id,
+            "turn",
+            CoreTurnItem::CommandExecution(CommandExecutionItem {
+                id: id.to_string(),
+                command: vec!["ls".to_string()],
+                cwd: codex_home.path().abs().into(),
+                parsed_cmd: Vec::new(),
+                source: ExecCommandSource::Agent,
+                status,
+                aggregated_output: output.cloned(),
+                exit_code,
+                sandbox_type: None,
+                model_context: None,
+                plugin_id: None,
+                script_path: None,
+                process_id: None,
+                interaction_input: None,
+                duration: None,
+            }),
+        ));
+    }
+    store
+        .append_items(AppendThreadItemsParams { thread_id, items })
+        .await?;
+    store.shutdown_thread(thread_id).await?;
+
+    let mut stable = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
+    stable
+        .initialize_with_capabilities(
+            ClientInfo {
+                name: "stable-history-client".to_string(),
+                title: None,
+                version: "1".to_string(),
+            },
+            /*capabilities*/ None,
+        )
+        .await?;
+    let mut params = json!({"threadId": thread_id, "turnId": "turn"});
+    let full = list(&mut stable, params.clone()).await?;
+    let entries = full["data"].as_array().expect("list entries");
+    assert_eq!(entries.len(), commands.len());
+    for (entry, (id, _, _, output)) in entries.iter().zip(commands) {
+        assert_eq!(entry["item"]["id"], id);
+        assert_eq!(
+            entry["item"]["aggregatedOutput"],
+            json!(output.filter(|text| !text.is_empty()))
+        );
+        assert!(entry.get("outputDeferred").is_none());
+    }
+
+    for options in [
+        Value::Null,
+        json!({}),
+        json!({"commandExecution": false}),
+        json!({"unknownItemKind": true}),
+    ] {
+        params["deferOutput"] = options;
+        assert_eq!(list(&mut stable, params.clone()).await?, full);
+    }
+
+    params["deferOutput"] = json!({"commandExecution": true, "unknownItemKind": true});
+    let id = stable
+        .send_request("thread/items/list", Some(params.clone()))
+        .await?;
+    let error = timeout(
+        DEFAULT_READ_TIMEOUT,
+        stable.read_stream_until_error_message(RequestId::Integer(id)),
+    )
+    .await??;
+    assert_eq!(error.error.code, -32600);
+
+    let mut experimental = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+    assert_eq!(
+        list(
+            &mut experimental,
+            json!({"threadId": thread_id, "turnId": "turn", "deferLargeCommandOutput": true}),
+        )
+        .await?,
+        full
+    );
+    let deferred = list(&mut experimental, params).await?;
+    let mut expected = full.clone();
+    for i in 0..2 {
+        expected["data"][i]["outputDeferred"] = json!(true);
+        expected["data"][i]["item"]["aggregatedOutput"] = Value::Null;
+    }
+    assert_eq!(deferred, expected);
+
+    let projected: ThreadItemsListResponse = serde_json::from_value(deferred)?;
+    let mut entries_to_fetch = projected
+        .data
+        .into_iter()
+        .filter_map(|entry| ThreadItem::try_from(entry).err());
+    let large_command = entries_to_fetch.next().expect("large command needs a read");
+    let small_command = entries_to_fetch.next().expect("small command needs a read");
+    assert!(entries_to_fetch.next().is_none());
+
+    let across_turns = list(
+        &mut experimental,
+        json!({"threadId": thread_id, "deferOutput": {"commandExecution": true}}),
+    )
+    .await?;
+    assert_eq!(across_turns["data"], full["data"]);
+    let exact: Value = experimental
+        .request(|request_id| ClientRequest::ThreadItemsRead {
+            request_id,
+            params: ThreadItemsReadParams {
+                thread_id: thread_id.to_string(),
+                turn_id: small_command.turn_id,
+                item_ids: vec![large_command.item_id, small_command.item_id],
+            },
+        })
+        .await?;
+    assert_eq!(exact, json!({"data": [entries[0], entries[1]]}));
+    Ok(())
+}
+
+#[tokio::test]
 async fn paginated_history_lists_and_legacy_reads_use_projected_turns_and_items() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
     let thread_id = codex_protocol::ThreadId::default();
-    let sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
-    let state_db =
-        codex_state::StateRuntime::init(sqlite.clone(), "mock_provider".to_string()).await?;
-    let store = LocalThreadStore::new(
-        LocalThreadStoreConfig {
-            codex_home: codex_home.path().to_path_buf(),
-            sqlite,
-            default_model_provider_id: "mock_provider".to_string(),
-        },
-        Some(state_db),
-    );
-    store
-        .create_thread(CreateThreadParams {
-            attached_thread: false,
-            creator_user_id: None,
-            creator_account_id: None,
-            session_id: thread_id.into(),
-            thread_id,
-            extra_config: None,
-            forked_from_id: None,
-            parent_thread_id: None,
-            source: ProtocolSessionSource::Cli,
-            thread_source: None,
-            originator: "test_originator".to_string(),
-            base_instructions: BaseInstructions::default(),
-            dynamic_tools: Vec::new(),
-            selected_capability_roots: Vec::new(),
-            multi_agent_version: None,
-            history_mode: codex_protocol::protocol::ThreadHistoryMode::Paginated,
-            history_base: None,
-            subagent_history_start_ordinal: None,
-            initial_window_id: Uuid::now_v7().to_string(),
-            runtime_workspace_roots: None,
-            metadata: ThreadPersistenceMetadata {
-                cwd: Some(codex_home.path().to_path_buf()),
-                model_provider: "mock_provider".to_string(),
-                memory_mode: ThreadMemoryMode::Enabled,
-            },
-        })
-        .await?;
-    store
-        .persist_thread(thread_id, PersistContext::Standard)
-        .await?;
+    let store = create_paginated_thread(codex_home.path(), thread_id).await?;
     store
         .append_items(AppendThreadItemsParams {
             thread_id,
@@ -2151,6 +2376,7 @@ async fn paginated_history_lists_and_legacy_reads_use_projected_turns_and_items(
         first_items_page.data,
         vec![ThreadItemEntry {
             turn_id: "turn-1".to_string(),
+            output_deferred: false,
             item: codex_app_server_protocol::ThreadItem {
                 payload: ThreadItemPayload::UserMessage {
                     id: "user-1".to_string(),
@@ -2197,6 +2423,7 @@ async fn paginated_history_lists_and_legacy_reads_use_projected_turns_and_items(
         cursor: None,
         limit: Some(1),
         sort_direction: None,
+        defer_output: None,
     };
     for direction in [None, Some(SortDirection::Desc)] {
         let request = mcp
@@ -2287,6 +2514,7 @@ async fn paginated_history_lists_and_legacy_reads_use_projected_turns_and_items(
         vec![
             ThreadItemEntry {
                 turn_id: "turn-1".to_string(),
+                output_deferred: false,
                 item: codex_app_server_protocol::ThreadItem {
                     payload: ThreadItemPayload::UserMessage {
                         id: "steer-1".to_string(),
@@ -2301,6 +2529,7 @@ async fn paginated_history_lists_and_legacy_reads_use_projected_turns_and_items(
             },
             ThreadItemEntry {
                 turn_id: "turn-1".to_string(),
+                output_deferred: false,
                 item: codex_app_server_protocol::ThreadItem {
                     payload: ThreadItemPayload::AgentMessage {
                         id: "agent-1".to_string(),
@@ -2376,6 +2605,7 @@ async fn thread_items_read_validates_ids_before_history_access() -> Result<()> {
             cursor: None,
             limit: None,
             sort_direction: None,
+            defer_output: None,
         })
         .await?;
     let read_err: JSONRPCError = timeout(
@@ -2618,6 +2848,7 @@ async fn read_items_page(
             cursor: cursor.map(ThreadItemsListCursor::Opaque),
             limit,
             sort_direction: Some(sort_direction),
+            defer_output: None,
         })
         .await?;
     let response: JSONRPCResponse = timeout(
@@ -2626,6 +2857,56 @@ async fn read_items_page(
     )
     .await??;
     to_response(response)
+}
+
+async fn create_paginated_thread(
+    codex_home: &Path,
+    thread_id: codex_protocol::ThreadId,
+) -> Result<LocalThreadStore> {
+    let sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.abs());
+    let state_db =
+        codex_state::StateRuntime::init(sqlite.clone(), "mock_provider".to_string()).await?;
+    let store = LocalThreadStore::new(
+        LocalThreadStoreConfig {
+            codex_home: codex_home.to_path_buf(),
+            sqlite,
+            default_model_provider_id: "mock_provider".to_string(),
+        },
+        Some(state_db),
+    );
+    store
+        .create_thread(CreateThreadParams {
+            attached_thread: false,
+            creator_user_id: None,
+            creator_account_id: None,
+            session_id: thread_id.into(),
+            thread_id,
+            extra_config: None,
+            forked_from_id: None,
+            parent_thread_id: None,
+            source: ProtocolSessionSource::Cli,
+            thread_source: None,
+            originator: "test_originator".to_string(),
+            base_instructions: BaseInstructions::default(),
+            dynamic_tools: Vec::new(),
+            selected_capability_roots: Vec::new(),
+            multi_agent_version: None,
+            history_mode: codex_protocol::protocol::ThreadHistoryMode::Paginated,
+            history_base: None,
+            subagent_history_start_ordinal: None,
+            initial_window_id: ContextWindowId::new_uuid_v7().to_string(),
+            runtime_workspace_roots: None,
+            metadata: ThreadPersistenceMetadata {
+                cwd: Some(codex_home.to_path_buf()),
+                model_provider: "mock_provider".to_string(),
+                memory_mode: ThreadMemoryMode::Enabled,
+            },
+        })
+        .await?;
+    store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await?;
+    Ok(store)
 }
 
 fn paginated_turn_started(turn_id: &str) -> RolloutItem {
@@ -2659,6 +2940,7 @@ fn paginated_completed_item(
     item: CoreTurnItem,
 ) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+        content_token_count: None,
         thread_id,
         turn_id: turn_id.to_string(),
         item,
@@ -2730,7 +3012,7 @@ async fn seed_pathless_store_thread(
             history_mode: Default::default(),
             history_base: None,
             subagent_history_start_ordinal: None,
-            initial_window_id: Uuid::now_v7().to_string(),
+            initial_window_id: ContextWindowId::new_uuid_v7().to_string(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: None,

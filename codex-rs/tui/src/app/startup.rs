@@ -5,6 +5,7 @@
 //! Queued resume history replaces the provisional loading frame only when it is ready to render.
 //! Explicit local launch permissions remain runtime overrides across new sessions and reconnects.
 
+use super::backend_selection::NewBackendSession;
 use super::reconnect::ReconnectState;
 use super::startup_bootstrap::bootstrap_server_owned_start;
 use super::startup_bootstrap::uses_server_owned_fresh_bootstrap;
@@ -50,13 +51,6 @@ fn spawn_startup_thread_start(
     });
 }
 
-#[derive(Default)]
-pub(super) struct FreshStartupDefaults {
-    pub(super) server_defaults_read: bool,
-    pub(super) prompt_windows_sandbox: bool,
-    pub(super) approval_policy: Option<codex_protocol::protocol::AskForApproval>,
-}
-
 pub(super) async fn prepare_fresh_startup_config(
     config: &mut Config,
     app_server: &AppServerSession,
@@ -64,45 +58,38 @@ pub(super) async fn prepare_fresh_startup_config(
     cli_kv_overrides: &[(String, TomlValue)],
     harness_overrides: &ConfigOverrides,
     environments: &EnvironmentManager,
-) -> Result<FreshStartupDefaults> {
+) -> Result<crate::projectless::AppliedDefaults> {
     let defaults_cwd = match app_server_target {
         AppServerTarget::Embedded | AppServerTarget::LocalDaemon { .. } => config.cwd.as_path(),
         AppServerTarget::Remote { .. } => {
             app_server.remote_cwd_override().unwrap_or(Path::new("."))
         }
     };
-    let defaults = crate::config_update::read_effective_config_if_supported(
+    let defaults = crate::config_update::read_effective_config_with_layers(
         app_server.request_handle(),
         defaults_cwd,
     )
     .await?;
-    let mut projectless = crate::projectless::AppliedDefaults::default();
-    if let Some(defaults) = defaults.as_ref() {
-        super::new_session::overlay_new_session_defaults(
-            config,
-            &defaults.config,
-            cli_kv_overrides,
-            harness_overrides,
-        );
-        projectless = crate::projectless::apply_defaults(
-            config,
-            harness_overrides,
-            app_server,
-            environments,
-            defaults,
-        );
-    }
+    super::new_session::overlay_new_session_defaults(
+        config,
+        &defaults.config,
+        cli_kv_overrides,
+        harness_overrides,
+    );
+    let projectless = crate::projectless::apply_defaults(
+        config,
+        harness_overrides,
+        app_server,
+        environments,
+        &defaults,
+    );
     apply_managed_new_thread_defaults(
         config,
         app_server.managed_new_thread_defaults(),
         cli_kv_overrides,
         harness_overrides,
     );
-    Ok(FreshStartupDefaults {
-        server_defaults_read: defaults.is_some(),
-        prompt_windows_sandbox: projectless.prompt_windows_sandbox,
-        approval_policy: projectless.approval_policy,
-    })
+    Ok(projectless)
 }
 
 pub(super) fn startup_model(
@@ -163,6 +150,25 @@ impl App {
         }
     }
 
+    pub(super) fn awaiting_side_replay(&self, tui: &tui::Tui) -> bool {
+        self.pending_thread_switch_resets != 0 && self.side_retention_enabled(tui)
+    }
+
+    /// Drain a side pair's queued prompts and transcript updates before a key can switch focus.
+    pub(super) fn can_read_terminal_after_thread_switch(
+        &self,
+        tui: &tui::Tui,
+        app_event_rx: &mpsc::UnboundedReceiver<AppEvent>,
+    ) -> bool {
+        self.pending_thread_switch_resets == 0
+            && (app_event_rx.is_empty()
+                || (!self.side_retention_enabled(tui)
+                    && self
+                        .current_displayed_thread_id()
+                        .and_then(|id| self.side_pair_key(id))
+                        .is_none()))
+    }
+
     /// Keep the provisional loading frame until queued history reaches the owned transcript.
     /// Visible startup decisions and the agent overview must still render immediately.
     pub(super) fn render_startup_frame(
@@ -170,7 +176,10 @@ impl App {
         tui: &mut tui::Tui,
         app_event_rx: &mpsc::UnboundedReceiver<AppEvent>,
     ) -> Result<()> {
-        if tui.is_owned_screen() && !app_event_rx.is_empty() && !self.chat_widget.has_active_view()
+        if self.awaiting_side_replay(tui)
+            || (tui.is_owned_screen()
+                && !app_event_rx.is_empty()
+                && !self.chat_widget.has_active_view())
         {
             return Ok(());
         }
@@ -235,6 +244,7 @@ impl App {
         initial_backends: super::backend_sessions::InitialBackendSessions,
         mut config: Config,
         launch_cwd: PathBuf,
+        backend_preference_context: backend_selection::BackendPreferenceContext,
         cli_kv_overrides: Vec<(String, TomlValue)>,
         harness_overrides: ConfigOverrides,
         loader_overrides: LoaderOverrides,
@@ -334,11 +344,8 @@ impl App {
             &session_selection,
             SessionSelection::StartFresh | SessionSelection::Exit
         );
-        let server_owned_fresh_bootstrap = uses_server_owned_fresh_bootstrap(
-            &app_server_target,
-            &session_selection,
-            &loader_overrides,
-        );
+        let server_owned_fresh_bootstrap =
+            uses_server_owned_fresh_bootstrap(&session_selection, &loader_overrides);
         let mut bootstrap = startup_bootstrap;
         if bootstrap.is_none() && !server_owned_fresh_bootstrap {
             bootstrap = Some(
@@ -392,7 +399,7 @@ impl App {
                 }
             }
         } else {
-            FreshStartupDefaults::default()
+            crate::projectless::AppliedDefaults::default()
         };
         let mut launch_choices = crate::app_server_session::StartupLaunchChoices::from_launch(
             &cli_kv_overrides,
@@ -408,7 +415,6 @@ impl App {
                         &mut app_server,
                         &mut config,
                         &mut launch_choices,
-                        startup_defaults.server_defaults_read,
                         &cli_kv_overrides,
                         &harness_overrides,
                     ),
@@ -441,7 +447,7 @@ impl App {
                 &harness_overrides,
             );
         }
-        let mut model = startup_model(&config, &bootstrap, startup_defaults.server_defaults_read);
+        let mut model = startup_model(&config, &bootstrap, fresh_start);
         let available_models = bootstrap.available_models;
         let mut remote_connection =
             crate::status::remote_connection::remote_connection_status_value(
@@ -517,8 +523,10 @@ impl App {
         {
             tracing::warn!(%error, "TUI task delegation is unavailable without its MCP server");
         }
+        let mut provider_writes = HashMap::new();
         let model_catalog = Arc::new(
             ModelCatalog::new(available_models.clone())
+                .for_backend(app_server.backend_id(), &mut provider_writes)
                 .with_collaboration_modes(bootstrap.collaboration_modes),
         );
         let feedback_audience = bootstrap.feedback_audience;
@@ -953,14 +961,17 @@ impl App {
             ));
         }
         let file_search = FileSearchManager::new(config.cwd.to_path_buf(), app_event_tx.clone());
-        let runtime_keymap =
-            RuntimeKeymap::from_config(&local_settings.tui.keymap).map_err(|err| {
-                color_eyre::eyre::eyre!(
-                    "Invalid `tui.keymap` configuration: {err}\n\
+        let runtime_keymap = RuntimeKeymap::for_session(
+            &local_settings.tui.keymap,
+            local_settings.workspace_enabled(&config),
+        )
+        .map_err(|err| {
+            color_eyre::eyre::eyre!(
+                "Invalid `tui.keymap` configuration: {err}\n\
 Fix the config and retry.\n\
 See the Codex keymap documentation for supported actions and examples."
-                )
-            });
+            )
+        });
         let runtime_keymap = startup_try!(runtime_keymap);
         #[cfg(not(debug_assertions))]
         let upgrade_version = crate::updates::get_upgrade_version(&config);
@@ -968,6 +979,7 @@ See the Codex keymap documentation for supported actions and examples."
         let agents_overview =
             agents_overview::AgentsOverviewState::new(local_settings.tui.agents_overview_grouping);
         let mut app = Self {
+            provider_writes,
             feature_write_lock: Arc::default(),
             config_notification_test_generation: 0,
             config_notification_test_pending: None,
@@ -977,6 +989,7 @@ See the Codex keymap documentation for supported actions and examples."
             app_event_tx,
             chat_widget,
             workspace_command_runner: Some(workspace_command_runner),
+            backend_preference_context,
             config,
             local_settings,
             launch_cwd,
@@ -1050,6 +1063,12 @@ See the Codex keymap documentation for supported actions and examples."
             agent_navigation: AgentNavigationState::default(),
             agents_overview,
             side_threads: HashMap::new(),
+            side_companions: HashMap::new(),
+            zoomed_thread: None,
+            exact_sidebar_width: None,
+            divider_drag: None,
+            pane_resize: None,
+            passive_link_drag: None,
             abandoned_side_threads: HashSet::new(),
             active_thread_id: None,
             active_thread_rx: None,
@@ -1284,6 +1303,12 @@ See the Codex keymap documentation for supported actions and examples."
 
         let mut backends =
             super::backend_sessions::BackendSessions::from_initial(app_server, other_backends);
+        if matches!(
+            app.app_server_target,
+            AppServerTarget::Embedded | AppServerTarget::LocalDaemon { .. }
+        ) {
+            backends.set_preference_key(backends.displayed_owner(), "local");
+        }
 
         let exit_reason_result = if let Some(exit_reason) = pre_loop_exit_reason {
             Ok(exit_reason)
@@ -1291,6 +1316,14 @@ See the Codex keymap documentation for supported actions and examples."
             loop {
                 let displayed_session = backends.displayed;
                 let displayed_owner = backends.displayed_owner();
+                let multi_backend = app.config.features.enabled(Feature::TuiMultiBackend);
+                let next_backend = if multi_backend && app.can_cycle_conversation_backend() {
+                    backends.next_listening_backend(displayed_owner)
+                } else {
+                    None
+                };
+                let current_label = next_backend.and_then(|_| backends.displayed_name());
+                app.chat_widget.set_new_backend_control(current_label);
                 if !backends.is_listening(displayed_owner)
                     && !app.pending_startup_thread_start
                     && !app.reconnect.offline
@@ -1397,6 +1430,7 @@ See the Codex keymap documentation for supported actions and examples."
                 // widgets before those app events have been applied.
                 let has_pending_app_events = !app_event_rx.is_empty();
                 let paused_backend = ((app.reconnect.offline && !app.pending_startup_thread_start)
+                    || (app.awaiting_side_replay(tui) && has_pending_app_events)
                     || (!matches!(app.app_server_target, AppServerTarget::Embedded)
                         && has_pending_app_events))
                     .then_some(displayed_owner);
@@ -1443,6 +1477,22 @@ See the Codex keymap documentation for supported actions and examples."
                         AppRunControl::Continue
                     }
                     Some(event) = app_event_rx.recv() => {
+                        let switch_backend = match &event {
+                            AppEvent::ChooseNewSessionCheckout { name } | AppEvent::NewSession { name }
+                                if multi_backend => app.other_new_session_backend(&backends).await
+                                    .map(|owner| (owner, NewBackendSession::Fresh { name: name.clone() })),
+                            AppEvent::CycleNewConversationBackend => {
+                                let Some(owner) = next_backend else { continue };
+                                Some((owner, NewBackendSession::CarryDraft))
+                            }
+                            _ => None,
+                        };
+                        if let Some((owner, session)) = switch_backend {
+                            if let Err(message) = Box::pin(app.start_new_session_on_other_backend(tui, &mut backends, owner, session)).await {
+                                app.chat_widget.add_error_message(message);
+                            }
+                            continue;
+                        }
                         if let AppEvent::ResumeBackendSession(target) = event {
                             match app.resume_backend_session(tui, &mut backends, target).await {
                                 Ok(AppRunControl::Continue) => continue,
@@ -1461,13 +1511,16 @@ See the Codex keymap documentation for supported actions and examples."
                             }
                             _ => displayed_session,
                         };
-                        let had_active_modal = app.chat_widget.has_active_modal();
+                        // A modal deferred behind a snapshot reset still needs its first frame
+                        // and protected-input drain when replay completes.
+                        let had_visible_modal = app.chat_widget.has_active_modal()
+                            && !app.awaiting_side_replay(tui);
                         match Box::pin(app.handle_event(tui, backends.session_at_mut(event_session), event)).await {
                             Ok(AppRunControl::Continue) => {
                                 if is_initial_session_header {
                                     waiting_for_initial_session_header = false;
                                 }
-                                if !had_active_modal
+                                if !had_visible_modal
                                     && app.chat_widget.has_active_modal()
                                     && let Err(err) = app.render_startup_frame(tui, &app_event_rx)
                                 {
@@ -1499,7 +1552,7 @@ See the Codex keymap documentation for supported actions and examples."
                         }
                         AppRunControl::Continue
                     }
-                    event = tui_events.next(), if app.pending_thread_switch_resets == 0
+                    event = tui_events.next(), if app.can_read_terminal_after_thread_switch(tui, &app_event_rx)
                         && (app.reconnect.offline || !block_terminal_input_for_pending_startup_events) => {
                         if let Some(event) = event {
                             if (matches!(

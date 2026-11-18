@@ -313,6 +313,7 @@ mod tests {
         let mut expected = metadata.clone();
         for text in ["  ", "delegated task", "later output"] {
             let item = RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+                content_token_count: None,
                 thread_id: metadata.id,
                 turn_id: "turn-1".to_string(),
                 item: TurnItem::FunctionCallOutput(codex_protocol::items::FunctionCallOutputItem {
@@ -345,6 +346,7 @@ mod tests {
     fn completed_user_message_items_set_title_and_first_user_message() {
         let mut metadata = metadata_for_test();
         let item = RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+            content_token_count: None,
             thread_id: ThreadId::default(),
             turn_id: "turn-1".to_string(),
             item: TurnItem::UserMessage(UserMessageItem::new(&[UserInput::Text {
@@ -395,6 +397,7 @@ mod tests {
         for event in [
             EventMsg::UserMessage(user.as_legacy_user_message_event()),
             EventMsg::ItemCompleted(ItemCompletedEvent {
+                content_token_count: None,
                 thread_id,
                 turn_id: "turn-1".to_string(),
                 item: TurnItem::UserMessage(user),
@@ -534,6 +537,7 @@ mod tests {
             &mut metadata,
             &RolloutItem::SessionMeta(Box::new(SessionMetaLine {
                 meta: SessionMeta {
+                    account_scoped: false,
                     creator_user_id: None,
                     attached_thread: false,
                     creator_account_id: None,
@@ -574,6 +578,7 @@ mod tests {
             &RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("turn-1".to_string()),
                 root_turn_id: None,
+                direct_only_tool_namespaces: None,
                 disabled_plugin_ids: None,
                 cwd: serde_json::from_value(serde_json::json!(
                     std::env::current_dir()
@@ -618,6 +623,7 @@ mod tests {
             &RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("turn-1".to_string()),
                 root_turn_id: None,
+                direct_only_tool_namespaces: None,
                 disabled_plugin_ids: None,
                 cwd: serde_json::from_value(serde_json::json!(
                     std::env::current_dir()
@@ -662,6 +668,7 @@ mod tests {
             &RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("turn-1".to_string()),
                 root_turn_id: None,
+                direct_only_tool_namespaces: None,
                 disabled_plugin_ids: None,
                 cwd: serde_json::from_value(serde_json::json!(&fallback_cwd))
                     .expect("absolute fallback cwd"),
@@ -695,6 +702,7 @@ mod tests {
             &RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("turn-1".to_string()),
                 root_turn_id: None,
+                direct_only_tool_namespaces: None,
                 disabled_plugin_ids: None,
                 cwd: serde_json::from_value(serde_json::json!(
                     std::env::current_dir()
@@ -741,6 +749,7 @@ mod tests {
                     service_tier: None,
                     approval_policy: AskForApproval::Never,
                     approvals_reviewer: ApprovalsReviewer::User,
+                    requested_approvals_reviewer: None,
                     permission_profile: permission_profile.clone(),
                     active_permission_profile: None,
                     cwd: cwd.clone().try_into().expect("absolute settings cwd"),
@@ -785,6 +794,7 @@ mod tests {
             &mut metadata,
             &RolloutItem::SessionMeta(Box::new(SessionMetaLine {
                 meta: SessionMeta {
+                    account_scoped: false,
                     creator_user_id: None,
                     attached_thread: false,
                     creator_account_id: None,

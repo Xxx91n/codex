@@ -3,6 +3,8 @@
 //! This module owns the typed JSON-RPC calls needed by the TUI and keeps
 //! request/response plumbing out of `App` and `ChatWidget`.
 
+mod account;
+pub(crate) use account::SessionAccount;
 mod daybreak_api_key_compat;
 mod events;
 mod external_agent_config;
@@ -81,8 +83,11 @@ use codex_app_server_protocol::ThreadApproveGuardianDeniedActionParams;
 use codex_app_server_protocol::ThreadApproveGuardianDeniedActionResponse;
 use codex_app_server_protocol::ThreadArchiveParams;
 use codex_app_server_protocol::ThreadArchiveResponse;
+use codex_app_server_protocol::ThreadBackgroundTerminal;
 use codex_app_server_protocol::ThreadBackgroundTerminalsCleanParams;
 use codex_app_server_protocol::ThreadBackgroundTerminalsCleanResponse;
+use codex_app_server_protocol::ThreadBackgroundTerminalsListParams;
+use codex_app_server_protocol::ThreadBackgroundTerminalsListResponse;
 use codex_app_server_protocol::ThreadCompactStartParams;
 use codex_app_server_protocol::ThreadCompactStartResponse;
 use codex_app_server_protocol::ThreadDeleteParams;
@@ -156,6 +161,9 @@ use codex_utils_path_uri::PathUri;
 use color_eyre::eyre::ContextCompat;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
+use futures::FutureExt;
+use futures::future::Either;
+use futures::future::RemoteHandle;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -164,6 +172,8 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 use std::time::Instant;
+use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const JSONRPC_INVALID_REQUEST: i64 = -32600;
@@ -327,12 +337,15 @@ pub(crate) struct AppServerBootstrap {
 
 pub(crate) struct AppServerSession {
     backend_id: crate::backend_id::BackendId,
-    /// Owns events and the connection lifetime for live sessions. Picker views borrow only the
-    /// request handle below and deliberately have no connection owner.
+    /// Owns events and the connection lifetime for live sessions. Request-only views share the
+    /// request handle below and have no connection owner.
     connection_owner: Option<AppServerClient>,
     request_handle: AppServerRequestHandle,
     request_id_namespace: Option<Uuid>,
     next_request_id: i64,
+    automatic_name_writes: HashMap<ThreadId, Arc<Semaphore>>,
+    /// The newest docked replay refresh on this connection.
+    pub(crate) pending_side_skills_refresh: Option<Uuid>,
     history_pagination: HashMap<ThreadId, history::ThreadHistoryPagination>,
     pub(crate) focused_conversation: Option<ThreadId>,
     pub(crate) attempted_revision: Option<String>,
@@ -349,12 +362,42 @@ pub(crate) struct AppServerSession {
     pub(crate) thread_settings_update_supported: bool,
     default_model: Option<String>,
     available_models: Vec<ModelPreset>,
+    prefetched_model_list: Option<RemoteHandle<Result<ModelListResponse>>>,
     daybreak_api_key_compat: Arc<tokio::sync::Semaphore>,
     managed_new_thread_defaults: Option<NewThreadModelDefaults>,
     external_agent_config_import_id: Mutex<Option<String>>,
     dynamic_tool_mcp: Option<Arc<DynamicToolMcpServer>>,
     pub(crate) worktree_source_config_builder:
         Option<Box<crate::legacy_core::config::ConfigBuilder>>,
+}
+
+/// An automatic save holds the gate only while writing, so a manual rename can skip a slow read.
+pub(crate) struct AutomaticThreadName {
+    session: AppServerSession,
+    thread_id: ThreadId,
+    gate: Arc<Semaphore>,
+}
+
+impl AutomaticThreadName {
+    pub(crate) async fn save(mut self, title: String, cancellation: &CancellationToken) {
+        let read = self
+            .session
+            .thread_read(self.thread_id, /*include_turns*/ false);
+        let Some(Ok(thread)) = cancellation.run_until_cancelled(read).await else {
+            return;
+        };
+        if thread.name.is_some() {
+            return;
+        }
+        let Ok(_permit) = self.gate.acquire().await else {
+            return;
+        };
+        if !cancellation.is_cancelled()
+            && let Err(error) = self.session.thread_set_name(self.thread_id, title).await
+        {
+            tracing::debug!(%error, "failed to apply generated thread title");
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -509,6 +552,8 @@ impl AppServerSession {
             request_handle,
             request_id_namespace: None,
             next_request_id: 1,
+            automatic_name_writes: HashMap::new(),
+            pending_side_skills_refresh: None,
             history_pagination: HashMap::new(),
             focused_conversation: None,
             attempted_revision: None,
@@ -524,6 +569,7 @@ impl AppServerSession {
             thread_settings_update_supported: true,
             default_model: None,
             available_models: Vec::new(),
+            prefetched_model_list: None,
             daybreak_api_key_compat: Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
             managed_new_thread_defaults: None,
             external_agent_config_import_id: Mutex::default(),
@@ -536,8 +582,8 @@ impl AppServerSession {
         self.backend_id
     }
 
-    /// Creates a request-only picker view without transferring the live connection's events.
-    pub(crate) fn picker_view(&self) -> Self {
+    /// Creates a request-only view without transferring the live connection's events.
+    pub(crate) fn request_view(&self) -> Self {
         let mut view = Self::from_parts(
             self.backend_id,
             /*connection_owner*/ None,
@@ -749,6 +795,32 @@ impl AppServerSession {
         client.codex_home()
     }
 
+    pub(crate) fn prefetch_model_list(&mut self) {
+        let (request, models) = self.request_model_list().remote_handle();
+        tokio::spawn(request);
+        self.prefetched_model_list = Some(models);
+    }
+
+    fn request_model_list(&mut self) -> impl Future<Output = Result<ModelListResponse>> + use<> {
+        let handle = self.request_handle();
+        let request_id = self.next_request_id();
+        async move {
+            handle
+                .request_typed(ClientRequest::ModelList {
+                    request_id,
+                    params: ModelListParams {
+                        cursor: None,
+                        limit: None,
+                        include_hidden: Some(true),
+                    },
+                })
+                .await
+                .map_err(|err| {
+                    bootstrap_request_error("model/list failed during TUI bootstrap", err)
+                })
+        }
+    }
+
     pub(crate) async fn bootstrap(&mut self, config: &Config) -> Result<AppServerBootstrap> {
         let started_at = Instant::now();
         let account = self.read_account().await?;
@@ -789,26 +861,13 @@ impl AppServerSession {
         fallback: EmptyCatalogFallback,
     ) -> Result<AppServerBootstrap> {
         let started_at = Instant::now();
-        // `hooks/list` holds the global config queue during startup. Submit models and config
-        // requirements together so an uncached model fetch can overlap both config requests.
-        let model_request_id = self.next_request_id();
+        let models = match self.prefetched_model_list.take() {
+            Some(models) => Either::Left(models),
+            None => Either::Right(self.request_model_list()),
+        };
         let requirements_request_id = self.next_request_id();
         let (models, requirements, collaboration_modes) = tokio::try_join!(
-            async {
-                self.request_handle
-                    .request_typed::<ModelListResponse>(ClientRequest::ModelList {
-                        request_id: model_request_id,
-                        params: ModelListParams {
-                            cursor: None,
-                            limit: None,
-                            include_hidden: Some(true),
-                        },
-                    })
-                    .await
-                    .map_err(|err| {
-                        bootstrap_request_error("model/list failed during TUI bootstrap", err)
-                    })
-            },
+            models,
             async {
                 match self
                     .request_handle
@@ -891,63 +950,17 @@ impl AppServerSession {
         self.default_model = Some(default_model.clone());
         self.available_models = available_models.clone();
 
-        let (
-            account_email,
-            auth_mode,
-            status_account_display,
-            plan_type,
-            feedback_audience,
-            has_chatgpt_account,
-        ) = match account.account {
-            Some(Account::ApiKey {}) => (
-                None,
-                Some(TelemetryAuthMode::ApiKey),
-                Some(StatusAccountDisplay::ApiKey),
-                None,
-                FeedbackAudience::External,
-                false,
-            ),
-            Some(Account::Chatgpt {
-                email,
-                plan_type,
-                workspace_name,
-            }) => {
-                let feedback_audience = if email
-                    .as_deref()
-                    .is_some_and(|email| email.ends_with("@openai.com"))
-                {
-                    FeedbackAudience::OpenAiEmployee
-                } else {
-                    FeedbackAudience::External
-                };
-                (
-                    email.clone(),
-                    Some(TelemetryAuthMode::Chatgpt),
-                    Some(StatusAccountDisplay::ChatGpt {
-                        email,
-                        plan: Some(plan_type_display_name(plan_type)),
-                        workspace: workspace_display(workspace_name, account.workspace_routing),
-                    }),
-                    Some(plan_type),
-                    feedback_audience,
-                    true,
-                )
-            }
-            Some(Account::AmazonBedrock { .. } | Account::Gcp {}) => {
-                (None, None, None, None, FeedbackAudience::External, false)
-            }
-            None => (None, None, None, None, FeedbackAudience::External, false),
-        };
+        let account = SessionAccount::from(account);
         Ok(AppServerBootstrap {
             duration: started_at.elapsed(),
-            account_email,
-            auth_mode,
-            status_account_display,
-            plan_type,
+            account_email: account.email().map(str::to_owned),
+            auth_mode: account.auth_mode(),
+            feedback_audience: account.feedback_audience(),
+            has_chatgpt_account: account.has_chatgpt_account(),
+            status_account_display: account.display,
+            plan_type: account.plan,
             requires_openai_auth: account.requires_openai_auth,
             default_model,
-            feedback_audience,
-            has_chatgpt_account,
             available_models,
             collaboration_modes,
             allowed_approval_policies,
@@ -976,7 +989,7 @@ impl AppServerSession {
                 },
             })
             .await
-            .map_err(|err| bootstrap_request_error("account/read failed during TUI bootstrap", err))
+            .map_err(|err| bootstrap_request_error("account/read failed", err))
     }
 
     pub(crate) async fn next_event(&mut self) -> Option<AppServerSessionEvent> {
@@ -1153,6 +1166,32 @@ impl AppServerSession {
         .await
     }
 
+    pub(crate) async fn fork_thread_for_directory_change(
+        &mut self,
+        local_settings: &LocalSettings,
+        config: Config,
+        thread_id: ThreadId,
+        selected_profile: Option<&PermissionProfileSelection>,
+    ) -> Result<AppServerStartedThread> {
+        let permission_mode = match self.thread_params_mode() {
+            ThreadParamsMode::Embedded => ForkPermissionMode::OverrideFromCurrentConfig,
+            ThreadParamsMode::Remote | ThreadParamsMode::Cloud => ForkPermissionMode::InheritSaved,
+        };
+        self.fork_thread_at_with_presentation(
+            local_settings,
+            config,
+            thread_id,
+            /*last_turn_id*/ None,
+            /*before_turn_id*/ None,
+            ForkGoalContinuation::DeferUntilNextTurn,
+            ForkPresentation::Regular,
+            selected_profile,
+            permission_mode,
+            ForkConfigSource::Session,
+        )
+        .await
+    }
+
     pub(crate) async fn fork_side_thread(
         &mut self,
         local_settings: &LocalSettings,
@@ -1238,6 +1277,12 @@ impl AppServerSession {
             // Active-session config has already adopted the server's roots. Fork does
             // not restore saved roots when omitted, so preserve this explicit selection.
             params.runtime_workspace_roots = Some(config.workspace_roots.clone());
+            if permission_mode == ForkPermissionMode::InheritSaved && selected_profile.is_none() {
+                params.approvals_reviewer = None;
+                if let Some(overrides) = params.config.as_mut() {
+                    overrides.remove("approvals_reviewer");
+                }
+            }
         }
         if self.thread_params_mode() == ThreadParamsMode::Remote
             && permission_mode == ForkPermissionMode::InheritSaved
@@ -1688,11 +1733,34 @@ impl AppServerSession {
             .await
     }
 
+    pub(crate) fn automatic_thread_name_writer(
+        &mut self,
+        thread_id: ThreadId,
+    ) -> AutomaticThreadName {
+        self.automatic_name_writes
+            .retain(|_, gate| Arc::strong_count(gate) > 1);
+        let session = self.request_view();
+        let gate = self
+            .automatic_name_writes
+            .entry(thread_id)
+            .or_insert_with(|| Arc::new(Semaphore::new(/*permits*/ 1)));
+        AutomaticThreadName {
+            session,
+            thread_id,
+            gate: Arc::clone(gate),
+        }
+    }
+
     pub(crate) async fn thread_set_name(
         &mut self,
         thread_id: ThreadId,
         name: String,
     ) -> Result<()> {
+        let gate = self.automatic_name_writes.get(&thread_id).cloned();
+        let _permit = match &gate {
+            Some(gate) => Some(gate.acquire().await?),
+            None => None,
+        };
         let request_id = self.next_request_id();
         let _: ThreadSetNameResponse = self
             .request_handle
@@ -1705,6 +1773,10 @@ impl AppServerSession {
             })
             .await
             .wrap_err("thread/name/set failed in TUI")?;
+        if let Some(gate) = gate.as_ref() {
+            gate.close();
+            self.automatic_name_writes.remove(&thread_id);
+        }
         Ok(())
     }
 
@@ -1882,6 +1954,33 @@ impl AppServerSession {
         Ok(())
     }
 
+    pub(crate) async fn list_background_terminals(
+        &mut self,
+        thread_id: ThreadId,
+    ) -> Result<Vec<ThreadBackgroundTerminal>> {
+        let mut terminals = Vec::new();
+        let mut cursor = None;
+        loop {
+            let request_id = self.next_request_id();
+            let page: ThreadBackgroundTerminalsListResponse = self
+                .request_handle
+                .request_typed(ClientRequest::ThreadBackgroundTerminalsList {
+                    request_id,
+                    params: ThreadBackgroundTerminalsListParams {
+                        thread_id: thread_id.to_string(),
+                        cursor,
+                        limit: None,
+                    },
+                })
+                .await?;
+            terminals.extend(page.data);
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                return Ok(terminals);
+            }
+        }
+    }
+
     pub(crate) async fn thread_background_terminals_clean(
         &mut self,
         thread_id: ThreadId,
@@ -1923,6 +2022,7 @@ impl AppServerSession {
         &mut self,
         params: SkillsListParams,
     ) -> Result<SkillsListResponse> {
+        self.pending_side_skills_refresh = None;
         let request_id = self.next_request_id();
         self.request_handle
             .request_typed(ClientRequest::SkillsList { request_id, params })
@@ -2883,8 +2983,8 @@ mod tests {
             AppServerClient::Cloud(client),
             ThreadParamsMode::Cloud,
         );
-        let mut first = session.picker_view();
-        let mut second = session.picker_view();
+        let mut first = session.request_view();
+        let mut second = session.request_view();
 
         let first_id = first.next_request_id();
         assert_ne!(session.next_request_id(), first_id);
@@ -2902,7 +3002,7 @@ mod tests {
             ThreadParamsMode::Cloud,
         );
 
-        session.picker_view().shutdown().await.unwrap();
+        session.request_view().shutdown().await.unwrap();
         events
             .send(codex_app_server_client::AppServerEvent::Disconnected {
                 message: "still live".to_string(),

@@ -77,6 +77,7 @@ use codex_features::Features;
 use codex_features::FeaturesToml;
 use codex_features::MultiAgentV2ConfigToml;
 use codex_features::NetworkProxyConfigToml;
+use codex_features::RuntimeAuthMode;
 use codex_features::SleepToolMode;
 use codex_features::TokenBudgetConfigToml;
 use codex_git_utils::resolve_root_git_project_for_trust;
@@ -97,6 +98,7 @@ use codex_model_provider_info::GCP_PROVIDER_ID;
 use codex_model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
+use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_model_provider_info::built_in_model_providers;
 use codex_model_provider_info::merge_configured_model_providers;
 use codex_models_manager::ModelsManagerConfig;
@@ -146,6 +148,7 @@ use rmcp::model::FormElicitationCapability;
 use rmcp::model::UrlElicitationCapability;
 use serde::Deserialize;
 use serde::Serialize;
+use serde::de::IntoDeserializer;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -168,6 +171,7 @@ use toml_edit::DocumentMut;
 
 mod auth_keyring;
 pub mod edit;
+mod guardian_policy;
 mod managed_features;
 mod metrics;
 mod network_config;
@@ -179,6 +183,8 @@ mod permission_profile_selection;
 mod permissions;
 mod requirements;
 mod resolved_permission_profile;
+pub(crate) use guardian_policy::resolve_guardian_policy_text;
+pub(crate) use guardian_policy::resolve_guardian_reviewer;
 mod runtime_refresh;
 pub(crate) use runtime_refresh::RuntimeConfigRefresh;
 #[cfg(test)]
@@ -198,6 +204,7 @@ use codex_sandboxing::compatibility_sandbox_policy_for_permission_profile;
 pub use codex_sandboxing::system_bwrap_warning;
 pub use managed_features::ManagedFeatures;
 pub(crate) use metrics::emit_session_start_metrics;
+pub(crate) use metrics::legacy_multi_agent_disabled_sources;
 pub use network_config::EnvironmentNetworkConfigError;
 pub use network_config::NetworkConfigInputs;
 pub use network_config::PreparedNetworkConfig;
@@ -693,6 +700,9 @@ pub struct Config {
     /// been escalated. This does not disable separate safety checks such as
     /// ARC.
     pub approvals_reviewer: ApprovalsReviewer,
+    /// Requested reviewer when managed requirements replace the effective choice.
+    /// `None` uses `approvals_reviewer`, including programmatically constructed configs.
+    pub requested_approvals_reviewer: Option<ApprovalsReviewer>,
 
     /// enforce_residency means web traffic cannot be routed outside of a
     /// particular geography. HTTP clients should direct their requests
@@ -722,6 +732,8 @@ pub struct Config {
     /// `# Policy Configuration` section rather than replacing the whole
     /// guardian developer prompt.
     pub guardian_policy_config: Option<String>,
+    /// Guardian publication observed before startup loading or last policy refresh.
+    pub guardian_policy_revision: u64,
 
     /// Additional Guardian policy from requirements.toml or config.toml.
     /// Rendered into `{{ extra_policy }}` alongside the resolved tenant policy.
@@ -733,6 +745,8 @@ pub struct Config {
     pub guardian_policy_template: Option<String>,
     /// Transcript encoding shared by Guardian review and scoring.
     pub guardian_transcript_mode: codex_protocol::TranscriptFormat,
+    /// Frozen section policy for sync Guardian; absence keeps fixed budgeting.
+    pub guardian_sync_elastic_budget: Option<codex_guardian_context::ElasticBudgetConfig>,
 
     /// Optional replacement for the gated history-retrieval instructions.
     /// Blank config values are treated as unset, like other Guardian policy overrides.
@@ -833,6 +847,9 @@ pub struct Config {
 
     /// Own the fullscreen transcript when the alternate screen is enabled.
     pub tui_fullscreen_transcript: bool,
+
+    /// Preferred docked sidebar width as a percentage of the terminal.
+    pub tui_sidebar_width_percent: Option<u8>,
 
     /// Mouse wheel speed multiplier for transcript scrolling; defaults to one row per event.
     pub tui_mouse_scroll_speed: Option<f64>,
@@ -1169,6 +1186,8 @@ pub struct Config {
     pub current_time_reminder: Option<CurrentTimeReminderConfig>,
     /// How the sleep tool is selected when its feature gate is enabled.
     pub sleep_tool_mode: SleepToolMode,
+    /// Authentication mode used when runtime agent instances are enabled.
+    pub runtime_auth_mode: RuntimeAuthMode,
 
     /// Centralized feature flags; source of truth for feature gating.
     pub features: ManagedFeatures,
@@ -1661,6 +1680,15 @@ async fn config_toml_from_layers(layers: &ConfigLayerStack) -> std::io::Result<C
 }
 
 impl Config {
+    /// Capture storage and sync preparation use one session-static rollout choice.
+    pub(crate) fn guardian_context_budgeting(&self) -> codex_guardian_context::ContextBudgeting {
+        if self.guardian_sync_elastic_budget.is_some() {
+            codex_guardian_context::ContextBudgeting::Elastic
+        } else {
+            codex_guardian_context::ContextBudgeting::Fixed
+        }
+    }
+
     pub fn sqlite_config(&self) -> &codex_state::SqliteConfig {
         &self.sqlite
     }
@@ -1688,6 +1716,14 @@ impl Config {
         self.guardian_policy_config
             .as_deref()
             .unwrap_or(model_messages.auto_review().policy)
+    }
+
+    /// Native Guardian agent history requires the reviewed thread's OpenAI provider.
+    pub fn guardian_native_multi_agent_history_enabled(&self) -> bool {
+        self.model_provider_id == OPENAI_PROVIDER_ID
+            && self
+                .features
+                .enabled(Feature::GuardianNativeMultiAgentHistory)
     }
 
     pub(crate) fn multi_agent_version_override(&self) -> Option<MultiAgentVersion> {
@@ -1840,6 +1876,11 @@ impl Config {
             self.http_client_factory(),
             self.apps_mcp_product_sku.clone(),
         )
+        .with_runtime_auth_mode(
+            (self.features.enabled(Feature::RuntimeAgentInstances)
+                && codex_runtime_agent_instance::is_openai_api_url(&self.chatgpt_base_url))
+            .then_some(self.runtime_auth_mode),
+        )
     }
 
     /// Applies managed MCP requirements to servers supplied by one plugin.
@@ -1959,12 +2000,13 @@ impl Config {
                 .enabled(Feature::SkillMcpDependencyInstall),
             approval_policy: self.permissions.approval_policy.clone(),
             permission_profile: self.permissions.permission_profile().clone(),
+            host_cwd: self.cwd.clone(),
             config_layer_stack: self.config_layer_stack.clone(),
             plugins: self.plugins.clone(),
             approvals_reviewer: self.approvals_reviewer,
             environment_cwds: HashMap::new(),
             environment_use_mxc: HashMap::new(),
-            server_permission_profiles: HashMap::new(),
+            server_permissions: HashMap::new(),
             codex_self_exe: self.codex_self_exe.clone(),
             codex_linux_sandbox_exe: self.codex_linux_sandbox_exe.clone(),
             use_legacy_landlock: self.features.use_legacy_landlock(),
@@ -3558,7 +3600,7 @@ impl Config {
             web_search_request: override_tools_web_search_request,
         };
 
-        let configured_features = Features::from_sources(
+        let mut configured_features = Features::from_sources(
             FeatureConfigSource {
                 features: cfg.features.as_ref(),
                 experimental_use_unified_exec_tool: cfg.experimental_use_unified_exec_tool,
@@ -3568,6 +3610,12 @@ impl Config {
             },
             feature_overrides,
         );
+        if cfg.agents.as_ref().and_then(|agents| agents.enabled) == Some(true)
+            && !configured_features.enabled(Feature::Collab)
+            && managed_features::project_overrides_legacy_subagent_opt_out(&config_layer_stack)
+        {
+            configured_features.enable(Feature::Collab);
+        }
         let features = ManagedFeatures::from_configured_with_warnings(
             configured_features,
             feature_requirements,
@@ -3992,6 +4040,7 @@ impl Config {
         let mut approvals_reviewer = approvals_reviewer_override
             .or(cfg.approvals_reviewer)
             .unwrap_or(ApprovalsReviewer::User);
+        let requested_approvals_reviewer = approvals_reviewer;
         if !approvals_reviewer_was_explicit
             && let Err(err) = constrained_approvals_reviewer.can_set(&approvals_reviewer)
         {
@@ -4030,6 +4079,15 @@ impl Config {
             .features
             .as_ref()
             .and_then(|features| features.sleep_tool.as_ref())
+            .and_then(|feature| match feature {
+                FeatureToml::Enabled(_) => None,
+                FeatureToml::Config(config) => config.mode,
+            })
+            .unwrap_or_default();
+        let runtime_auth_mode = cfg
+            .features
+            .as_ref()
+            .and_then(|features| features.runtime_agent_instances.as_ref())
             .and_then(|feature| match feature {
                 FeatureToml::Enabled(_) => None,
                 FeatureToml::Config(config) => config.mode,
@@ -4261,26 +4319,9 @@ impl Config {
             .and_then(|skills| skills.max_context_tokens);
         let include_environment_context = cfg.include_environment_context.unwrap_or(true);
         let include_environment_context_time = cfg.include_environment_context_time.unwrap_or(true);
-        let guardian_policy_config =
-            guardian_policy_config_from_requirements(config_layer_stack.requirements_toml())
-                .or_else(|| {
-                    cfg.auto_review
-                        .as_ref()
-                        .and_then(|auto_review| normalize_guardian_policy_config(
-                            auto_review.policy.as_deref(),
-                        ))
-                });
-        let guardian_extra_policy = normalize_guardian_policy_config(
-            config_layer_stack
-                .requirements_toml()
-                .guardian_extra_policy
-                .as_deref(),
-        )
-        .or_else(|| {
-            cfg.auto_review.as_ref().and_then(|auto_review| {
-                normalize_guardian_policy_config(auto_review.extra_policy.as_deref())
-            })
-        });
+        let (guardian_policy_config, guardian_extra_policy) = resolve_guardian_policy_text(
+            config_layer_stack.requirements_toml(), cfg.auto_review.as_ref(),
+        );
         let guardian_transcript_mode = cfg
             .features
             .as_ref()
@@ -4290,6 +4331,37 @@ impl Config {
                 FeatureToml::Enabled(_) => None,
             })
             .unwrap_or_default();
+        let guardian_sync_elastic_budget = cfg.features.as_ref()
+            .and_then(|features| features.guardianv2.as_ref())
+            .and_then(|feature| match feature {
+                FeatureToml::Config(guardian) if guardian.sync_elastic_budgeting == Some(true) => Some(guardian),
+                FeatureToml::Config(_) | FeatureToml::Enabled(_) => None,
+            })
+            .map(|guardian| {
+                let sections = guardian.sync_elastic_sections.as_ref().filter(|sections| !sections.is_empty())
+                    .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData,
+                        "sync_elastic_sections is required when sync_elastic_budgeting is enabled"))?;
+                let mut decoded_sections = BTreeMap::new();
+                for (name, limits) in sections {
+                    let section = codex_guardian_context::ElasticSection::deserialize(name.as_str().into_deserializer())
+                        .map_err(|error: serde::de::value::Error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+                    let mut section_limits = codex_guardian_context::ElasticSectionLimits::new(
+                        limits.min_total_section_tokens,
+                        limits.max_section_entry_tokens,
+                    ).map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+                    if let Some(maximum) = limits.max_total_section_tokens {
+                        section_limits = section_limits.with_max_total_section_tokens(maximum)
+                            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+                    }
+                    if decoded_sections.insert(section, section_limits).is_some() {
+                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
+                            format!("duplicate sync_elastic_sections section: {name}")));
+                    }
+                }
+                let policy = codex_guardian_context::ElasticBudgetConfig { sections: decoded_sections };
+                policy.validate().map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+                Ok::<_, std::io::Error>(policy)
+            }).transpose()?;
         let guardian_policy_template = cfg
             .auto_review
             .as_ref()
@@ -4569,6 +4641,9 @@ impl Config {
             explicit_permission_profile_mode,
             custom_permission_profiles,
             approvals_reviewer: constrained_approvals_reviewer.value(),
+            requested_approvals_reviewer: (requested_approvals_reviewer
+                != constrained_approvals_reviewer.value())
+            .then_some(requested_approvals_reviewer),
             enforce_residency: enforce_residency.value,
             notify: cfg.notify,
             base_instructions,
@@ -4686,9 +4761,11 @@ impl Config {
                 .or(show_raw_agent_reasoning)
                 .unwrap_or(false),
             guardian_policy_config,
+            guardian_policy_revision: 0,
             guardian_extra_policy,
             guardian_policy_template,
             guardian_transcript_mode,
+            guardian_sync_elastic_budget,
             guardian_conversation_history_prompt,
             guardian_conversation_history_max_output_tokens,
             guardian_review_timeout: cfg
@@ -4758,6 +4835,7 @@ impl Config {
             rollout_budget,
             current_time_reminder,
             sleep_tool_mode,
+            runtime_auth_mode,
             features,
             runtime_feature_defaults: BTreeMap::new(),
             suppress_unstable_features_warning: cfg
@@ -4814,6 +4892,7 @@ impl Config {
                 .tui
                 .as_ref()
                 .is_none_or(|tui| tui.fullscreen_transcript),
+            tui_sidebar_width_percent: cfg.tui.as_ref().and_then(|tui| tui.sidebar_width_percent),
             tui_mouse_scroll_speed: cfg.tui.as_ref().and_then(|tui| tui.mouse_scroll_speed),
             tui_copy_on_select: cfg
                 .tui

@@ -493,8 +493,7 @@ web_search = true
         cfg.tools,
         Some(ToolsToml {
             web_search: None,
-            experimental_request_user_input: None,
-            update_plan: None,
+            ..Default::default()
         })
     );
 }
@@ -513,8 +512,7 @@ web_search = false
         cfg.tools,
         Some(ToolsToml {
             web_search: None,
-            experimental_request_user_input: None,
-            update_plan: None,
+            ..Default::default()
         })
     );
 }
@@ -531,9 +529,8 @@ fn tools_experimental_request_user_input_defaults_to_enabled() {
     assert_eq!(
         cfg.tools,
         Some(ToolsToml {
-            web_search: None,
             experimental_request_user_input: Some(ExperimentalRequestUserInput { enabled: true }),
-            update_plan: None,
+            ..Default::default()
         })
     );
 }
@@ -551,9 +548,8 @@ enabled = false
     assert_eq!(
         cfg.tools,
         Some(ToolsToml {
-            web_search: None,
             experimental_request_user_input: Some(ExperimentalRequestUserInput { enabled: false }),
-            update_plan: None,
+            ..Default::default()
         })
     );
 }
@@ -569,6 +565,7 @@ async fn load_config_resolves_experimental_request_user_input_enabled() -> std::
                     enabled: false,
                 }),
                 update_plan: None,
+                ..Default::default()
             }),
             ..ConfigToml::default()
         },
@@ -1393,6 +1390,7 @@ fn config_toml_deserializes_model_availability_nux() {
     assert_eq!(
         cfg.tui.expect("tui config should deserialize"),
         Tui {
+            default_hosts: Default::default(),
             notification_settings: TuiNotificationSettings::default(),
             animations: true,
             screen_reader_detection_done: None,
@@ -1406,6 +1404,7 @@ fn config_toml_deserializes_model_availability_nux() {
             question_esc_back: true,
             raw_output_mode: false,
             fullscreen_transcript: true,
+            sidebar_width_percent: None,
             mouse_scroll_speed: None,
             copy_on_select: Default::default(),
             copy_on_select_clear_selection: false,
@@ -2204,7 +2203,9 @@ respect_system_proxy = true
         codex_http_client::OutboundProxyPolicy::RespectSystemProxy
     );
     assert_eq!(
-        config.plugins_config_input().remote_plugin_service_config(),
+        config
+            .plugins_config_input()
+            .remote_plugin_service_config(/*runtime_auth*/ None),
         codex_core_plugins::remote::RemotePluginServiceConfig::new(
             config.chatgpt_base_url,
             codex_http_client::HttpClientFactory::new(
@@ -4754,6 +4755,7 @@ fn tui_config_missing_notifications_field_defaults_to_enabled() {
     assert_eq!(
         tui,
         Tui {
+            default_hosts: Default::default(),
             notification_settings: TuiNotificationSettings::default(),
             animations: true,
             screen_reader_detection_done: None,
@@ -4767,6 +4769,7 @@ fn tui_config_missing_notifications_field_defaults_to_enabled() {
             question_esc_back: true,
             raw_output_mode: false,
             fullscreen_transcript: true,
+            sidebar_width_percent: None,
             mouse_scroll_speed: None,
             copy_on_select: Default::default(),
             copy_on_select_clear_selection: false,
@@ -8966,6 +8969,54 @@ async fn load_config_uses_auto_review_guardian_policy_config_and_template(
 }
 
 #[tokio::test]
+async fn sync_elastic_budget_is_opt_in_and_validated() {
+    let excessive_minimum = codex_guardian_context::DEFAULT_MAX_INPUT_TOKENS + 1;
+    let minimum_mismatch = format!(
+        r#"[features.guardianv2.sync_elastic_sections.root_conversation_messages]
+min_total_section_tokens = {excessive_minimum}
+max_section_entry_tokens = 1
+"#
+    );
+    let maximum_below_minimum = r#"[features.guardianv2.sync_elastic_sections.root_conversation_messages]
+min_total_section_tokens = 1
+max_section_entry_tokens = 1
+max_total_section_tokens = 0
+"#;
+    let home = TempDir::new().unwrap();
+    for sections in [
+        r#"[features.guardianv2.sync_elastic_sections.transcript_tools]
+min_total_section_tokens = 1
+max_section_entry_tokens = 0
+"#,
+        maximum_below_minimum,
+        minimum_mismatch.as_str(),
+        r#"[features.guardianv2.sync_elastic_sections.root_messages]
+min_total_section_tokens = 1
+max_section_entry_tokens = 1
+[features.guardianv2.sync_elastic_sections.root_conversation_messages]
+min_total_section_tokens = 1
+max_section_entry_tokens = 1
+"#,
+    ] {
+        for enabled in [false, true] {
+            let result = Config::load_from_base_config_with_overrides(
+                toml::from_str(&format!(
+                    "[features.guardianv2]\nenabled = false\nsync_elastic_budgeting = {enabled}\n{sections}"
+                ))
+                .unwrap(),
+                ConfigOverrides {
+                    cwd: Some(home.path().to_path_buf()),
+                    ..Default::default()
+                },
+                home.abs(),
+            )
+            .await;
+            assert_eq!(result.is_err(), enabled);
+        }
+    }
+}
+
+#[tokio::test]
 async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     for (managed_extra, expected_extra) in [
@@ -10048,6 +10099,27 @@ job_max_runtime_seconds = 900
             ..Default::default()
         })
     );
+}
+
+#[tokio::test]
+async fn legacy_multi_agent_opt_out_survives_a_session_override() -> std::io::Result<()> {
+    let home = TempDir::new()?;
+    std::fs::write(
+        home.path().join(CONFIG_TOML_FILE),
+        "[features]\nmulti_agent = false\n",
+    )?;
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(home.path().to_path_buf())
+        .fallback_cwd(Some(home.path().to_path_buf()))
+        .cli_overrides(vec![("features.multi_agent".to_string(), true.into())])
+        .build()
+        .await?;
+    assert!(config.features.enabled(Feature::Collab));
+    assert_eq!(
+        legacy_multi_agent_disabled_sources(&config.config_layer_stack),
+        ["user"]
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -12821,8 +12893,11 @@ max_concurrent_threads_per_session = 17
     assert!(usage_hints.root.is_none() && usage_hints.subagent.is_none());
 }
 
-#[test]
-fn multi_agent_v2_model_override_exposure_preserves_configured_usage_hints() {
+#[test_case::test_case(false; "native_tools")]
+#[test_case::test_case(true; "native_tools_disabled")]
+fn multi_agent_v2_model_override_exposure_preserves_configured_usage_hints(
+    disable_native_tools: bool,
+) {
     let config_toml = toml::from_str(
         r###"[features.multi_agent_v2]
 enabled = true
@@ -12833,7 +12908,8 @@ expose_spawn_agent_model_overrides = true
     )
     .expect("multi-agent v2 config should parse");
 
-    let config = resolve_multi_agent_v2_config(&config_toml);
+    let mut config = resolve_multi_agent_v2_config(&config_toml);
+    config.disable_native_tools = disable_native_tools;
     assert!(config.expose_spawn_agent_model_overrides);
     assert_eq!(
         config.root_agent_usage_hint_text.as_deref(),
@@ -12859,6 +12935,23 @@ expose_spawn_agent_model_overrides = true
             Some("## `update_plan`\nSubagent guidance.".to_string()),
         )
     );
+}
+
+#[test]
+fn multi_agent_v2_disabled_native_tools_omit_default_roles() {
+    let mut config = resolve_multi_agent_v2_config(&ConfigToml::default());
+    config.disable_native_tools = true;
+    let mut messages = ResolvedModelMessages::bundled().multi_agent();
+    for catalog_override in [false, true] {
+        if catalog_override {
+            messages.root = ResolvedMessage::Catalog("Catalog root base.");
+            messages.subagent = ResolvedMessage::Catalog("Catalog subagent base.");
+        }
+        let usage_hints = resolve_usage_hints(
+            &config, messages, /*omit_update_plan_instructions*/ false,
+        );
+        assert_eq!((usage_hints.root, usage_hints.subagent), (None, None));
+    }
 }
 
 #[test]

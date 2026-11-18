@@ -11,6 +11,7 @@ use std::panic;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -71,6 +72,7 @@ mod input_boundary;
 mod job_control;
 mod keyboard_modes;
 mod link_pointer;
+pub(crate) use link_pointer::PointerShape;
 mod notification_preview;
 #[cfg(test)]
 #[path = "tui/owned_screen_tests.rs"]
@@ -248,7 +250,7 @@ mod tests {
     }
 }
 
-pub fn set_modes() -> Result<()> {
+fn set_modes() -> Result<tmux::Options> {
     ensure_virtual_terminal_processing()?;
 
     execute!(stdout(), EnableBracketedPaste)?;
@@ -262,13 +264,13 @@ pub fn set_modes() -> Result<()> {
     // Some terminals (notably legacy Windows consoles) do not support
     // keyboard enhancement flags. Attempt to enable them, but continue
     // gracefully if unsupported.
-    keyboard_modes::enable_keyboard_enhancement(&mut stdout());
+    let options = keyboard_modes::enable_keyboard_enhancement(&mut stdout());
 
     #[cfg(not(windows))]
     let _ = execute!(stdout(), EnableFocusChange);
     #[cfg(windows)]
     let _ = execute!(stdout(), DisableFocusChange);
-    Ok(())
+    Ok(options)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -503,7 +505,7 @@ pub(crate) fn init() -> Result<InitializedTerminal> {
         return Err(std::io::Error::other("stdout is not a terminal"));
     }
     let mut restore_guard = TerminalInitializationGuard { active: true };
-    set_modes()?;
+    let tmux_options = set_modes()?;
 
     set_panic_hook();
 
@@ -579,7 +581,15 @@ pub(crate) fn init() -> Result<InitializedTerminal> {
     // trust and other protected startup screens have finished accepting their security decisions.
     crate::terminal_palette::set_default_colors_from_startup_probe(/*colors*/ None);
 
-    let tui = CustomTerminal::with_options_and_cursor_position(backend, cursor_pos)?;
+    let mut tui = CustomTerminal::with_options_and_cursor_position(backend, cursor_pos)?;
+    if std::env::var_os("TMUX").is_some()
+        && !["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_VERSION"]
+            .iter()
+            .any(|key| std::env::var_os(key).is_some())
+        && !crossterm::style::Colored::ansi_color_disabled_memoized()
+    {
+        tui.tmux_kitty_image_base = tmux_options.kitty_image_base;
+    }
     let stderr_guard = terminal_stderr::TerminalStderrGuard::install()?;
     let initialized_terminal = InitializedTerminal {
         terminal: tui,
@@ -686,6 +696,14 @@ impl MouseCapture {
             Self::Disabled => false,
         }
     }
+}
+
+// Zero denotes scrollback mode or a pane without Kitty passthrough.
+static TMUX_FULLSCREEN_IMAGE_BASE: AtomicU32 = AtomicU32::new(0);
+
+pub(crate) fn tmux_fullscreen_image_base() -> Option<u32> {
+    std::num::NonZeroU32::new(TMUX_FULLSCREEN_IMAGE_BASE.load(Ordering::Relaxed))
+        .map(std::num::NonZeroU32::get)
 }
 
 pub struct Tui {
@@ -806,10 +824,22 @@ impl Tui {
         self.alt_screen_enabled = enabled;
     }
 
+    fn record_owned_screen(&mut self, owned: bool) {
+        self.owned_screen = owned;
+        TMUX_FULLSCREEN_IMAGE_BASE.store(
+            if owned {
+                self.terminal.tmux_kitty_image_base.unwrap_or_default()
+            } else {
+                0
+            },
+            Ordering::Relaxed,
+        );
+    }
+
     /// Defer a fresh fullscreen launch until its first synchronized frame is ready.
     pub(crate) fn prepare_owned_screen(&mut self, owned: bool) -> Result<()> {
         if owned && self.alt_screen_enabled && !self.is_alt_screen_active() {
-            self.owned_screen = true;
+            self.record_owned_screen(/*owned*/ true);
             self.frame_requester.schedule_frame();
             Ok(())
         } else {
@@ -838,11 +868,11 @@ impl Tui {
             self.leave_alt_screen_for_handoff()
         };
         if let Err(error) = transition {
-            self.owned_screen = self.is_alt_screen_active();
+            self.record_owned_screen(self.is_alt_screen_active());
             self.terminal.invalidate_viewport();
             return Err(error);
         }
-        self.owned_screen = owned;
+        self.record_owned_screen(owned);
         self.frame_requester.schedule_frame();
         Ok(())
     }
@@ -1419,6 +1449,7 @@ impl Tui {
         }
 
         let terminal = &mut self.terminal;
+        terminal.mark_pet_placeholders(request.as_ref());
         let state = &mut self.ambient_pet_image_state;
         stdout().sync_update(|_| {
             match crate::pets::render_ambient_pet_image(terminal.backend_mut(), state, request) {
@@ -1438,6 +1469,7 @@ impl Tui {
         }
 
         let terminal = &mut self.terminal;
+        terminal.mark_pet_placeholders(request.as_ref());
         let state = &mut self.pet_picker_preview_image_state;
         stdout().sync_update(|_| {
             match crate::pets::render_pet_picker_preview_image(

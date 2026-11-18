@@ -58,12 +58,33 @@ async fn runtime_harness(
 ) -> (WebsocketTestHarness, Arc<Credentials>) {
     provider.requires_openai_auth = true;
     let initial = CodexAuth::from_api_key("key-a");
-    let mut harness = websocket_harness_with_provider_options_and_auth(
+    let registration_url = format!("{}/register", registration.uri()).parse().unwrap();
+    let harness = websocket_harness_with_provider_factory(
         provider,
         /*runtime_metrics_enabled*/ false,
         /*concurrent_reasoning_summaries_enabled*/ false,
         &[],
         Some(initial.clone()),
+        move |provider, credentials| {
+            let credentials = credentials.expect("runtime fixture requires credentials");
+            let runtime = Arc::new(RuntimeAuthManager::new(
+                Arc::clone(&credentials),
+                AgentHostAuthorization::InstallationId {
+                    installation_id: Uuid::nil(),
+                },
+                RuntimeRegistrationMetadata {
+                    harness: Some("codex".into()),
+                    harness_version: None,
+                    role: RuntimeRole::OrchestratorAndExecutor,
+                },
+                registration_url,
+            ));
+            codex_model_provider::test_support::runtime_model_provider(
+                provider,
+                credentials,
+                (runtime, mode),
+            )
+        },
     )
     .await;
     let credentials = Arc::new(Credentials(RwLock::new(initial)));
@@ -72,19 +93,6 @@ async fn runtime_harness(
         .set_external_auth(credentials.clone())
         .await
         .unwrap();
-    let runtime = Arc::new(RuntimeAuthManager::new(
-        harness.auth_manager.clone(),
-        AgentHostAuthorization::InstallationId {
-            installation_id: Uuid::nil(),
-        },
-        RuntimeRegistrationMetadata {
-            harness: Some("codex".into()),
-            harness_version: None,
-            role: RuntimeRole::OrchestratorAndExecutor,
-        },
-        format!("{}/register", registration.uri()).parse().unwrap(),
-    ));
-    harness.client = harness.client.with_runtime_auth(runtime, mode).unwrap();
     (harness, credentials)
 }
 
@@ -489,5 +497,66 @@ async fn gateway_refresh_failure_blocks_runtime_inference(mode: RuntimeAuthMode)
         requests
             .iter()
             .all(|request| matches!(request.url.path(), "/register" | "/token"))
+    );
+}
+
+#[test_case(RuntimeAuthMode::DualHeader; "dual_header")]
+#[test_case(RuntimeAuthMode::AssertionOnly; "assertion_only")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_runtime_auth_strips_credentials_on_cross_origin_redirects(mode: RuntimeAuthMode) {
+    skip_if_no_network!();
+    let server = MockServer::start().await;
+    let destination = MockServer::start().await;
+    Mock::given(path("/register"))
+        .respond_with(registered)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(307).insert_header("location", destination.uri()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(responses::sse(vec![
+                    ev_response_created("resp-redirected"),
+                    ev_completed("resp-redirected"),
+                ])),
+        )
+        .expect(1)
+        .mount(&destination)
+        .await;
+    let mut provider =
+        ModelProviderInfo::create_openai_provider(Some(format!("{}/v1", server.uri())));
+    provider.supports_websockets = false;
+    let (harness, _) = runtime_harness(&server, provider, mode).await;
+    complete(&mut harness.client.new_session(), &harness)
+        .await
+        .unwrap();
+    let requests = server.received_requests().await.unwrap();
+    let request = requests
+        .iter()
+        .find(|r| r.url.path() == "/v1/responses")
+        .unwrap();
+    assertion_payload(
+        request.headers["authorization"].to_str().unwrap(),
+        request
+            .headers
+            .get("x-openai-agent-assertion")
+            .map(|v| v.to_str().unwrap().to_string()),
+        mode,
+        "key-a",
+    );
+    let redirected = destination.received_requests().await.unwrap();
+    assert_eq!(redirected.len(), 1);
+    assert_eq!(redirected[0].body, request.body);
+    assert!(!redirected[0].headers.contains_key("authorization"));
+    assert!(
+        !redirected[0]
+            .headers
+            .contains_key("x-openai-agent-assertion")
     );
 }

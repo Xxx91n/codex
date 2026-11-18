@@ -4,6 +4,7 @@ members = [
     "analytics",
     "agent-graph-store",
     "agent-message-board-client",
+    "agent-message-board-host",
     "agent-identity",
     "agent-roles",
     "backend-client",
@@ -146,6 +147,7 @@ members = [
     "utils/cli",
     "utils/elapsed",
     "utils/sandbox-summary",
+    "utils/model-facing-id",
     "utils/sleep-inhibitor",
     "utils/approval-presets",
     "utils/oss",
@@ -220,6 +222,7 @@ codex-config = { path = "config" }
 codex-connectors = { path = "connectors" }
 codex-agent-message-board-client = { path = "agent-message-board-client" }
 codex-agent-message-board-extension = { path = "ext/agent-message-board" }
+codex-agent-message-board-host = { path = "agent-message-board-host" }
 codex-message-board = { path = "message-board" }
 codex-message-board-mcp = { path = "message-board-mcp" }
 codex-connectors-extension = { path = "ext/connectors" }
@@ -244,6 +247,7 @@ codex-goal-extension = { path = "ext/goal" }
 codex-git-attribution = { path = "ext/git-attribution" }
 codex-guardian-reviewer = { path = "ext/guardian-reviewer" }
 codex-guardian-v2 = { path = "ext/guardian-v2" }
+codex-guardian-v3 = { path = "ext/guardian-v3" }
 codex-history-notes-extension = { path = "ext/history-notes" }
 codex-image-generation-extension = { path = "ext/image-generation" }
 codex-external-agent-migration = { path = "external-agent-migration" }
@@ -676,7 +680,7 @@ opt-level = 0
 crossterm = { git = "https://github.com/openai-oss-forks/crossterm", rev = "ed1cdab335221515706178d68495bba2aed1924f" }
 tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
 tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }
-v8 = { git = "https://github.com/seanh-oai/rusty_v8.git", rev = "350c5a859a9b3c84ab8701b3ad51e3b7699b30c0" }
+v8 = { git = "https://github.com/openai-oss-forks/rusty_v8.git", rev = "90a65f887a0c0f048f3784afbcb320b373c8a2e0" }
 
 # Uncomment to debug local changes.
 # rmcp = { path = "../../rust-sdk/crates/rmcp" }

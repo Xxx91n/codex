@@ -38,6 +38,7 @@ fn settings_item(
                 service_tier: None,
                 approval_policy,
                 approvals_reviewer,
+                requested_approvals_reviewer: None,
                 permission_profile: PermissionProfile::read_only(),
                 active_permission_profile,
                 cwd: cwd(),
@@ -67,6 +68,7 @@ fn turn_context_item(
     RolloutItem::TurnContext(TurnContextItem {
         turn_id: Some(turn_id.to_string()),
         root_turn_id: None,
+        direct_only_tool_namespaces: None,
         disabled_plugin_ids: None,
         cwd: cwd(),
         approval_policy,

@@ -53,6 +53,12 @@ const VOICE_TOGGLE: u32 = 1 << 17;
 const RAW_KEY_CAPTURE: u32 = 1 << 18;
 const VOICE_TOGGLE_BLOCKED: u32 = 1 << 19;
 const TRANSCRIPT_ACTIONS: u32 = 1 << 20;
+const BACKEND_CYCLING: u32 = 1 << 21;
+const SIDE_PANE: u32 = 1 << 22;
+const MAIN_COMPOSER_FOCUS: u32 = 1 << 23;
+const PANE_DIRECTION: u32 = 1 << 24;
+const OPEN_PANE: u32 = 1 << 25;
+const FOCUSED_SIDE_PANE: u32 = 1 << 26;
 
 const TRANSCRIPT_BROWSING: u32 = 1 << 14;
 
@@ -65,6 +71,11 @@ impl KeymapContextSet {
     /// Other global actions remain inactive so existing list remaps keep priority.
     pub(crate) const fn activity() -> Self {
         Self(context_bit(KeymapContext::List) | context_bit(KeymapContext::Global) | ACTIVITY_FOCUS)
+    }
+
+    /// Offer backend cycling only while the new conversation control is visible.
+    pub(crate) const fn with_backend_cycling(self) -> Self {
+        Self(self.0 | BACKEND_CYCLING)
     }
 
     /// Add only the detail-close action to an owned composer path.
@@ -150,8 +161,45 @@ impl KeymapContextSet {
         }
     }
 
+    pub(crate) const fn with_pane_directions(self) -> Self {
+        Self(self.0 | PANE_DIRECTION)
+    }
+
+    pub(crate) const fn with_main_composer_focus(self) -> Self {
+        Self(self.0 | MAIN_COMPOSER_FOCUS)
+    }
+
+    pub(crate) const fn with_open_pane(self) -> Self {
+        Self(self.0 | OPEN_PANE)
+    }
+
+    pub(crate) const fn with_focused_side_pane(self) -> Self {
+        Self(self.0 | FOCUSED_SIDE_PANE)
+    }
+
+    pub(crate) const fn with_side_pane(self) -> Self {
+        Self(self.0 | SIDE_PANE)
+    }
+
     /// Whether this input path can dispatch the action, including focus-specific exclusions.
     pub(crate) fn contains_action(self, action: KeymapActionId) -> bool {
+        if action.context == KeymapContext::Global && action.action == "change_host" {
+            return self.0 & BACKEND_CYCLING != 0;
+        }
+        if action.is_side_pane() {
+            let required = match action.action {
+                "focus_pane_left" | "focus_pane_right" => PANE_DIRECTION,
+                "move_divider_left" | "move_divider_right" => FOCUSED_SIDE_PANE,
+                "toggle_pane_zoom"
+                | "equalize_pane_widths"
+                | "minimize_pane_width"
+                | "maximize_pane_width"
+                | "resize_panes" => OPEN_PANE,
+                "focus_main_composer" => MAIN_COMPOSER_FOCUS,
+                _ => SIDE_PANE,
+            };
+            return self.0 & required != 0;
+        }
         if action.context == KeymapContext::Chat && action.action == "open_presets" {
             return self.contains(KeymapContext::Chat)
                 && self.contains(KeymapContext::Global)
@@ -519,6 +567,7 @@ impl KeyChordMatcher {
         {
             let label = match binding.action.action {
                 "open_presets" if pending.started_at.is_none() => "presets",
+                "change_host" => "cycle",
                 "focus_activity" => "activity",
                 "find_transcript" => "find",
                 "open_warnings" => "warnings",

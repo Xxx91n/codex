@@ -421,6 +421,7 @@ fn thread_items_list_round_trips() {
         cursor: Some(ThreadItemsListCursor::Opaque("cursor_1".to_string())),
         limit: Some(50),
         sort_direction: Some(SortDirection::Asc),
+        defer_output: None,
     };
 
     assert_eq!(
@@ -462,6 +463,7 @@ fn thread_items_list_round_trips() {
         let response = ThreadItemsListResponse {
             data: vec![ThreadItemEntry {
                 turn_id: "turn_456".to_string(),
+                output_deferred: false,
                 item: ThreadItem {
                     payload: ThreadItemPayload::ContextCompaction {
                         id: "item_1".to_string(),
@@ -501,6 +503,7 @@ fn thread_items_list_round_trips() {
         cursor: None,
         limit: None,
         sort_direction: None,
+        defer_output: None,
     };
 
     assert_eq!(
@@ -2130,6 +2133,7 @@ fn config_granular_approval_policy_is_marked_experimental() {
         forced_chatgpt_workspace_id: None,
         forced_login_method: None,
         web_search: None,
+        client_search_provider: None,
         tools: None,
         instructions: None,
         developer_instructions: None,
@@ -2165,6 +2169,7 @@ fn config_approvals_reviewer_is_marked_experimental() {
         forced_chatgpt_workspace_id: None,
         forced_login_method: None,
         web_search: None,
+        client_search_provider: None,
         tools: None,
         instructions: None,
         developer_instructions: None,

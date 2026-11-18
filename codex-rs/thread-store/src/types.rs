@@ -244,13 +244,17 @@ pub struct PreparedFork {
     pub history_base: Option<HistoryPosition>,
     /// Bounded model context selected by the requested fork boundary.
     pub model_context: Arc<Vec<RolloutItem>>,
-    /// Blocks source deletion until the child's history reference is durable.
-    _source_reservation: Box<dyn std::fmt::Debug + Send>,
+    /// Prevents the source thread from being deleted until the child's history reference is
+    /// finalized.
+    ///
+    /// If absent, the backend must revalidate the prepared fork as part of finalizing that
+    /// reference.
+    _source_reservation: Option<Box<dyn std::fmt::Debug + Send>>,
 }
 
 impl PreparedFork {
     /// Creates a frozen fork snapshot while retaining a backend-owned source reservation.
-    pub fn new(
+    pub fn with_source_reservation(
         source_thread_id: ThreadId,
         history_base: Option<HistoryPosition>,
         model_context: Arc<Vec<RolloutItem>>,
@@ -260,7 +264,22 @@ impl PreparedFork {
             source_thread_id,
             history_base,
             model_context,
-            _source_reservation: Box::new(source_reservation),
+            _source_reservation: Some(Box::new(source_reservation)),
+        }
+    }
+
+    /// Creates a frozen fork snapshot for a backend that revalidates the source while making the
+    /// child's history reference durable.
+    pub fn with_source_revalidation(
+        source_thread_id: ThreadId,
+        history_base: Option<HistoryPosition>,
+        model_context: Arc<Vec<RolloutItem>>,
+    ) -> Self {
+        Self {
+            source_thread_id,
+            history_base,
+            model_context,
+            _source_reservation: None,
         }
     }
 }
@@ -360,6 +379,9 @@ pub struct ListThreadsParams {
 /// Parameters for searching thread content.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchThreadsParams {
+    /// The current login when searching account-scoped local history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<crate::LocalHistoryAccount>,
     /// Maximum number of threads to return.
     pub page_size: usize,
     /// Opaque cursor returned by a previous search call.
@@ -615,6 +637,12 @@ pub struct ThreadOccurrenceSearchPage {
 /// Store-owned thread metadata used by list/read/resume responses.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoredThread {
+    /// Recorded creator user, when available from the backing store.
+    #[serde(default)]
+    pub creator_user_id: Option<String>,
+    /// Recorded creator workspace, when available from the backing store.
+    #[serde(default)]
+    pub creator_account_id: Option<String>,
     /// Originator recorded at creation, if available from the backing store.
     #[serde(default)]
     pub originator: Option<String>,

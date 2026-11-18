@@ -1,4 +1,5 @@
 use super::App;
+use super::AppEvent;
 use super::AppServerSession;
 use super::Result;
 use super::RuntimeKeymap;
@@ -65,6 +66,61 @@ async fn press(
 
 fn ctrl(ch: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
+}
+
+#[tokio::test]
+async fn empty_thread_backend_chord_preserves_draft_until_first_submission() -> Result<()> {
+    let (mut app, mut events, _operations) = make_test_app_with_channels().await;
+    let session = test_thread_session(ThreadId::new(), app.config.cwd.to_path_buf());
+    app.chat_widget.handle_thread_session(session);
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    app.chat_widget
+        .apply_external_edit("first draft".to_string());
+    app.chat_widget
+        .set_new_backend_control(Some("Cloud".to_string()));
+    let screen = render_bottom_popup(&app.chat_widget, /*width*/ 80);
+    insta::assert_snapshot!(screen.lines().find(|line| line.trim_start().starts_with("Cloud")).unwrap().trim(), @"Cloud  ⌃x b to cycle");
+
+    // Cursor movement remains available while the backend selector is visible.
+    let key = app.route_key_chord_event(&mut tui, ctrl('b')).unwrap();
+    app.chat_widget.handle_key_event(key);
+    app.chat_widget.handle_paste("!".to_string());
+    assert_eq!(app.chat_widget.composer_text_with_pending(), "first draf!t");
+
+    assert_eq!(app.route_key_chord_event(&mut tui, ctrl('x')), None);
+    let key = app
+        .route_key_chord_event(&mut tui, KeyCode::Char('b').into())
+        .expect("backend chord dispatch");
+    app.chat_widget.handle_key_event(key);
+    assert!(
+        std::iter::from_fn(|| events.try_recv().ok())
+            .any(|event| matches!(event, AppEvent::CycleNewConversationBackend))
+    );
+    assert_eq!(app.chat_widget.composer_text_with_pending(), "first draf!t");
+
+    // A single-key remap takes precedence over cursor movement in the same draft.
+    let config = toml::from_str("[global]\nchange_host = 'ctrl-b'")?;
+    app.keymap = RuntimeKeymap::from_config(&config).unwrap();
+    app.chat_widget.apply_keymap_update(config, &app.keymap);
+    app.chat_widget.handle_key_event(ctrl('b'));
+    assert!(
+        std::iter::from_fn(|| events.try_recv().ok())
+            .any(|event| matches!(event, AppEvent::CycleNewConversationBackend))
+    );
+
+    app.chat_widget.handle_key_event(KeyCode::Enter.into());
+    assert!(
+        !render_bottom_popup(&app.chat_widget, /*width*/ 80)
+            .lines()
+            .any(|line| line.trim_start().starts_with("Cloud"))
+    );
+
+    app.chat_widget.handle_key_event(ctrl('b'));
+    assert!(
+        !std::iter::from_fn(|| events.try_recv().ok())
+            .any(|event| matches!(event, AppEvent::CycleNewConversationBackend))
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -553,12 +609,12 @@ async fn legacy_terminal_preserves_image_paste_without_reading_clipboard() -> Re
             KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT),
             KeyEvent::new(KeyCode::Char('V'), KeyModifiers::ALT | KeyModifiers::SHIFT),
         ] {
-            assert!(!app.should_recover_vim_insert_escape(key));
+            assert!(!app.should_recover_vim_insert_escape(&tui, key));
         }
-        assert!(app.should_recover_vim_insert_escape(KeyEvent::new(
-            KeyCode::Char('x'),
-            KeyModifiers::ALT,
-        )));
+        assert!(app.should_recover_vim_insert_escape(
+            &tui,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT,)
+        ));
     }
     Ok(())
 }
@@ -586,12 +642,12 @@ async fn legacy_terminal_preserves_agent_shortcuts_without_editor_word_bindings(
 
         for key in ['b', 'f'] {
             let event = KeyEvent::new(KeyCode::Char(key), KeyModifiers::ALT);
-            assert!(!app.should_recover_vim_insert_escape(event));
+            assert!(!app.should_recover_vim_insert_escape(&tui, event));
         }
         app.chat_widget.insert_str("abc");
         for key in ['b', 'f'] {
             let event = KeyEvent::new(KeyCode::Char(key), KeyModifiers::ALT);
-            assert!(app.should_recover_vim_insert_escape(event));
+            assert!(app.should_recover_vim_insert_escape(&tui, event));
         }
     }
     Ok(())
@@ -988,6 +1044,36 @@ async fn transcript_fixed_keys_take_precedence_over_pager_chord_prefixes() -> Re
         before
     );
     assert!(!app.key_chord_matcher.is_pending());
+    super::enable_side_retention(&mut app)?;
+    let parent = ThreadId::new();
+    app.active_thread_id = Some(parent);
+    app.side_threads
+        .insert(ThreadId::new(), super::SideThreadState::new(parent));
+    app.keymap = RuntimeKeymap::for_session(
+        &toml::from_str("[pager]\nscroll_up = 'f6 u'\nscroll_down = 'f6 d'")?,
+        /*workspace*/ true,
+    )
+    .unwrap();
+    for (stroke, expected) in [
+        ('u', before),
+        (
+            'd',
+            app.transcript_view.selected_text(&app.transcript_cells),
+        ),
+    ] {
+        press(&mut app, &mut tui, &mut app_server, KeyCode::F(6).into()).await?;
+        press(
+            &mut app,
+            &mut tui,
+            &mut app_server,
+            KeyCode::Char(stroke).into(),
+        )
+        .await?;
+        assert_eq!(
+            app.transcript_view.selected_text(&app.transcript_cells),
+            expected
+        );
+    }
     tui.set_owned_screen(/*owned*/ false)?;
     app_server.shutdown().await?;
     Ok(())
@@ -1079,12 +1165,59 @@ async fn selection_after_live_commit_uses_the_refreshed_frame() -> Result<()> {
 }
 
 #[tokio::test]
+async fn pane_direction_without_neighbor_preserves_fresh_typing() -> Result<()> {
+    let (mut app, mut tui, mut app_server) = chord_app().await?;
+    super::enable_side_retention(&mut app)?;
+    tui.set_owned_screen(/*owned*/ true)?;
+
+    press(&mut app, &mut tui, &mut app_server, ctrl('x')).await?;
+    press(
+        &mut app,
+        &mut tui,
+        &mut app_server,
+        KeyCode::Char('h').into(),
+    )
+    .await?;
+    for ch in "hello".chars() {
+        press(
+            &mut app,
+            &mut tui,
+            &mut app_server,
+            KeyCode::Char(ch).into(),
+        )
+        .await?;
+    }
+    // Flush the burst of typed characters before inspecting the draft.
+    press(&mut app, &mut tui, &mut app_server, KeyCode::End.into()).await?;
+
+    assert_eq!(app.chat_widget.composer_text_with_pending(), "hello");
+    app_server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn key_capture_receives_voice_shortcut_and_chord_prefix() -> Result<()> {
     let (mut app, mut rx, _op_rx) = super::make_test_app_with_channels().await;
     let mut app_server = start_config_write_test_app_server(&app).await?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
-    for config in ["", "[chat]\ntoggle_voice = 'f8 v'"] {
-        app.keymap = RuntimeKeymap::from_config(&toml::from_str(config)?).unwrap();
+    super::enable_side_retention(&mut app)?;
+    tui.set_owned_screen(/*owned*/ true)?;
+    let parent = ThreadId::new();
+    app.active_thread_id = Some(parent);
+    let child = ThreadId::new();
+    app.side_threads
+        .insert(child, super::SideThreadState::new(parent));
+    for (config, key) in [
+        ("", 8),
+        ("[chat]\ntoggle_voice = 'f8 v'", 8),
+        ("[global]\nhide_pane = 'f12'", 12),
+        ("[global]\nfocus_main_composer = 'f12'", 12),
+        ("[global]\nfocus_sidebar_content = 'f12 s'", 12),
+        ("[global]\nfocus_pane_left = 'f12 h'", 12),
+        ("[global]\nfocus_pane_right = 'f12 l'", 12),
+    ] {
+        app.keymap =
+            RuntimeKeymap::for_session(&toml::from_str(config)?, /*workspace*/ true).unwrap();
         app.chat_widget.open_keymap_capture(
             "composer".into(),
             "submit".into(),
@@ -1092,10 +1225,67 @@ async fn key_capture_receives_voice_shortcut_and_chord_prefix() -> Result<()> {
             crate::app_event::KeymapCaptureMode::SingleKey,
             &app.keymap,
         );
-        press(&mut app, &mut tui, &mut app_server, KeyCode::F(8).into()).await?;
+        press(&mut app, &mut tui, &mut app_server, KeyCode::F(key).into()).await?;
         assert!(
-            matches!(rx.try_recv()?, crate::app_event::AppEvent::KeymapCaptured { key, .. } if key == "f8")
+            matches!(rx.try_recv()?, crate::app_event::AppEvent::KeymapCaptured { key: captured, .. } if captured == format!("f{key}"))
         );
     }
+    // A printable remap belongs to the composer unless this session and thread own a pane.
+    app.keymap = RuntimeKeymap::for_session(
+        &toml::from_str("[global]\nhide_pane = '%'")?,
+        /*workspace*/ true,
+    )
+    .unwrap();
+    for (thread, enabled, owned, offline, draft) in [
+        (parent, true, true, false, ""),
+        (ThreadId::new(), true, true, false, "%"),
+        (parent, false, true, false, "%"),
+        (parent, true, false, false, "%"),
+        (parent, true, true, true, "%"),
+    ] {
+        app.active_thread_id = Some(thread);
+        app.config
+            .features
+            .set_enabled(codex_features::Feature::TuiWorkspace, enabled)?;
+        tui.set_owned_screen(owned)?;
+        app.reconnect.offline = offline;
+        app.chat_widget.apply_external_edit(String::new());
+        for key in [KeyCode::Char('%'), KeyCode::Right] {
+            press(&mut app, &mut tui, &mut app_server, key.into()).await?;
+        }
+        assert_eq!(app.chat_widget.composer_text_with_pending(), draft);
+    }
+
+    // Offline, the same printable binding focuses the local composer but cannot switch threads.
+    let mut stopped = app_server.request_view();
+    app_server.shutdown().await?;
+    app.local_settings.tui.keymap = toml::from_str("[global]\nfocus_main_composer = '%'")?;
+    super::enable_side_retention(&mut app)?;
+    app.active_thread_id = Some(ThreadId::new());
+    app.reconnect.offline = true;
+    app.chat_widget.apply_external_edit("draft".into());
+    app.transcript_view.begin_search();
+    for key in [KeyCode::Char('%'), KeyCode::Char('!'), KeyCode::Right] {
+        press(&mut app, &mut tui, &mut stopped, key.into()).await?;
+    }
+    assert!(!app.transcript_view.has_active_interaction());
+    assert_eq!(app.chat_widget.composer_text_with_pending(), "draft!");
+    app.active_thread_id = Some(child);
+    for key in [KeyCode::Char('%'), KeyCode::Right] {
+        press(&mut app, &mut tui, &mut stopped, key.into()).await?;
+    }
+    assert_eq!(app.chat_widget.composer_text_with_pending(), "draft!%");
+    // Bare letters and arrows still edit the draft.
+    for key in [
+        KeyCode::Char('h'),
+        KeyCode::Left,
+        KeyCode::Char('l'),
+        KeyCode::Right,
+        KeyCode::Char('!'),
+        KeyCode::Right,
+    ] {
+        press(&mut app, &mut tui, &mut stopped, key.into()).await?;
+    }
+    assert_eq!(app.chat_widget.composer_text_with_pending(), "draft!%lh!");
     Ok(())
 }

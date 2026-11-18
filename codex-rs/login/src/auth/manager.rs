@@ -41,6 +41,7 @@ use codex_agent_identity::ChatGptEnvironment;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::ModelProviderAuthInfo;
+use codex_workload_identity::ApiTokenMetadata;
 
 use super::access_token::CodexAccessToken;
 use super::access_token::classify_codex_access_token;
@@ -196,9 +197,18 @@ impl PartialEq for CodexAuth {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ApiKeyAuth {
-    api_key: String,
+    pub(super) api_key: String,
+    pub(super) workload_identity: Option<ApiTokenMetadata>,
+}
+
+impl Debug for ApiKeyAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiKeyAuth")
+            .field("api_key", &"[redacted]")
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -622,6 +632,14 @@ impl CodexAuth {
         }
     }
 
+    pub(super) fn api_workload_identity(&self) -> Option<&ApiTokenMetadata> {
+        if let Self::ApiKey(auth) = self {
+            auth.workload_identity.as_ref()
+        } else {
+            None
+        }
+    }
+
     /// Returns `Err` if token-backed ChatGPT auth is unavailable.
     pub fn get_token_data(&self) -> Result<TokenData, std::io::Error> {
         let auth_dot_json: Option<AuthDotJson> = self.get_current_auth_json();
@@ -916,6 +934,7 @@ impl CodexAuth {
     pub fn from_api_key(api_key: &str) -> Self {
         Self::ApiKey(ApiKeyAuth {
             api_key: api_key.to_owned(),
+            workload_identity: None,
         })
     }
 }
@@ -2908,7 +2927,10 @@ impl AuthManager {
         match (a, b) {
             (None, None) => true,
             (Some(a), Some(b)) => match (a.api_auth_mode(), b.api_auth_mode()) {
-                (AuthMode::ApiKey, AuthMode::ApiKey) => a.api_key() == b.api_key(),
+                (AuthMode::ApiKey, AuthMode::ApiKey) => {
+                    a.api_key() == b.api_key()
+                        && a.api_workload_identity() == b.api_workload_identity()
+                }
                 (AuthMode::Chatgpt, AuthMode::Chatgpt) => {
                     a.get_current_auth_json() == b.get_current_auth_json()
                 }
@@ -2981,7 +3003,16 @@ impl AuthManager {
                             }
                             cached_auth
                         }
-                        RefreshTokenError::Transient(_) => None,
+                        // A temporary provider outage is not a logout. Preserve the identity
+                        // only while its cached credentials still satisfy the current policy.
+                        RefreshTokenError::Transient(_) => cached_auth.filter(|auth| {
+                            validate_auth_restrictions(
+                                Some(&self.allowed_login_methods()),
+                                self.effective_chatgpt_workspaces().as_deref(),
+                                auth,
+                            )
+                            .is_ok()
+                        }),
                         RefreshTokenError::Policy(_) => cached_auth,
                     }
                 }
@@ -3138,10 +3169,16 @@ impl AuthManager {
     }
 
     pub fn set_forced_chatgpt_workspace_id(&self, workspace_id: Option<Vec<String>>) {
+        // Fence reloads that validated credentials before this policy change.
+        let Ok(_auth_guard) = self.inner.write() else {
+            return;
+        };
         if let Ok(mut guard) = self.forced_chatgpt_workspace_id.write()
             && *guard != workspace_id
         {
             *guard = workspace_id;
+            self.auth_change_state_tx
+                .send_modify(|state| state.generation += 1);
         }
     }
 

@@ -112,6 +112,7 @@ pub(crate) fn thread_items_page_params(
         cursor: cursor.map(ThreadItemsListCursor::Opaque),
         limit: Some(limit),
         sort_direction: Some(SortDirection::Desc),
+        defer_output: None,
     }
 }
 
@@ -190,9 +191,14 @@ impl AppServerSession {
 
     /// Match a completion to the page still pending for this thread, before interpreting its result.
     pub(crate) fn is_older_history_page_pending(&self, thread_id: ThreadId, cursor: &str) -> bool {
-        self.history_pagination.get(&thread_id).is_some_and(|page| {
-            page.loading_older && page.next_item_cursor.as_deref() == Some(cursor)
-        })
+        self.pending_older_history_cursor(thread_id) == Some(cursor)
+    }
+
+    pub(crate) fn pending_older_history_cursor(&self, thread_id: ThreadId) -> Option<&str> {
+        self.history_pagination
+            .get(&thread_id)
+            .filter(|page| page.loading_older)
+            .and_then(|page| page.next_item_cursor.as_deref())
     }
 
     pub(crate) fn cancel_older_history_page(&mut self, thread_id: ThreadId, cursor: &str) {
@@ -306,8 +312,9 @@ impl AppServerSession {
             if let Some(turn) = turns.iter_mut().find(|turn| turn.id == entry.turn_id)
                 && !turn.items.iter().any(|item| item.id() == entry.item.id())
             {
-                items.push(entry.item.payload.clone());
-                turn.items.insert(/*index*/ 0, ThreadItem::from(entry));
+                let item = ThreadItem::try_from(entry)?;
+                items.push(item.payload.clone());
+                turn.items.insert(/*index*/ 0, item);
                 turn.items_view = TurnItemsView::Summary;
             }
         }
@@ -382,6 +389,12 @@ impl AppServerSession {
             {
                 break;
             }
+            if state.next_item_cursor.is_none() {
+                break;
+            }
+            if budget.rows.is_none() {
+                continue;
+            }
             if let Some((config, local_settings)) = config.zip(local_settings) {
                 rendered_rows = rendered_history_rows(
                     thread_id,
@@ -394,9 +407,6 @@ impl AppServerSession {
                 );
             } else {
                 rendered_rows = rendered_rows.saturating_add(items.len());
-            }
-            if state.next_item_cursor.is_none() {
-                break;
             }
         }
         if config.is_some() {
