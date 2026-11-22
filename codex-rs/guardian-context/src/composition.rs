@@ -211,36 +211,6 @@ impl CollectedContext {
             .unwrap_or_default()
     }
 
-    /// Compatibility entrypoint for callers without unprepared scheduled messages.
-    /// Synchronous scheduler evidence requires `prepare_sync_context` before slicing.
-    pub fn compose(
-        mut self,
-        presentation: ContextPresentation<'_>,
-        transcript: PreparedTranscript,
-    ) -> Result<ComposedContext, SectionError> {
-        match presentation {
-            ContextPresentation::SyncFull { .. } | ContextPresentation::SyncDelta { .. } => {
-                if self
-                    .transcript_entries()
-                    .iter()
-                    .any(|entry| matches!(entry.content, TranscriptContent::ScheduledMessage(_)))
-                {
-                    return Err(SectionError::UnsupportedDelivery {
-                        section: "sync_preparation",
-                    });
-                }
-                crate::preparation::prepare_sync_sections(
-                    &mut self,
-                    crate::ContextBudgeting::Fixed,
-                )?;
-                self.compose_prepared(presentation, transcript)
-            }
-            ContextPresentation::Async | ContextPresentation::AsyncDelta => {
-                self.compose_prepared(presentation, transcript)
-            }
-        }
-    }
-
     /// Frames prepared sections in their existing delivery order.
     pub(crate) fn compose_prepared(
         self,
@@ -336,6 +306,7 @@ impl CollectedContext {
                         items
                             .into_iter()
                             .map(|item| Budgeted {
+                                verified_answer: false,
                                 protected: matches!(
                                     item.kind,
                                     RetainedInstructionKind::Framing
@@ -364,10 +335,12 @@ impl CollectedContext {
                         items
                             .into_iter()
                             .map(|item| {
-                                let mut output =
-                                    Budgeted::required(ContentItem::InputText { text: item.text });
-                                output.protected = item.protected;
-                                output
+                                let content = ContentItem::InputText { text: item.text };
+                                if item.protected {
+                                    Budgeted::protected(content)
+                                } else {
+                                    Budgeted::verified_answer(content)
+                                }
                             })
                             .collect(),
                     ),
@@ -396,6 +369,7 @@ impl CollectedContext {
                                         id: "conversation_transcript",
                                         delivery: SectionDelivery::Message(Budgeted {
                                             protected: entry.protected,
+                                            verified_answer: entry.verified_answer,
                                             content: Box::new(ResponseItemEnvelope::new(*message)),
                                             retention: entry.retention,
                                             source: entry.source,
@@ -426,6 +400,7 @@ impl CollectedContext {
                         };
                         items.push(Budgeted {
                             protected: entry.protected,
+                            verified_answer: entry.verified_answer,
                             content,
                             retention: entry.retention,
                             source: entry.source,
@@ -499,6 +474,7 @@ impl CollectedContext {
                             let Budgeted {
                                 content,
                                 protected,
+                                verified_answer,
                                 source,
                                 retention,
                             } = item;
@@ -524,6 +500,7 @@ impl CollectedContext {
                             Some(Ok(Budgeted {
                                 content,
                                 protected,
+                                verified_answer,
                                 source,
                                 retention,
                             }))

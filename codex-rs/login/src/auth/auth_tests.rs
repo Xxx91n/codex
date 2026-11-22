@@ -60,7 +60,9 @@ fn header_auth_exposes_a_valid_chatgpt_account_id() {
 }
 
 #[tokio::test]
+#[serial(codex_auth_env)]
 async fn cancelled_refresh_marks_only_started_exchanges_as_unsettled() -> anyhow::Result<()> {
+    let _access_token_guard = remove_access_token_env_var();
     let home = tempdir()?;
     write_auth_file(
         AuthFileParams {
@@ -1460,6 +1462,51 @@ async fn refresh_failure_is_scoped_to_the_matching_auth_snapshot() {
 }
 
 #[tokio::test]
+async fn provider_credentials_follow_the_primary_network_policy() {
+    let script = ProviderAuthScript::new(&["provider-key", "rotated-provider-key"]).unwrap();
+    let controller = codex_http_client::NetworkPolicyController::default();
+    let policy = controller.policy();
+    let factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault)
+        .with_network_policy(policy.clone());
+    let mut primary = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("login-key"));
+    Arc::get_mut(&mut primary).unwrap().auth_route_config =
+        AuthRouteConfig::from_http_client_factory(factory);
+    assert!(controller.publish(
+        policy.revision(),
+        codex_http_client::DestinationPolicy::Restricted {
+            allowed_hosts: ["allowed.example".to_string()].into_iter().collect(),
+        },
+    ));
+
+    let provider =
+        AuthManager::external_bearer_with_runtime(script.auth_config(), primary.runtime_config());
+    let transport = provider.http_client_factory();
+    let allowed = "https://allowed.example/".parse().unwrap();
+    let blocked = "https://blocked.example/".parse().unwrap();
+    let permit = transport.network_policy().acquire(&allowed).unwrap();
+    assert_eq!(
+        provider.auth().await.unwrap().api_key(),
+        Some("provider-key"),
+    );
+    permit.check().unwrap();
+    let first_owner = provider.auth_owner();
+
+    provider.refresh_token().await.unwrap();
+    assert_eq!(
+        provider.auth_cached().unwrap().api_key(),
+        Some("rotated-provider-key"),
+    );
+    assert!(!first_owner.is_current());
+    permit.check().unwrap();
+    assert!(transport.network_policy().acquire(&allowed).is_ok());
+    assert!(transport.network_policy().acquire(&blocked).is_err());
+
+    primary.set_cached_auth(Some(CodexAuth::from_api_key("another-login-key")));
+    assert!(permit.check().is_err());
+    assert!(transport.network_policy().acquire(&allowed).is_err());
+}
+
+#[tokio::test]
 async fn external_bearer_only_auth_manager_uses_cached_provider_token() {
     let script = ProviderAuthScript::new(&["provider-token", "next-token"]).unwrap();
     let manager = AuthManager::external_bearer_only(script.auth_config());
@@ -1824,6 +1871,32 @@ async fn external_auth_does_not_reuse_disallowed_credentials_after_a_transient_f
 }
 
 #[tokio::test]
+#[serial_test::serial(codex_auth_env)]
+async fn failed_storage_reload_preserves_cached_identity() -> anyhow::Result<()> {
+    let _access_token = remove_access_token_env_var();
+    let home = tempdir()?;
+    let auth = CodexAuth::from_api_key("stored-key");
+    let manager =
+        AuthManager::from_auth_for_testing_with_home(auth.clone(), home.path().to_path_buf());
+    let initial = manager
+        .auth_change_state_for(&auth)
+        .expect("the cached credential has a source");
+    std::fs::create_dir(get_auth_file(home.path()))?;
+
+    assert!(
+        manager.reload_with_cached_auth().await.is_err(),
+        "the fixture must fail the storage read"
+    );
+    assert!(
+        !manager.reload().await,
+        "failed storage reads must not publish a logout"
+    );
+    assert_eq!(manager.auth_cached(), Some(auth.clone()));
+    assert_eq!(manager.auth_change_state_for(&auth), Some(initial));
+    Ok(())
+}
+
+#[tokio::test]
 async fn replacing_external_auth_clears_permanent_failure() {
     let manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("seed"));
     let auth = CodexAuth::from_api_key("external-token");
@@ -1877,6 +1950,13 @@ async fn external_auth_provider_can_install_headers() {
     headers.insert("x-external-auth", http::HeaderValue::from_static("enabled"));
     let auth = CodexAuth::Headers(AuthHeaders::new(headers));
     let codex_home = tempdir().expect("tempdir");
+    login_with_api_key(
+        codex_home.path(),
+        "stored-key",
+        AuthCredentialsStoreMode::Ephemeral,
+        AuthKeyringBackendKind::default(),
+    )
+    .unwrap();
     let manager = AuthManager::new(
         codex_home.path().to_path_buf(),
         /*enable_codex_api_key_env*/ false,
@@ -1893,6 +1973,7 @@ async fn external_auth_provider_can_install_headers() {
         .await
         .expect("external auth should install");
 
+    assert!(!manager.reload_with_cached_auth().await.unwrap());
     assert_eq!(manager.auth_cached(), Some(auth));
     assert!(
         manager

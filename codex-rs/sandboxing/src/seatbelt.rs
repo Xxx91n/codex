@@ -6,7 +6,6 @@ use codex_network_proxy::proxy_url_env_value;
 use codex_protocol::permissions::FileSystemPolicyProjection;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
-use codex_protocol::protocol::SandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -35,6 +34,7 @@ mod scratch;
 pub(crate) enum MacosSeatbeltProfile {
     #[default]
     Process,
+    ProcessWithInheritedTerminal,
     FileSystemHelper,
 }
 
@@ -790,33 +790,8 @@ fn seatbelt_regex_for_glob(pattern: &str, glob_match: GlobMatch) -> Option<Strin
     Some(regex)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-fn create_seatbelt_command_args_for_legacy_policy(
-    command: Vec<String>,
-    sandbox_policy: &SandboxPolicy,
-    sandbox_policy_cwd: &Path,
-    enforce_managed_network: bool,
-    network: Option<&NetworkProxy>,
-) -> Result<Vec<String>, String> {
-    let file_system_sandbox_policy = FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
-        sandbox_policy,
-        sandbox_policy_cwd,
-    );
-    create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
-        command,
-        file_system_sandbox_policy: &file_system_sandbox_policy,
-        network_sandbox_policy: NetworkSandboxPolicy::from(sandbox_policy),
-        sandbox_policy_cwd,
-        enforce_managed_network,
-        managed_network: None,
-        environment_id: None,
-        network,
-        extra_allow_unix_sockets: &[],
-    })
-}
-
 #[derive(Debug)]
-pub struct CreateSeatbeltCommandArgsParams<'a> {
+pub(crate) struct CreateSeatbeltCommandArgsParams<'a> {
     pub command: Vec<String>,
     pub file_system_sandbox_policy: &'a FileSystemSandboxPolicy,
     pub network_sandbox_policy: NetworkSandboxPolicy,
@@ -828,7 +803,8 @@ pub struct CreateSeatbeltCommandArgsParams<'a> {
     pub extra_allow_unix_sockets: &'a [AbsolutePathBuf],
 }
 
-pub fn create_seatbelt_command_args(
+#[cfg(test)]
+fn create_seatbelt_command_args(
     args: CreateSeatbeltCommandArgsParams<'_>,
 ) -> Result<Vec<String>, String> {
     create_seatbelt_command_args_with_profile(
@@ -863,7 +839,10 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
         )
         .map_err(|err| SeatbeltPreparationError::FileSystem(err.to_string()))?;
     let include_process_defaults = resolved_filesystem_permissions.include_platform_defaults
-        && profile == MacosSeatbeltProfile::Process;
+        && matches!(
+            profile,
+            MacosSeatbeltProfile::Process | MacosSeatbeltProfile::ProcessWithInheritedTerminal
+        );
     let scratch_reads = if include_process_defaults {
         let (reads, writes) = scratch::scratch_access_roots(
             file_system_sandbox_policy,
@@ -1049,6 +1028,13 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
         policy_sections.push("(deny system-fcntl (fcntl-command 80 110))".to_string());
     }
 
+    // Deny injecting input into the shell that resumes after this child. Keep the deny last.
+    if profile == MacosSeatbeltProfile::ProcessWithInheritedTerminal {
+        policy_sections.push(format!(
+            "(deny file-ioctl (ioctl-command {}))",
+            libc::TIOCSTI
+        ));
+    }
     let full_policy = policy_sections.join("\n");
 
     let dir_params = [

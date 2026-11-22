@@ -140,17 +140,15 @@ async fn insert_state_db_thread(
         .with_ymd_and_hms(2025, 1, 3, 12, 0, 0)
         .single()
         .expect("valid datetime");
-    let mut builder = codex_state::ThreadMetadataBuilder::new(
+    let builder = codex_state::ThreadMetadataBuilder::new(
         thread_id,
         rollout_path.to_path_buf(),
         created_at,
         SessionSource::Cli,
-    );
-    builder.model_provider = Some(TEST_PROVIDER.to_string());
-    builder.cwd = home.to_path_buf();
-    if archived {
-        builder.archived_at = Some(created_at);
-    }
+    )
+    .with_model_provider(Some(TEST_PROVIDER.to_string()))
+    .with_cwd(home.to_path_buf())
+    .with_archived_at(archived.then_some(created_at));
     let mut metadata = builder.build(TEST_PROVIDER);
     metadata.first_user_message = Some("Hello from user".to_string());
     metadata.preview = metadata.first_user_message.clone();
@@ -807,6 +805,7 @@ async fn test_list_conversations_latest_first() {
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
                 history_mode: Default::default(),
+                attached_to_thread_id: None,
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
@@ -833,6 +832,7 @@ async fn test_list_conversations_latest_first() {
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
                 history_mode: Default::default(),
+                attached_to_thread_id: None,
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
@@ -859,6 +859,7 @@ async fn test_list_conversations_latest_first() {
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
                 history_mode: Default::default(),
+                attached_to_thread_id: None,
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
@@ -978,6 +979,7 @@ async fn test_pagination_cursor() {
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
                 history_mode: Default::default(),
+                attached_to_thread_id: None,
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
@@ -1004,6 +1006,7 @@ async fn test_pagination_cursor() {
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
                 history_mode: Default::default(),
+                attached_to_thread_id: None,
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
@@ -1066,6 +1069,7 @@ async fn test_pagination_cursor() {
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
                 history_mode: Default::default(),
+                attached_to_thread_id: None,
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
@@ -1092,6 +1096,7 @@ async fn test_pagination_cursor() {
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
                 history_mode: Default::default(),
+                attached_to_thread_id: None,
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
@@ -1146,6 +1151,7 @@ async fn test_pagination_cursor() {
             git_origin_url: None,
             source: Some(SessionSource::VSCode),
             history_mode: Default::default(),
+            attached_to_thread_id: None,
             parent_thread_id: None,
             agent_nickname: None,
             agent_role: None,
@@ -1355,6 +1361,7 @@ async fn test_get_thread_contents() {
             git_origin_url: None,
             source: Some(SessionSource::VSCode),
             history_mode: Default::default(),
+            attached_to_thread_id: None,
             parent_thread_id: None,
             agent_nickname: None,
             agent_role: None,
@@ -1773,6 +1780,7 @@ async fn test_filesystem_cursor_pages_through_same_timestamp_ties() {
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
                 history_mode: Default::default(),
+                attached_to_thread_id: None,
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,
@@ -1799,6 +1807,7 @@ async fn test_filesystem_cursor_pages_through_same_timestamp_ties() {
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
                 history_mode: Default::default(),
+                attached_to_thread_id: None,
                 parent_thread_id: None,
                 agent_nickname: None,
                 agent_role: None,

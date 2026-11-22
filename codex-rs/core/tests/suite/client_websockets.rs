@@ -1,4 +1,5 @@
 #![allow(clippy::unwrap_used)]
+use super::model_request::BudgetCache;
 use codex_api::WS_REQUEST_HEADER_TRACEPARENT_CLIENT_METADATA_KEY;
 use codex_api::WS_REQUEST_HEADER_TRACESTATE_CLIENT_METADATA_KEY;
 use codex_core::CodexResponsesMetadata;
@@ -12,6 +13,7 @@ use codex_core::X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER;
 use codex_core::test_support::EmptyUserInstructionsProvider;
 use codex_core::test_support::with_parent_turn;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::ModelRequestContributor;
 use codex_features::Feature;
 use codex_http_client::OutboundProxyPolicy;
 use codex_login::AuthManager;
@@ -30,6 +32,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::account::PlanType;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::ServiceTier;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::AudioReference;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
@@ -69,6 +72,7 @@ use core_test_support::test_codex::RecordingUserInstructionsProvider;
 use core_test_support::test_codex::test_codex;
 use core_test_support::tracing::install_test_tracing;
 use core_test_support::wait_for_event;
+use futures::FutureExt;
 use futures::StreamExt;
 use opentelemetry_sdk::metrics::InMemoryMetricExporter;
 use opentelemetry_sdk::metrics::data::ResourceMetrics;
@@ -738,15 +742,45 @@ async fn responses_websocket_request_prewarm_reuses_connection() {
 
     let mut provider = websocket_provider(&server);
     provider.name = ModelProviderInfo::create_openai_provider(/*base_url*/ None).name;
-    let harness = websocket_harness_with_provider_options(
+    let budget = Arc::new(BudgetCache::default());
+    let harness = websocket_harness_with_provider_factory(
         provider,
         /*runtime_metrics_enabled*/ true,
         /*concurrent_reasoning_summaries_enabled*/ true,
         /*enabled_features*/ &[],
+        /*auth*/ None,
+        vec![budget.clone()],
+        codex_model_provider::create_model_provider,
     )
     .await;
     let mut client_session = harness.client.new_session();
     let prompt = prompt_with_input(vec![message_item("hello")]);
+    let responses_metadata = turn_metadata(&harness, /*turn_id*/ None);
+    let inference_trace = InferenceTraceContext::disabled();
+    let mut generation = Box::pin(client_session.stream(
+        &prompt,
+        &harness.model_info,
+        &harness.session_telemetry,
+        harness.effort.clone(),
+        harness.summary,
+        /*service_tier*/ None,
+        &responses_metadata,
+        &inference_trace,
+    ));
+    {
+        let mut exhausted = budget.0.lock().await;
+        assert!(generation.as_mut().now_or_never().is_none());
+        *exhausted = true;
+    }
+    let Err(error) = generation.await else {
+        panic!("exhausted generation unexpectedly succeeded");
+    };
+    assert!(
+        matches!(error.details(), CodexErrorDetails::SessionBudgetExceeded),
+        "{error:?}"
+    );
+    assert!(server.handshakes().is_empty());
+
     let responses_metadata = prewarm_metadata(&harness, /*turn_id*/ None);
     client_session
         .prewarm_websocket(
@@ -760,6 +794,7 @@ async fn responses_websocket_request_prewarm_reuses_connection() {
         )
         .await
         .expect("websocket prewarm failed");
+    *budget.0.lock().await = false;
     stream_until_complete(&mut client_session, &harness, &prompt).await;
 
     assert_eq!(server.handshakes().len(), 1);
@@ -1885,6 +1920,8 @@ async fn responses_websocket_invalid_request_error_with_status_is_forwarded() {
 
     let invalid_request_error = json!({
         "type": "error",
+        // An unexpected stream field must not hide the wrapped HTTP error.
+        "delta": {"unexpected": true},
         "status": 400,
         "error": {
             "type": "invalid_request_error",
@@ -2802,6 +2839,56 @@ fn websocket_provider_with_connect_timeout(
     }
 }
 
+#[tokio::test]
+async fn command_gateway_stops_after_a_second_unauthorized_websocket_upgrade() {
+    skip_if_no_network!();
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::header("upgrade", "websocket"))
+        .and(wiremock::matchers::header("cookie", "gateway=exported"))
+        .respond_with(wiremock::ResponseTemplate::new(401))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let command = if cfg!(windows) {
+        "command = 'cmd.exe', args = ['/D', '/C', 'echo', 'exported']"
+    } else {
+        "command = 'echo', args = ['exported']"
+    };
+    let provider = toml::from_str(&format!(
+        r#"
+name = "gateway"
+base_url = "{}/v1"
+supports_websockets = true
+[gateway_oauth]
+delivery = {{ kind = "cookie", name = "gateway" }}
+credential_export = {{ {command} }}
+"#,
+        server.uri()
+    ))
+    .unwrap();
+    let harness = websocket_harness_with_provider_options_and_auth(
+        provider,
+        /*runtime_metrics_enabled*/ false,
+        /*concurrent_reasoning_summaries_enabled*/ false,
+        /*enabled_features*/ &[],
+        Some(CodexAuth::from_api_key("primary")),
+    )
+    .await;
+    harness
+        .client
+        .new_session()
+        .preconnect_websocket(
+            &harness.model_info,
+            /*service_tier*/ None,
+            &harness.session_telemetry,
+            &websocket_connection_metadata(&harness),
+        )
+        .await
+        .expect_err("a rejected replay ends recovery");
+    server.verify().await;
+}
+
 async fn websocket_harness(server: &WebSocketTestServer) -> WebsocketTestHarness {
     websocket_harness_with_runtime_metrics(server, /*runtime_metrics_enabled*/ false).await
 }
@@ -2874,7 +2961,8 @@ async fn websocket_harness_with_provider_options_and_auth(
         concurrent_reasoning_summaries_enabled,
         enabled_features,
         auth,
-        |provider, auth| codex_model_provider::create_model_provider(provider, auth),
+        Vec::new(),
+        codex_model_provider::create_model_provider,
     )
     .await
 }
@@ -2885,6 +2973,7 @@ async fn websocket_harness_with_provider_factory(
     concurrent_reasoning_summaries_enabled: bool,
     enabled_features: &[Feature],
     auth: Option<CodexAuth>,
+    request_contributors: Vec<Arc<dyn ModelRequestContributor>>,
     provider_factory: impl FnOnce(
         ModelProviderInfo,
         Option<Arc<AuthManager>>,
@@ -2948,17 +3037,21 @@ async fn websocket_harness_with_provider_factory(
     .with_metrics(metrics);
     let effort = None;
     let summary = ReasoningSummary::Auto;
-    let _gateway = provider.gateway_oauth.as_ref().map(|_| {
-        codex_model_provider::test_support::seed_gateway_auth(
-            &provider,
-            &auth_manager,
-            serde_json::json!({
-                "access_token": "gateway-token",
-                "refresh_token": "refresh-token",
-                "expires_at": i64::MAX,
-            }),
-        )
-    });
+    let _gateway = provider
+        .gateway_oauth
+        .as_ref()
+        .filter(|config| !config.uses_credential_export())
+        .map(|_| {
+            codex_model_provider::test_support::seed_gateway_auth(
+                &provider,
+                &auth_manager,
+                serde_json::json!({
+                    "access_token": "gateway-token",
+                    "refresh_token": "refresh-token",
+                    "expires_at": i64::MAX,
+                }),
+            )
+        });
     let client = ModelClient::new(
         provider_factory(provider.clone(), client_auth_manager),
         AgentIdentityAuthPolicy::JwtOnly,
@@ -2980,7 +3073,7 @@ async fn websocket_harness_with_provider_factory(
         /*attestation_provider*/ None,
         http_client_factory,
         config.workspace_routing_context(),
-        Vec::new(),
+        request_contributors,
     );
 
     WebsocketTestHarness {

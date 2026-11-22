@@ -1,6 +1,7 @@
 //! Builds and sends foreground and speculative remote V2 compaction attempts.
 
 use crate::context::UserGoalUpdate;
+use codex_login::AuthOwner;
 use codex_protocol::ResponseItemId;
 use codex_protocol::openai_models::CatalogModel;
 use std::collections::BTreeSet;
@@ -33,6 +34,7 @@ use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::TokenUsage;
 use codex_rollout_trace::CompactionTraceContext;
+use codex_tools::ToolSpec;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -94,10 +96,8 @@ pub(super) async fn run_remote_compact_v2_attempt(
             let model_info = turn_context.model_info();
             let mut history = sess.clone_history().await;
             let input_goal_ids = UserGoalUpdate::message_ids(history.raw_items());
-            let tools_in_history = step_context.settings.model_info.use_responses_lite
-                && history
-                    .raw_items()
-                    .any(|item| matches!(item, ResponseItem::AdditionalTools { .. }));
+            let tools_in_history = step_context.incremental_tools_feature().is_some()
+                && history.has_tool_declarations();
             let base_instructions = if tools_in_history {
                 BaseInstructions {
                     text: String::new(),
@@ -165,17 +165,14 @@ pub(super) async fn run_remote_compact_v2_attempt(
             input.base_instructions,
             input.input,
             input.metadata,
-            CompactionRequestTransport::Background(
-                input.turn_state,
-                input.prefix.auth_owner_generation,
-            ),
+            CompactionRequestTransport::Background(input.turn_state, input.prefix.auth_owner),
             Some(input.window),
         ),
     };
     let mut unavailable =
         rejected_audio::unavailable_file_audio(&input, sess.services.image_store.as_ref()).await;
     rejected_audio::project_compaction_audio(&mut input, &mut prompt_input_metadata, &unavailable);
-    let tools_in_history = model_info.use_responses_lite
+    let tools_in_history = step_context.incremental_tools_feature().is_some()
         && input
             .iter()
             .any(|item| matches!(item, ResponseItem::AdditionalTools { .. }));
@@ -183,7 +180,12 @@ pub(super) async fn run_remote_compact_v2_attempt(
     let mut prompt = Prompt {
         input,
         tools: if tools_in_history {
-            Arc::default()
+            tool_router
+                .model_visible_specs()
+                .iter()
+                .filter(|tool| matches!(tool, ToolSpec::WebSearch { .. }))
+                .cloned()
+                .collect()
         } else {
             tool_router.model_visible_specs()
         },
@@ -283,25 +285,22 @@ pub(crate) async fn capture_background_input(
     mut snapshot: ContextManager,
     base_instructions: BaseInstructions,
     turn_state: Option<String>,
-    auth_owner_generation: Option<u64>,
+    auth_owner: Option<AuthOwner>,
     window: (String, u64, codex_protocol::ContextWindowId),
 ) -> BackgroundCompactionInput {
-    let base_instructions = if step_context.settings.model_info.use_responses_lite
-        && snapshot
-            .raw_items()
-            .any(|item| matches!(item, ResponseItem::AdditionalTools { .. }))
-    {
-        BaseInstructions {
-            text: String::new(),
-            provenance: None,
-        }
-    } else {
-        base_instructions
-    };
+    let base_instructions =
+        if step_context.incremental_tools_feature().is_some() && snapshot.has_tool_declarations() {
+            BaseInstructions {
+                text: String::new(),
+                provenance: None,
+            }
+        } else {
+            base_instructions
+        };
     let prefix = CompactionPrefix {
         generation: snapshot.history_version(),
         len: snapshot.annotated_items().len(),
-        auth_owner_generation,
+        auth_owner,
     };
     trim_function_call_history_to_fit_context_window(
         &mut snapshot,
@@ -344,7 +343,7 @@ pub(crate) async fn run_background_compaction(
             sess.services.image_store.as_ref(),
         ) => {},
     }
-    let prefix = prepared_input.prefix;
+    let prefix = prepared_input.prefix.clone();
     let metadata = CompactionTurnMetadata::new(
         CompactionTrigger::Auto,
         CompactionReason::ContextLimit,

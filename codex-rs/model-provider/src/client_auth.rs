@@ -7,6 +7,7 @@ use codex_features::RuntimeAuthMode;
 use codex_http_client::HttpClientFactory;
 use codex_login::CodexAuth;
 use codex_protocol::error::Result as CodexResult;
+use codex_runtime_agent_instance::RuntimeAuthBinding;
 use codex_runtime_agent_instance::RuntimeAuthManager;
 use http::HeaderMap;
 use std::sync::Arc;
@@ -22,7 +23,7 @@ pub struct ClientAuth {
 enum ClientAuthSource {
     Provider(SharedAuthProvider),
     Runtime {
-        manager: Arc<RuntimeAuthManager>,
+        manager: Arc<RuntimeAuthBinding>,
         mode: RuntimeAuthMode,
         source_generation: u64,
     },
@@ -42,12 +43,12 @@ impl ClientAuth {
         runtime: Option<&(Arc<RuntimeAuthManager>, RuntimeAuthMode)>,
         factory: HttpClientFactory,
         headers: &HeaderMap,
-    ) -> Result<(Self, HttpClientFactory), AuthError> {
+    ) -> anyhow::Result<(Self, HttpClientFactory)> {
         let resolved = crate::auth_provider_for_request(auth, runtime, headers).await?;
         let factory = resolved.bind_http_client_factory(factory)?;
         let source = match (runtime, resolved.runtime) {
-            (Some((manager, mode)), Some(selected)) => ClientAuthSource::Runtime {
-                manager: Arc::clone(manager),
+            (Some((_, mode)), Some(selected)) => ClientAuthSource::Runtime {
+                manager: Arc::clone(selected.binding()),
                 mode: *mode,
                 source_generation: selected.change_state().source_generation,
             },

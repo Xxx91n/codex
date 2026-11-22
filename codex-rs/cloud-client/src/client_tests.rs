@@ -110,6 +110,29 @@ async fn activation_sends_only_identity_and_excludes_turns() {
 }
 
 #[tokio::test]
+async fn archive_addresses_the_requested_thread_and_requires_acknowledgment() {
+    let mut fixture = fixture_responses(vec![
+        response(vec![frame(&[])], tonic::Status::ok("")),
+        response(
+            vec![frame(&[])],
+            tonic::Status::permission_denied("synthetic denial"),
+        ),
+    ])
+    .await;
+
+    fixture.client.archive_thread("t").await.unwrap();
+    assert_request(&mut fixture, "ArchiveThread", b"\x0a\x01t").await;
+
+    let error = fixture.client.archive_thread("u").await.unwrap_err();
+    let MutationError::OutcomeUnknown(Error::Rpc(status)) = error else {
+        panic!("expected a remote archive failure");
+    };
+    assert_eq!(status.code, tonic::Code::PermissionDenied as i32);
+    assert_request(&mut fixture, "ArchiveThread", b"\x0a\x01u").await;
+    assert!(fixture.requests.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn activation_preserves_native_settings_and_thread_metadata() {
     // Native Thread fields encoded independently of the client's wire types.
     let thread_base: &[u8] = &[
@@ -151,6 +174,7 @@ async fn activation_preserves_native_settings_and_thread_metadata() {
             0x2a, 1, b'/', // cwd (5)
             0x52, 1, b'm', // model (10)
             0x5a, 1, b'p', // model_provider (11)
+            0x6a, 4, b'h', b'i', b'g', b'h', // reasoning_effort (13)
             0x7a, 4, 0x12, 2, 8, 1, // sandbox (15): read-only with network access
         ]);
         prost::encoding::bytes::encode(/* thread */ 17, &thread, &mut response_bytes);
@@ -183,6 +207,13 @@ async fn activation_preserves_native_settings_and_thread_metadata() {
         .await;
         let activation = server.client.activate("t").await.unwrap();
         assert_eq!(activation.thread.protobuf().as_ref(), thread.as_slice());
+        assert_eq!(
+            (
+                activation.model.as_str(),
+                activation.reasoning_effort.as_deref()
+            ),
+            ("m", Some("high")),
+        );
         let json = serde_json::to_value(&activation).unwrap();
         assert_eq!(json["thread"]["source"], "unknown");
         assert_eq!(
@@ -231,6 +262,65 @@ async fn activation_preserves_native_settings_and_thread_metadata() {
     assert!(server.requests.try_recv().is_err());
 }
 
+// Native Prewarm pluginsMcp (28) with productSku (1) set to "codex".
+const PREWARM_CODEX_PLUGINS: &[u8] = b"\xe2\x01\x07\x0a\x05codex";
+
+#[tokio::test]
+async fn prewarm_defers_readiness_only_for_selected_projects() {
+    let mut fixture = fixture_responses(vec![
+        response(vec![frame(&[])], tonic::Status::ok("")),
+        response(vec![frame(&[])], tonic::Status::ok("")),
+    ])
+    .await;
+
+    assert!(matches!(
+        fixture
+            .client
+            .prewarm_default_thread(/*model*/ None, /*model_provider*/ None)
+            .await,
+        Err(Error::InvalidResponse)
+    ));
+    let expected = [
+        b"\x52\x04\x0a\x02\x0a\x00".as_slice(),
+        PREWARM_CODEX_PLUGINS,
+    ]
+    .concat();
+    assert_request(&mut fixture, "Prewarm", &expected).await;
+
+    assert!(matches!(
+        fixture
+            .client
+            .prewarm_thread(
+                /*model*/ None,
+                /*model_provider*/ None,
+                Some(ProjectEnvironment {
+                    name: "App".to_owned(),
+                    cwd: Some("/workspace/acme/app".to_owned()),
+                    origin_urls: vec![
+                        "git@github.com:acme/app.git".to_owned(),
+                        "https://github.com/acme/lib.git".to_owned(),
+                    ],
+                }),
+            )
+            .await,
+        Err(Error::InvalidResponse)
+    ));
+    let expected = [
+        b"\x52\x73\x0a\x71\x0a\x6f\x0a\x0d" as &[u8],
+        b"asenvcfg_base",
+        b"\x12\x13/workspace/acme/app",
+        b"\x1a\x49\x0a\x42\x0a\x1d\x2a\x1b",
+        b"git@github.com:acme/app.git",
+        b"\x0a\x21\x2a\x1f",
+        b"https://github.com/acme/lib.git",
+        b"\x12\x03App",
+        PREWARM_CODEX_PLUGINS,
+        b"\xe8\x01\x01",
+    ]
+    .concat();
+    assert_request(&mut fixture, "Prewarm", &expected).await;
+}
+
 #[tokio::test]
 async fn prewarm_uses_managed_defaults_and_preserves_resolved_settings() {
     // PrewarmThread uses Thread field numbers but omits turns entirely.
@@ -277,7 +367,7 @@ async fn prewarm_uses_managed_defaults_and_preserves_resolved_settings() {
     .await;
     let expected = server.client.activate("t").await.unwrap();
     assert_request(&mut server, "UpdateConfig", &[56, 1, 0x92, 1, 1, b't']).await;
-    for (model, model_provider, request) in [
+    for (model, model_provider, mut request) in [
         (None, None, vec![0x52, 4, 0x0a, 2, 0x0a, 0]),
         (
             Some("m".to_owned()),
@@ -295,7 +385,8 @@ async fn prewarm_uses_managed_defaults_and_preserves_resolved_settings() {
             serde_json::to_value(&expected).unwrap()
         );
         assert_eq!(actual.thread.protobuf().as_ref(), native_thread.as_slice());
-        // Exactly one default managed selection; no custom settings or Aeon mode.
+        // Exactly one default managed selection with Codex Apps.
+        request.extend_from_slice(PREWARM_CODEX_PLUGINS);
         assert_request(&mut server, "Prewarm", &request).await;
         assert!(server.requests.try_recv().is_err());
     }
@@ -320,7 +411,12 @@ async fn prewarm_uses_managed_defaults_and_preserves_resolved_settings() {
             .await,
         Err(Error::InvalidResponse)
     ));
-    assert_request(&mut server, "Prewarm", &[0x52, 4, 0x0a, 2, 0x0a, 0]).await;
+    let expected = [
+        b"\x52\x04\x0a\x02\x0a\x00".as_slice(),
+        PREWARM_CODEX_PLUGINS,
+    ]
+    .concat();
+    assert_request(&mut server, "Prewarm", &expected).await;
     assert!(server.requests.try_recv().is_err());
 }
 
@@ -583,3 +679,29 @@ mod transcript;
 
 #[path = "discovery_tests.rs"]
 mod discovery;
+
+#[test]
+fn model_catalog_delivery_rejects_a_revoked_account() {
+    let controller = codex_http_client::NetworkPolicyController::default();
+    let policy = controller.policy();
+    assert!(controller.publish(
+        policy.revision(),
+        codex_http_client::DestinationPolicy::Unrestricted,
+    ));
+    let factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault)
+        .with_network_policy(policy.clone().for_current_account());
+    let client = Client::new(
+        &factory,
+        "https://example.com",
+        Credentials::new("synthetic-token", "synthetic-account").unwrap(),
+    )
+    .unwrap();
+
+    assert!(client.model_catalog_is_current());
+    policy.invalidate();
+    assert!(controller.publish(
+        policy.revision(),
+        codex_http_client::DestinationPolicy::Unrestricted,
+    ));
+    assert!(!client.model_catalog_is_current());
+}

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::GatewayAuthManager;
 use codex_api::ApiError;
 use codex_api::Provider;
 use codex_api::SharedAuthProvider;
@@ -11,7 +12,6 @@ use codex_api::TransportError;
 use codex_features::RuntimeAuthMode;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
-use codex_login::GatewayAuthManager;
 use codex_login::WorkspaceRoutingRequest;
 use codex_login::default_client::ClientRedirectPolicy;
 use codex_model_provider_info::ModelProviderInfo;
@@ -486,9 +486,7 @@ impl ConfiguredModelProvider {
             let manager = auth_manager
                 .as_ref()
                 .ok_or_else(|| "gateway_oauth requires auth runtime configuration".to_string())?;
-            crate::shared_state::process_shared_state()
-                .gateway_auth(config, &manager.runtime_config())
-                .map_err(|_| "failed to create provider OAuth HTTP client".to_string())
+            GatewayAuthManager::new(&info, config, manager).map(Arc::new)
         });
         let auth_manager = auth_manager_for_provider(auth_manager, &info);
         let runtime_for_destination = |destination: Option<&str>| {
@@ -533,6 +531,21 @@ impl ConfiguredModelProvider {
 }
 
 impl ModelProvider for ConfiguredModelProvider {
+    fn is_recoverable_auth_error(&self, error: &TransportError) -> bool {
+        let TransportError::Http { status, body, .. } = error else {
+            return false;
+        };
+        *status == http::StatusCode::UNAUTHORIZED
+            && (self.runtime_auth.is_none()
+                || !codex_protocol::error::is_runtime_auth_denial(
+                    *status,
+                    body.as_deref().unwrap_or_default(),
+                    codex_response_debug_context::extract_response_debug_context(error)
+                        .auth_error_code
+                        .as_deref(),
+                ))
+    }
+
     fn info(&self) -> &ModelProviderInfo {
         &self.info
     }
@@ -571,6 +584,17 @@ impl ModelProvider for ConfiguredModelProvider {
             .clone()
             .transpose()
             .map_err(std::io::Error::other)
+    }
+
+    fn recover_from_unauthorized(
+        &self,
+    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<ProviderUnauthorizedRecovery>> {
+        Box::pin(async {
+            let Some(gateway) = self.gateway_auth_manager()? else {
+                return Ok(ProviderUnauthorizedRecovery::NotConfigured);
+            };
+            Ok(gateway.prepare_retry().await)
+        })
     }
 
     fn supports_attestation(&self) -> bool {

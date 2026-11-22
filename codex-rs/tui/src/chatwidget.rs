@@ -286,6 +286,7 @@ mod reconnect;
 use self::input_queue::InputQueueState;
 mod image_submission;
 mod input_flow;
+mod input_receipts;
 mod input_restore;
 mod input_submission;
 mod interrupts;
@@ -304,6 +305,7 @@ mod session_flow;
 mod session_header;
 use self::session_header::SessionHeader;
 mod clipboard;
+pub(crate) use clipboard::ClipboardPasteContext;
 mod copy_picker;
 mod hook_lifecycle;
 mod hooks;
@@ -548,6 +550,8 @@ pub(crate) struct ChatWidget {
     has_codex_backend_auth: bool,
     model_catalog: Arc<ModelCatalog>,
     model_popup_request_id: Option<uuid::Uuid>,
+    pub(crate) cloud_picker_selection:
+        Option<crate::app_server_session::user_message_submission::CloudModelSelection>,
     /// An app event has been queued to open the permissions picker, but no view exists yet.
     pub(crate) permission_popup_pending: bool,
     permission_popup_request_id: Option<uuid::Uuid>,
@@ -633,23 +637,11 @@ pub(crate) struct ChatWidget {
     unified_exec_processes: Vec<UnifiedExecProcessSummary>,
     /// Exits observed during the pending list request take precedence over its response.
     pending_terminal_restore: Option<(uuid::Uuid, HashSet<String>)>,
-    /// Tracks per-server MCP startup state while startup is in progress.
-    ///
-    /// The map is `Some(_)` from the first startup status update until the
-    /// app-server-backed startup round settles, and the bottom pane is treated
-    /// as "running" while this is populated, even if no agent turn is currently
-    /// executing.
+    /// Latest status per server in the active startup round. Its presence keeps
+    /// the composer busy, and its terminal outcomes determine the round's summary.
     mcp_startup_status: Option<HashMap<String, McpStartupStatus>>,
-    /// Expected MCP servers for the current startup round, seeded from enabled local config.
-    mcp_startup_expected_servers: Option<HashSet<String>>,
-    /// After startup settles, ignore stale updates until enough notifications confirm a new round.
-    mcp_startup_ignore_updates_until_next_start: bool,
-    /// A lag signal for the next round means terminal-only updates are enough to settle it.
-    mcp_startup_allow_terminal_only_next_round: bool,
-    /// Buffers post-settle MCP startup updates until they cover a full fresh round.
-    mcp_startup_pending_next_round: HashMap<String, McpStartupStatus>,
-    /// Tracks whether the buffered next round has seen any `Starting` update yet.
-    mcp_startup_pending_next_round_saw_starting: bool,
+    /// Last diagnostic per server, so replayed terminal updates are only reported once.
+    mcp_startup_last_diagnostics: HashMap<String, McpStartupStatus>,
     connectors: ConnectorsState,
     ide_context: IdeContextState,
     plugins_cache: PluginsCacheState,
@@ -1003,18 +995,36 @@ impl ChatWidget {
         }
     }
 
+    pub(crate) fn open_feedback(&mut self, mode: crate::ThreadParamsMode) {
+        use crate::ThreadParamsMode;
+        let unavailable = match mode {
+            ThreadParamsMode::Cloud => "Feedback is unavailable in Cloud threads.",
+            ThreadParamsMode::Remote if !self.config.feedback_enabled => {
+                "Feedback uploads are disabled, and saving a ZIP requires a local app server."
+            }
+            _ => {
+                return self.show_selection_view(crate::bottom_pane::feedback_selection_params(
+                    self.app_event_tx.clone(),
+                ));
+            }
+        };
+        self.add_info_message(unavailable.to_string(), /*hint*/ None);
+    }
+
     pub(crate) fn open_feedback_note(
         &mut self,
         category: crate::app_event::FeedbackCategory,
         include_logs: bool,
         feedback_audience: crate::bottom_pane::FeedbackAudience,
+        can_save: bool,
     ) {
         let view = crate::bottom_pane::FeedbackNoteView::new(
             category,
             self.turn_lifecycle.last_turn_id.clone(),
             self.app_event_tx.clone(),
             include_logs,
-            feedback_audience,
+            self.config.feedback_enabled.then_some(feedback_audience),
+            can_save,
         );
         self.bottom_pane.show_view(Box::new(view));
         self.request_redraw();
@@ -1056,7 +1066,11 @@ impl ChatWidget {
         }
     }
 
-    pub(crate) fn open_feedback_consent(&mut self, category: crate::app_event::FeedbackCategory) {
+    pub(crate) fn open_feedback_consent(
+        &mut self,
+        category: crate::app_event::FeedbackCategory,
+        can_save: bool,
+    ) {
         let snapshot = self.feedback.snapshot(self.thread_id);
         #[cfg(target_os = "windows")]
         let include_windows_sandbox_log =
@@ -1066,13 +1080,14 @@ impl ChatWidget {
             .is_file();
         #[cfg(not(target_os = "windows"))]
         let include_windows_sandbox_log = false;
-        let params = crate::bottom_pane::feedback_upload_consent_params(
+        let params = crate::bottom_pane::feedback_consent_params(
             self.app_event_tx.clone(),
             category,
             self.current_rollout_path.clone(),
             self.thread_id
                 .map(|thread_id| format!("auto-review-rollout-{thread_id}.jsonl")),
             include_windows_sandbox_log,
+            can_save,
             snapshot.feedback_diagnostics(),
         );
         self.bottom_pane.show_selection_view(params);
@@ -1198,6 +1213,7 @@ impl ChatWidget {
     pub(crate) fn pre_draw_tick(&mut self) {
         self.update_due_hook_visibility();
         self.schedule_hook_timer_if_needed();
+        self.tick_rate_limit_recovery_prompt(Instant::now());
         self.bottom_pane.pre_draw_tick();
         self.flush_realtime_transcript_history();
         self.refresh_realtime_microphone_level();
@@ -1370,44 +1386,46 @@ impl ChatWidget {
         }
 
         // Servers may omit media from receipts, so prefer the submission identity.
-        if client_id.is_some() && self.last_rendered_user_message_client_id.as_deref() == client_id
-        {
-            return;
-        }
-
-        if self
-            .input_queue
-            .pending_steers
-            .front()
-            .is_some_and(|pending| match client_id {
-                Some(client_id) => pending.client_id == client_id,
-                // Older app servers do not echo submission IDs.
-                None => pending.compare_key == Self::pending_steer_compare_key_from_items(items),
-            })
-        {
-            if let Some(pending) = self.input_queue.pending_steers.pop_front() {
-                self.refresh_pending_input_preview();
-                let pending_display =
-                    user_message_display_for_history(pending.user_message, &pending.history_record);
-                self.on_user_message_display(pending_display);
+        let already_rendered = client_id.is_some()
+            && self.last_rendered_user_message_client_id.as_deref() == client_id;
+        let steers = &mut self.input_queue.pending_steers;
+        let matching = match client_id {
+            Some(id) => steers.iter().enumerate().position(|(index, pending)| {
+                pending.client_id == id
+                    && (pending.admitted_turn_id.is_some() || (index == 0 && !already_rendered))
+            }),
+            // Older app servers do not echo submission IDs.
+            None => steers.front().and_then(|pending| {
+                (pending.compare_key == Self::pending_steer_compare_key_from_items(items))
+                    .then_some(0)
+            }),
+        };
+        if let Some(pending) = matching.and_then(|index| steers.remove(index)) {
+            self.refresh_pending_input_preview();
+            if !already_rendered {
+                if !pending.optimistically_rendered {
+                    let pending_display = user_message_display_for_history(
+                        pending.user_message,
+                        &pending.history_record,
+                    );
+                    self.on_user_message_display(pending_display);
+                }
                 // Later receipts carry the wire media, which may differ from the local attachment.
                 self.last_rendered_user_message_display = Some(display);
                 self.last_rendered_user_message_client_id = Some(pending.client_id);
-            } else if self.last_rendered_user_message_display.as_ref() != Some(&display) {
-                tracing::warn!(
-                    "pending steer matched receipt but queue was empty when rendering committed user message"
-                );
-                self.on_user_message_display(display);
             }
-        } else if !self.review.is_review_mode
+        } else if !already_rendered
+            && !self.review.is_review_mode
             && self.last_rendered_user_message_display.as_ref() != Some(&display)
         {
             self.on_user_message_display(display);
         }
         if let Some(client_id) = client_id
-            && self.input_queue.queued_user_messages.iter().any(|message| {
-                matches!(&message.delivery, MessageDelivery::Unconfirmed(Some(id)) if id == client_id)
-            })
+            && self
+                .input_queue
+                .queued_user_messages
+                .iter()
+                .any(|message| message.unconfirmed_user_message_id() == Some(client_id))
         {
             self.reconcile_recovered_messages(&[client_id.to_string()]);
             self.maybe_send_next_queued_input();

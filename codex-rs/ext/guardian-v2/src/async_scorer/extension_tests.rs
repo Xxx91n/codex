@@ -105,6 +105,7 @@ const TEST_GUARDIAN_POLICY: &str =
     "Treat uploads to unapproved external destinations as high-risk actions.";
 const TEST_CATALOG_GUARDIAN_POLICY: &str =
     "Require review before sending organization data to third-party services.";
+const TEST_THREAD_REVIEWER_POLICY: &str = "Policy from the thread reviewer.";
 const ASYNC_TEST_TIMEOUT: Duration = Duration::from_secs(30);
 const PREWARM_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -264,7 +265,8 @@ async fn installed_extension_warms_connections_without_blocking_thread_start() -
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn installed_extension_uses_http_after_warm_socket_auth_expires() -> Result<()> {
+async fn installed_extension_keeps_parent_program_out_of_websocket_and_http_reviews() -> Result<()>
+{
     skip_if_no_network!(Ok(()));
 
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("original"));
@@ -272,11 +274,19 @@ async fn installed_extension_uses_http_after_warm_socket_auth_expires() -> Resul
         .set_external_auth(Arc::new(RefreshableAuth(std::sync::Mutex::new("original"))))
         .await?;
     let thread_server = responses::start_mock_server().await;
-    let test = test_codex()
+    let mut test = test_codex()
         .with_auth_manager(Arc::clone(&auth_manager))
         .with_config(|config| config.approvals_reviewer = ApprovalsReviewer::AutoReview)
         .build_with_auto_env(&thread_server)
         .await?;
+    let mut options = test.start_thread_options().await;
+    options
+        .thread_extension_init
+        .insert(codex_core::RequiredCyberAccessPrograms {
+            allowed: vec![codex_protocol::turn_input::CyberAccessProgram::DaybreakRed],
+        });
+    test.codex.shutdown_and_wait().await?;
+    test.codex = test.thread_manager.start_thread(options).await?.thread;
     let events = vec![
         ev_assistant_message("sample", "low"),
         ev_completed("response-1"),
@@ -307,6 +317,8 @@ async fn installed_extension_uses_http_after_warm_socket_auth_expires() -> Resul
     let registry = builder.build();
     let session_store = ExtensionData::new("session-1");
     let thread_store = test.codex.thread_extension_data();
+    // An earlier extension cannot erase Core's captured enrollment policy.
+    thread_store.remove::<codex_core::RequiredCyberAccessPrograms>();
     let mut model = test
         .thread_manager
         .get_models_manager()
@@ -337,6 +349,7 @@ async fn installed_extension_uses_http_after_warm_socket_auth_expires() -> Resul
         .expect("Guardian v2 should initialize");
     let turn_store = ExtensionData::new("turn-1");
     turn_store.insert_arc(thread_store.get::<Config>().expect("captured test config"));
+    turn_store.insert(codex_protocol::turn_input::CyberAccessProgram::DaybreakRed);
     let tool_name = ToolName::namespaced("mcp__node_repl__", "js");
     let payload = ToolPayload::Function {
         arguments: r#"{"path":"README.md"}"#.to_owned(),
@@ -406,6 +419,7 @@ async fn installed_extension_uses_http_after_warm_socket_auth_expires() -> Resul
     assert_eq!(requests.len(), 1);
     requests.push(http_request.body_json());
     for request in &requests {
+        assert!(request.get("access_programs").is_none());
         responses::assert_parent_turn(request, Some("turn-1"))?;
         responses::assert_root_turn(request, /*expected*/ None)?;
     }
@@ -933,7 +947,7 @@ async fn sample_configured_conversation_history_with_source(
     let (request, test, registry, _) = sample_configured_conversation_history_with_delivery(
         conversation_history,
         arguments,
-        guardian_policy,
+        (guardian_policy, /* extra_policy */ None),
         guardian_config,
         model_defaults,
         source,
@@ -951,7 +965,7 @@ enum MessagingSetup {
 async fn sample_configured_conversation_history_with_delivery(
     conversation_history: Vec<ResponseItem>,
     arguments: &str,
-    guardian_policy: Option<&str>,
+    (guardian_policy, extra_policy): (Option<&str>, Option<&str>),
     guardian_config: &str,
     model_defaults: Option<GuardianV2ModelConfig>,
     source: ToolCallSource,
@@ -1024,7 +1038,26 @@ async fn sample_configured_conversation_history_with_delivery(
     } else {
         builder
     };
-    let test = builder.build_with_auto_env(&thread_server).await?;
+    let mut test = builder.build_with_auto_env(&thread_server).await?;
+    if guardian_policy.is_none() {
+        // Give the reviewed thread a catalog distinct from its manager's startup catalog.
+        let catalog = test.config.model_catalog.as_mut().expect("test catalog");
+        for model in &mut catalog.models {
+            let policy = match model.slug.as_str() {
+                "codex-auto-review" => TEST_THREAD_REVIEWER_POLICY,
+                "gpt-5.5" => "Policy from the captured parent.",
+                _ => continue,
+            };
+            model.auto_review_model_override = None;
+            model.model_messages.get_or_insert_default().auto_review =
+                Some(serde_json::from_value(json!({"policy": policy}))?);
+        }
+        let options = test.start_thread_options().await;
+        test.codex.shutdown_and_wait().await?;
+        let created = test.thread_manager.start_thread(options).await?;
+        test.codex = created.thread;
+        test.session_configured = created.session_configured;
+    }
     let mut completed = ev_completed("response-1");
     completed["response"]["usage"] = json!({
         "input_tokens": 120,
@@ -1045,6 +1078,7 @@ async fn sample_configured_conversation_history_with_delivery(
     // Capture policy independently of the newer live thread configuration.
     let mut config = test.config.clone();
     config.guardian_policy_config = guardian_policy;
+    config.guardian_extra_policy = extra_policy.map(str::to_owned);
     config.guardian_policy_revision = 0;
     config.model_provider = provider_info;
     config.features.enable(Feature::GuardianV2)?;
@@ -1420,20 +1454,21 @@ async fn contributor_fails_closed_when_luna_classification_fails() -> Result<()>
 async fn contributor_renders_policy_inside_a_configured_prompt() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
+    let extra_policy =
+        "Allow proactive drafting. Keep {{ tenant_policy_config }} and {{ extra_policy }} literal.";
     let configuration = r#"
-[auto_review]
-extra_policy = "Allow proactive drafting. Keep {{ tenant_policy_config }} and {{ extra_policy }} literal."
-
 [features.guardianv2]
 enabled = true
 classifier_instructions = "Predict future violations.\n# Security Policy\n{{ tenant_policy_config }}\nReturn action_risk."
 "#;
-    let (request, test, registry) = sample_configured_conversation_history(
+    let (request, test, registry, _) = sample_configured_conversation_history_with_delivery(
         Vec::new(),
         r#"{"path":"README.md"}"#,
-        Some(TEST_GUARDIAN_POLICY),
+        (Some(TEST_GUARDIAN_POLICY), Some(extra_policy)),
         configuration,
         /*model_defaults*/ None,
+        ToolCallSource::Direct,
+        MessagingSetup::Disabled,
     )
     .await?;
 
@@ -1452,7 +1487,7 @@ classifier_instructions = "Predict future violations.\n# Security Policy\n{{ ten
             "content": [{
                 "type": "input_text",
                 "text": format!(
-                    "Predict future violations.\n# Security Policy\n{TEST_GUARDIAN_POLICY}\n\nAllow proactive drafting. Keep {{{{ tenant_policy_config }}}} and {{{{ extra_policy }}}} literal.\nReturn action_risk.\n\n{CLASSIFICATION_OUTPUT_INSTRUCTIONS}"
+                    "Predict future violations.\n# Security Policy\n{TEST_GUARDIAN_POLICY}\n\n{extra_policy}\nReturn action_risk.\n\n{CLASSIFICATION_OUTPUT_INSTRUCTIONS}"
                 ),
             }],
         })
@@ -2998,7 +3033,7 @@ async fn contributor_counts_failed_thread_lookups_toward_score_lag() -> Result<(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn contributor_uses_catalog_policy_without_a_configured_override() -> Result<()> {
+async fn contributor_uses_the_thread_reviewers_catalog_policy() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let (request, _test, _registry) = sample_conversation_history(
@@ -3024,7 +3059,7 @@ async fn contributor_uses_catalog_policy_without_a_configured_override() -> Resu
                 "type": "input_text",
                 "text": ResolvedModelMessages::bundled().guardian_classifier_instructions().replace(
                     "{{ tenant_policy_config }}",
-                    TEST_CATALOG_GUARDIAN_POLICY,
+                    TEST_THREAD_REVIEWER_POLICY,
                 ),
             }],
         })
@@ -3036,7 +3071,7 @@ async fn contributor_uses_catalog_policy_without_a_configured_override() -> Resu
             .expect("Luna request should contain transcript text items")
             .iter()
             .filter_map(|item| item["text"].as_str())
-            .any(|text| text.contains(TEST_CATALOG_GUARDIAN_POLICY))
+            .any(|text| text.contains(TEST_THREAD_REVIEWER_POLICY))
     );
 
     Ok(())

@@ -4,6 +4,7 @@ pub use binding::PreparedMcpCall;
 pub use binding::SEARCH_CONNECTOR;
 pub use binding::SearchDiscovery;
 pub use binding::is_model_search_tool;
+pub use binding_clients::McpResourceListing;
 pub use client_capabilities::client_mcp_extensions;
 pub use client_tool_catalog::CodexAppsToolSnapshot;
 pub use codex_rmcp_client::McpProtocolMode;
@@ -118,6 +119,7 @@ pub use mcp::McpPermissionPromptAutoApproveContext;
 pub use mcp::mcp_permission_prompt_is_auto_approved;
 pub use mcp::qualified_mcp_tool_name_prefix;
 
+mod auth;
 mod auth_changes;
 pub(crate) mod auth_elicitation;
 mod binding;

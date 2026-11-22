@@ -5,6 +5,7 @@
 use crate::EvidenceCursor;
 use crate::EvidenceSnapshot;
 use crate::OriginalEvidence;
+use crate::sampling::GuardianOperation;
 use crate::sampling::HousekeeperResult;
 use crate::sampling::sample;
 use anyhow::ensure;
@@ -186,8 +187,16 @@ impl Housekeeper {
                         "additionalProperties":{"type":"string","description":"Channel purpose, at most 512 UTF-8 bytes."}}
                 }
             });
-            let sampled =
-                sample::<RoutingOutput>(runtime, &input, schema, deadline, cancellation).await;
+            let sampled = sample::<RoutingOutput>(
+                runtime,
+                GuardianOperation::HousekeeperRouting,
+                &input,
+                self.input_policy,
+                schema,
+                deadline,
+                cancellation,
+            )
+            .await;
             disposition = sampled.disposition;
             let output = sampled.result?;
             let valid = output.routes.len() == sources.len()
@@ -227,10 +236,7 @@ impl Housekeeper {
                         .append(
                             self.owner,
                             AppendRequest {
-                                request_id: to_json_string_bounded(
-                                    &("gv3-original", source.id, channel),
-                                    /*max_bytes*/ 512,
-                                )?,
+                                request_id: source.id.request_id(channel)?,
                                 destination: PostDestination::Channel(channel.clone()),
                                 // Multiple destinations need copies; the last one can take ownership.
                                 text: if index + 1 == destinations.len() {

@@ -3818,6 +3818,7 @@ async fn thread_goal_keeps_original_root_until_external_objective_edit() -> Resu
     let codex_home = TempDir::new()?;
     mock_responses_config(server.uri())
         .enable_feature(Feature::Goals)
+        .enable_feature(Feature::UntrustedAsToolOutput)
         .write(codex_home.path())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -3948,6 +3949,35 @@ async fn thread_goal_keeps_original_root_until_external_objective_edit() -> Resu
         .expect("intervening user turn ID");
     responses::assert_root_turn(&intervening_request, Some(intervening_turn_id))?;
     let first_continuation = serde_json::from_slice::<serde_json::Value>(&requests[4])?;
+    let created = serde_json::from_slice::<serde_json::Value>(&requests[1])?;
+    let objective = created["input"]
+        .as_array()
+        .expect("request input")
+        .iter()
+        .find(|item| item["name"] == "goal_objective")
+        .expect("model-written goal objective");
+    assert!(
+        first_continuation["input"]
+            .as_array()
+            .expect("continuation input")
+            .contains(objective)
+    );
+    let mut wire_item = objective.as_object().expect("goal context item").clone();
+    wire_item.remove("id"); // Generated for each run.
+    wire_item.sort_keys();
+    insta::assert_snapshot!(
+        "model_written_goal_as_untrusted_tool_output",
+        serde_json::to_string_pretty(&wire_item)?,
+    );
+    for request in [&created, &first_continuation] {
+        let input = request["input"].as_array().expect("request input");
+        assert!(!input.iter().any(|item| {
+            item["role"] == "user"
+                && item["content"]
+                    .to_string()
+                    .contains("keep its original owner")
+        }));
+    }
     let first_continuation_turn_id = first_continuation["client_metadata"]["turn_id"]
         .as_str()
         .expect("first continuation turn ID");
@@ -4564,6 +4594,7 @@ async fn thread_resume_token_usage_replay_ignores_stale_interrupted_tail_turn() 
             "timestamp": meta_rfc3339,
             "type": "event_msg",
             "payload": serde_json::to_value(EventMsg::AgentMessage(AgentMessageEvent {
+                moderation: None,
                 message: "Still running".to_string(),
                 phase: None,
                 memory_citation: None,
@@ -4654,6 +4685,7 @@ async fn thread_resume_token_usage_replay_can_belong_to_interrupted_turn() -> Re
             "timestamp": meta_rfc3339,
             "type": "event_msg",
             "payload": serde_json::to_value(EventMsg::AgentMessage(AgentMessageEvent {
+                moderation: None,
                 message: "Interrupted after usage".to_string(),
                 phase: None,
                 memory_citation: None,
@@ -4976,6 +5008,7 @@ async fn thread_resume_and_read_interrupt_incomplete_rollout_turn_when_thread_is
             "timestamp": meta_rfc3339,
             "type": "event_msg",
             "payload": serde_json::to_value(EventMsg::AgentMessage(AgentMessageEvent {
+                moderation: None,
                 message: "Still running".to_string(),
                 phase: None,
                 memory_citation: None,

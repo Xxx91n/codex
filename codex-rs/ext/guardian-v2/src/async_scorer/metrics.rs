@@ -57,8 +57,11 @@ pub(super) fn sampler_failure_reason(error: &LunaSamplerError) -> &'static str {
             ApiError::InvalidRequest { .. }
             | ApiError::InvalidAudioInput { .. }
             | ApiError::InvalidPrompt { .. } => "invalid_request",
+            ApiError::AccessProgramNotEnabled { .. } => "access_program_not_enabled",
+            ApiError::ContentPolicyViolation { .. } => "content_policy_violation",
             ApiError::CyberPolicy { .. }
             | ApiError::BioPolicy { .. }
+            | ApiError::InferenceHookDenied { .. }
             | ApiError::MisalignmentPolicyViolation { .. } => "policy_error",
             ApiError::ServerOverloaded { .. } => "server_overloaded",
             ApiError::PolicyCapacityUnavailable { .. } => "policy_capacity_unavailable",

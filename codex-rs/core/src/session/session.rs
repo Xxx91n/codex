@@ -604,6 +604,24 @@ impl SessionConfiguration {
             Arc::make_mut(&mut next_configuration.original_config_do_not_use)
                 .requested_approvals_reviewer = Some(reviewer);
         }
+        if !next_configuration.trusted_guardian_reviewer
+            && updates.step_settings.approvals_reviewer.is_none()
+            && self.step_settings.collaboration_mode.model()
+                != next_configuration.step_settings.collaboration_mode.model()
+        {
+            let reviewer = crate::config::resolve_guardian_reviewer(
+                next_configuration
+                    .original_config_do_not_use
+                    .requested_approvals_reviewer
+                    .unwrap_or(self.step_settings.approvals_reviewer),
+                Some(next_configuration.step_settings.collaboration_mode.model()),
+                next_configuration
+                    .original_config_do_not_use
+                    .config_layer_stack
+                    .requirements(),
+            )?;
+            Arc::make_mut(&mut next_configuration.step_settings).approvals_reviewer = reviewer;
+        }
         Ok(next_configuration)
     }
 
@@ -648,6 +666,8 @@ impl SessionConfiguration {
 pub(crate) struct SessionSettingsCommit {
     pub(crate) configuration: SessionConfiguration,
     pub(crate) snapshot: ThreadSettingsSnapshot,
+    /// Receipt for the host's local acceptance of this commit, when applicable.
+    pub(crate) host_acceptance: Option<Shared<BoxFuture<'static, Result<(), String>>>>,
 }
 
 #[derive(Default, Clone)]
@@ -664,6 +684,8 @@ pub(crate) struct SessionSettingsUpdate {
     pub(crate) active_permission_profile: Option<ActivePermissionProfile>,
     pub(crate) windows_sandbox_level: Option<WindowsSandboxLevel>,
     pub(crate) service_tier_for_turn: Option<String>,
+    /// An explicit settings reply waits for host acceptance and can retry an observed failure.
+    pub(crate) host_acceptance_in_reply: bool,
     pub(crate) app_server_client_name: Option<String>,
     pub(crate) app_server_client_version: Option<String>,
     pub(crate) disabled_plugin_ids: Option<Vec<String>>,
@@ -1012,6 +1034,8 @@ impl Session {
                 ));
             }
         };
+        let required_cyber_access_programs =
+            thread_extension_init.get::<crate::cyber_access_program::RequiredCyberAccessPrograms>();
         let inherited_session_id = thread_extension_init
             .remove::<InheritedSessionId>()
             .map(|inherited| inherited.0);
@@ -1080,7 +1104,7 @@ impl Session {
             && session_configuration.session_source.is_non_root_agent()
             && config.features.enabled(Feature::TokenBudget);
         if restore_child_window && let InitialHistory::Forked(items) = &mut initial_history {
-            let child_window_id = initial_auto_compact_window_ids.window_id.to_string();
+            let child_window_id = initial_auto_compact_window_ids.window_id.clone();
             for item in items {
                 if let RolloutItem::Compacted(checkpoint) = item {
                     checkpoint.window_number = Some(0);
@@ -1090,6 +1114,8 @@ impl Session {
                 }
             }
         }
+        let has_provided_agent_control =
+            matches!(&agent_control, AgentControlInit::Provided { .. });
         let (agent_control, local_agent_runtime): (Arc<dyn AgentControl>, _) = match agent_control {
             AgentControlInit::Local(control) => {
                 let control = control.with_session_id(
@@ -1150,6 +1176,23 @@ impl Session {
             thread_id.to_string(),
             thread_extension_init,
         );
+        if let Some(required) = &required_cyber_access_programs {
+            thread_extension_data.insert(
+                crate::cyber_access_program::RequiredCyberAccessProgramsSnapshot(Arc::clone(
+                    required,
+                )),
+            );
+        }
+        // Native children receive their enrollment at spawn. A cold resume or durable fork
+        // has no live attachment, even when the rollout is enabled at startup.
+        if matches!(
+            &initial_history,
+            InitialHistory::New | InitialHistory::Cleared
+        ) && !session_source.is_non_root_agent()
+            && config.features.enabled(Feature::DaybreakProgramPropagation)
+        {
+            thread_extension_data.insert(crate::agent::helper_daybreak::Enrollment::Root);
+        }
         thread_extension_data.insert(crate::context::GuardianReviewEvidence::default());
         crate::model_search::SearchOwner::restore(&thread_extension_data, &initial_history);
         // Kick off independent async setup tasks in parallel to reduce startup latency.
@@ -1198,9 +1241,7 @@ impl Session {
                                 ForkPersistence::Referenced { history_base, .. } => *history_base,
                             },
                             subagent_history_start_ordinal: None,
-                            initial_window_id: initial_auto_compact_window_ids
-                                .window_id
-                                .to_string(),
+                            initial_window_id: initial_auto_compact_window_ids.window_id.clone(),
                             runtime_workspace_roots: Some(config.workspace_roots.clone()),
                             metadata: ThreadPersistenceMetadata {
                                 cwd: Some(config.cwd.to_path_buf()),
@@ -1523,9 +1564,8 @@ impl Session {
                 config.model_context_window,
                 config.model_auto_compact_token_limit,
                 config.permissions.approval_policy.value(),
-                config
-                    .permissions
-                    .legacy_sandbox_policy(session_configuration.cwd().as_path()),
+                &config.permissions.effective_permission_profile(),
+                session_configuration.cwd().as_path(),
                 mcp_server_names.iter().map(String::as_str).collect(),
                 &crate::config::legacy_multi_agent_disabled_sources(&config.config_layer_stack),
             );
@@ -1691,11 +1731,6 @@ impl Session {
             } else {
                 None
             };
-            let blocked_request_observer = config
-                .permissions
-                .network
-                .as_ref()
-                .map(|_| build_blocked_request_observer(Arc::clone(&network_approval)));
             let network_policy_decider =
                 network_policy_decider_session
                     .as_ref()
@@ -1718,7 +1753,7 @@ impl Session {
                     config.permissions.permission_profile(),
                     config.effective_local_windows_sandbox_type(),
                     network_policy_decider.as_ref().map(Arc::clone),
-                    blocked_request_observer.as_ref().map(Arc::clone),
+                    Some(build_blocked_request_observer(Arc::clone(&network_approval))),
                     managed_network_requirements_configured,
                     network_proxy_audit_metadata.clone(),
                 )
@@ -1869,6 +1904,13 @@ impl Session {
                     // This placeholder is used only for teardown, before the session is published.
                     Err(err) => (AgentRuntimeServices::Controller, Some(err)),
                 };
+            state.shared_service_tier_pending = parent_thread_id.is_none()
+                && match &agent_runtime {
+                    AgentRuntimeServices::Controller => has_provided_agent_control,
+                    AgentRuntimeServices::Host(services) => {
+                        session_id == SessionId::from(thread_id) && services.service_tier.is_some()
+                    }
+                };
             let executed_tool_calls =
                 crate::state::ExecutedToolCalls::new(&config.features, &initial_history);
             let codex_responses_headers =
@@ -1924,6 +1966,7 @@ impl Session {
                 tx_event.clone(),
                 codex_responses_headers,
                 crate::cyber_access_program::ApiKeyCyberAccessPrograms::from_config(&config),
+                required_cyber_access_programs,
             );
             // Once tracing starts, startup cleanup must own the session before the next await.
             let rollout_thread_trace = if matches!(

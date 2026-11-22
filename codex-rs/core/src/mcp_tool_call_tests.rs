@@ -402,9 +402,9 @@ fn approval_required_when_read_only_false_and_open_world() {
 }
 
 #[test]
-fn approval_required_when_destructive_even_if_read_only_true() {
+fn approval_not_required_when_read_only_even_if_destructive() {
     let annotations = annotations(Some(true), Some(true), Some(true));
-    assert_eq!(requires_mcp_tool_approval(Some(&annotations)), true);
+    assert_eq!(requires_mcp_tool_approval(Some(&annotations)), false);
 }
 
 #[test]
@@ -1153,6 +1153,65 @@ fn truncate_mcp_tool_result_for_event_bounds_large_error() {
     // overhead beyond the requested byte budget.
     assert!(got.len() < MCP_TOOL_CALL_EVENT_RESULT_MAX_BYTES + 1024);
     assert!(got.contains("truncated"));
+}
+
+#[tokio::test]
+async fn mcp_tool_call_request_meta_attributes_only_repl_calls_to_configured_product() {
+    for (server, connector, configured, expected) in [
+        ("node_repl", None, Some("codex"), Some("codex")),
+        (
+            "codex_apps",
+            Some("connector_openai_browser"),
+            Some("codex"),
+            Some("codex"),
+        ),
+        ("custom_server", None, Some("codex"), None),
+        (
+            "codex_apps",
+            Some("unrelated_connector"),
+            Some("codex"),
+            None,
+        ),
+        (
+            "node_repl",
+            None,
+            Some("private-unrecognized-product"),
+            Some("other"),
+        ),
+        ("node_repl", None, Some(""), None),
+        ("node_repl", None, None, None),
+    ] {
+        let (_, mut turn_context) = make_session_and_context().await;
+        Arc::make_mut(&mut turn_context.config).apps_mcp_product_sku =
+            configured.map(str::to_owned);
+        turn_context
+            .turn_metadata_state
+            .update_responsesapi_client_metadata(ResponsesApiClientMetadataUpdate {
+                replacement: Some(HashMap::from([(
+                    "product_sku".to_string(),
+                    "spoofed".to_string(),
+                )])),
+                ..Default::default()
+            });
+        let step_context = StepContext::for_test(Arc::new(turn_context));
+        let metadata = approval_metadata(
+            connector, /*connector_name*/ None, /*connector_description*/ None,
+            /*tool_title*/ None, /*tool_description*/ None,
+        );
+        let meta = build_mcp_tool_call_request_meta(
+            &step_context,
+            server,
+            "call-product",
+            Some(&metadata),
+            /*is_host_owned_apps*/ false,
+        )
+        .expect("request metadata");
+        assert_eq!(
+            meta[crate::X_CODEX_TURN_METADATA_HEADER].get("product_sku"),
+            expected.map(serde_json::Value::from).as_ref(),
+            "{server}, {connector:?}, {configured:?}",
+        );
+    }
 }
 
 #[tokio::test]
@@ -3259,8 +3318,13 @@ async fn permission_request_hook_runs_after_remembered_mcp_approval() {
     );
 }
 
+#[test_case::test_case(false, AppToolApproval::Approve; "approved tool")]
+#[test_case::test_case(true, AppToolApproval::Auto; "read only tool")]
 #[tokio::test]
-async fn strict_auto_review_forces_guardian_for_mcp_policy_skip() {
+async fn strict_auto_review_forces_guardian_for_mcp_policy_skip(
+    read_only: bool,
+    approval_mode: AppToolApproval,
+) {
     let server = start_mock_server().await;
     let guardian_request_log = mount_sse_once(
         &server,
@@ -3311,7 +3375,7 @@ async fn strict_auto_review_forces_guardian_for_mcp_policy_skip() {
         arguments: Some(serde_json::json!({ "calendar_id": "primary" })),
     };
     let metadata = McpToolApprovalMetadata {
-        annotations: Some(annotations(Some(false), Some(true), Some(true))),
+        annotations: Some(annotations(Some(read_only), Some(true), Some(true))),
         connector_id: None,
         link_id: None,
         connector_name: None,
@@ -3352,7 +3416,7 @@ async fn strict_auto_review_forces_guardian_for_mcp_policy_skip() {
             host_cwd: &captured_mcp_config.host_cwd,
         },
         test_environment_id(&turn_context),
-        McpToolApprovalPolicy::for_server(AppToolApproval::Approve),
+        McpToolApprovalPolicy::for_server(approval_mode),
     )
     .await;
 
@@ -3494,11 +3558,7 @@ async fn prompt_mode_waits_for_approval_when_annotations_do_not_require_approval
         arguments: None,
     };
     let metadata = McpToolApprovalMetadata {
-        annotations: Some(annotations(
-            Some(true),
-            /*destructive*/ None,
-            /*open_world*/ None,
-        )),
+        annotations: Some(annotations(Some(true), Some(true), Some(true))),
         connector_id: None,
         link_id: None,
         connector_name: None,

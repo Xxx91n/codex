@@ -109,7 +109,11 @@ impl KeymapActionId {
                 self.action,
                 "focus_main_composer"
                     | "focus_sidebar_content"
+                    | "focus_sidebar_tabs"
                     | "hide_pane"
+                    | "close_sidebar_tab"
+                    | "sidebar_up"
+                    | "sidebar_down"
                     | "focus_pane_left"
                     | "focus_pane_right"
                     | "minimize_pane_width"
@@ -316,7 +320,11 @@ define_runtime_action_bindings! {
         focus_activity,
         focus_main_composer,
         focus_sidebar_content,
+        focus_sidebar_tabs,
         hide_pane,
+        close_sidebar_tab,
+        sidebar_up,
+        sidebar_down,
         focus_pane_left,
         focus_pane_right,
         minimize_pane_width,

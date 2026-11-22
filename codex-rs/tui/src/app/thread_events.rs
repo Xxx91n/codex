@@ -26,6 +26,35 @@ pub(super) enum ThreadBufferedEvent {
     FeedbackSubmission(FeedbackThreadEvent),
 }
 
+pub(super) fn confirmed_user_message_ids<'a>(
+    turns: &'a [Turn],
+    events: impl Iterator<Item = &'a ThreadBufferedEvent>,
+) -> Vec<String> {
+    turns
+        .iter()
+        .flat_map(Turn::item_payloads)
+        .chain(events.filter_map(|event| {
+            let ThreadBufferedEvent::Notification(notification) = event else {
+                return None;
+            };
+            if let ServerNotification::ItemStarted(notification) = notification.as_ref() {
+                Some(&notification.item.payload)
+            } else if let ServerNotification::ItemCompleted(notification) = notification.as_ref() {
+                Some(&notification.item.payload)
+            } else {
+                None
+            }
+        }))
+        .filter_map(|item| {
+            if let ThreadItemPayload::UserMessage { client_id, .. } = item {
+                client_id.clone()
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+}
+
 fn is_voice_handoff_item(item: &ThreadItemPayload) -> bool {
     matches!(item, ThreadItemPayload::UserMessage { content, .. }
         if crate::chatwidget::realtime_delegation_input(content).is_some())
@@ -55,7 +84,7 @@ pub(super) struct FeedbackThreadEvent {
     pub(super) category: FeedbackCategory,
     pub(super) include_logs: bool,
     pub(super) feedback_audience: FeedbackAudience,
-    pub(super) result: Result<String, String>,
+    pub(super) result: Result<crate::app_event::FeedbackReceipt, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +99,7 @@ pub(super) struct ThreadEventStore {
     pub(super) session: Option<ThreadSessionState>,
     pub(super) turns: Vec<Turn>,
     pub(super) buffer: VecDeque<ThreadBufferedEvent>,
+    pub(super) attachment_prefix: Option<usize>,
     pub(super) pending_interactive_replay: PendingInteractiveReplayState,
     pub(super) active_turn_id: Option<String>,
     // Replay still needs the current turn's start after it falls out of the event buffer.
@@ -121,6 +151,7 @@ impl ThreadEventStore {
             session: None,
             turns: Vec::new(),
             buffer: VecDeque::new(),
+            attachment_prefix: None,
             pending_interactive_replay: PendingInteractiveReplayState::default(),
             active_turn_id: None,
             evicted_active_turn: None,
@@ -155,8 +186,15 @@ impl ThreadEventStore {
     }
 
     pub(super) fn rebase_buffer_after_session_refresh(&mut self) {
+        let tail = self
+            .attachment_prefix
+            .take()
+            .map(|prefix| self.buffer.split_off(prefix.min(self.buffer.len())));
         self.buffer.retain_mut(Self::event_survives_session_refresh);
         self.buffered_agent_message_delta_bytes = 0;
+        for event in tail.into_iter().flatten() {
+            self.push_buffered_event(event);
+        }
     }
 
     pub(super) fn set_turns(&mut self, turns: Vec<Turn>) {
@@ -630,6 +668,10 @@ impl ThreadEventChannel {
         }
     }
 
+    pub(super) fn mark_live(&mut self) {
+        self.attachment = ThreadEventAttachment::Live;
+    }
+
     pub(super) fn mark_replay_only(&mut self) {
         self.attachment = ThreadEventAttachment::ReplayOnly;
     }
@@ -1022,6 +1064,7 @@ mod tests {
         store.push_notification(serde_json::from_value(expected.clone()).unwrap());
         store.rebase_buffer_after_session_refresh();
         expected["params"]["item"]["text"] = serde_json::json!("");
+        expected["params"]["item"]["moderation"] = serde_json::Value::Null;
         let ThreadBufferedEvent::Notification(actual) = &store.snapshot().events[0] else {
             panic!("missing live question");
         };

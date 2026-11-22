@@ -4,6 +4,7 @@ use crate::ModelProvider;
 use crate::ProviderAuthScope;
 use crate::ResolvedProviderAuth;
 use crate::WorkspaceRoutingContext;
+use crate::auth::bearer_auth_for_provider;
 use crate::auth::resolve_provider_auth;
 use crate::auth::resolve_provider_auth_for_scope;
 use codex_api::AgentIdentityTelemetry;
@@ -14,9 +15,11 @@ use codex_features::RuntimeAuthMode;
 use codex_http_client::ClientRouteClass;
 use codex_http_client::HttpClientFactory;
 use codex_login::AuthManager;
+use codex_login::AuthOwner;
 use codex_login::CodexAuth;
 use codex_login::default_client::ClientRedirectPolicy;
 use codex_login::default_client::create_client_for_route;
+use codex_model_provider_info::GatewayOAuthConfig;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::error::Result;
 use codex_runtime_agent_instance::RuntimeAuth;
@@ -39,14 +42,22 @@ pub(crate) async fn resolve_request_auth(
             async move {
                 if let Some((runtime, mode)) = runtime {
                     crate::validate_runtime_destination(destination.as_deref())?;
-                    crate::validate_runtime_provider(&info, manager.as_ref(), &runtime)?;
+                    crate::validate_runtime_environment(&runtime, destination.as_deref())?;
+                    let runtime =
+                        crate::select_runtime_provider(&info, manager.as_ref(), &runtime)?;
                     let headers = info.build_header_map()?;
-                    let selected = crate::runtime_auth::select_runtime_auth(&runtime, &headers)
-                        .await
-                        .map_err(|error| codex_api::map_api_error(error.into()))?;
+                    let selected =
+                        crate::runtime_auth::select_runtime_auth(&runtime, &headers).await?;
                     let resolved = ResolvedProviderAuth::for_runtime(selected, mode);
                     resolved.validate_headers(&headers)?;
                     tracing::debug!(runtime_auth_mode = ?mode, "selected runtime authentication");
+                    return Ok(resolved);
+                }
+
+                if let Some(bearer) = bearer_auth_for_provider(&info)? {
+                    let credential = bearer.token.as_deref().map(CodexAuth::from_api_key);
+                    let mut resolved = ResolvedProviderAuth::new(Arc::new(bearer));
+                    resolved.credential = credential;
                     return Ok(resolved);
                 }
 
@@ -73,9 +84,23 @@ pub(crate) async fn resolve_request_auth(
     .await?
 }
 
+/// Capture the selected source's owner before starting work such as a turn or classification.
+/// Request preparation returns the owner it actually used so callers can detect a source change.
+pub fn request_auth_owner(provider: &dyn ModelProvider) -> Option<AuthOwner> {
+    let credentials = provider.auth_manager();
+    match provider.runtime_auth() {
+        Some((runtime, _)) => {
+            crate::select_runtime_provider(provider.info(), credentials.as_ref(), runtime)
+                .ok()
+                .map(|binding| binding.auth_owner())
+        }
+        None => credentials.map(|manager| manager.auth_owner()),
+    }
+}
+
 pub struct ResolvedProviderRequest {
     pub auth: Option<CodexAuth>,
-    pub auth_owner_generation: Option<u64>,
+    pub auth_owner: Option<AuthOwner>,
     pub auth_revision: Option<u64>,
     pub api_provider: Provider,
     pub redirect_policy: ClientRedirectPolicy,
@@ -122,6 +147,9 @@ pub async fn resolve_request(
     crate::prepare_provider_request(provider, check_auth, |state| {
         let scope = scope.clone();
         let http_client_factory = http_client_factory.clone();
+        let owner = state
+            .and_then(|_| provider.auth_manager())
+            .map(|manager| manager.auth_owner());
         async move {
             let (api_provider, resolved_auth) = provider.request_provider_and_auth(scope).await?;
             let auth = match &resolved_auth.credential {
@@ -151,14 +179,25 @@ pub async fn resolve_request(
                 .map(|selected| selected.runtime().id().to_owned());
             Ok(ResolvedProviderRequest {
                 auth,
-                auth_owner_generation: runtime_state
-                    .map(|state| state.owner_generation)
-                    .or(state.map(|state| state.owner_generation)),
+                auth_owner: resolved_auth
+                    .runtime
+                    .as_ref()
+                    .map(|selected| selected.auth_owner().clone())
+                    .or(owner),
                 auth_revision: runtime_state
                     .map(|state| state.generation)
                     .or(state.map(|state| state.generation)),
                 api_provider,
-                redirect_policy,
+                redirect_policy: if provider
+                    .info()
+                    .gateway_oauth
+                    .as_ref()
+                    .is_some_and(GatewayOAuthConfig::uses_credential_export)
+                {
+                    ClientRedirectPolicy::Reject
+                } else {
+                    redirect_policy
+                },
                 api_auth: resolved_auth.auth,
                 agent_identity_telemetry: resolved_auth.agent_identity_telemetry,
                 runtime_id,

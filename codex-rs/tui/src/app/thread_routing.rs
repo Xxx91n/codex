@@ -114,6 +114,17 @@ impl App {
         } else {
             None
         };
+        if let Some(startup_pane) = self.sidebars.remove(&None)
+            && let std::collections::hash_map::Entry::Vacant(entry) =
+                self.sidebars.entry(Some(thread_id))
+        {
+            entry.insert(startup_pane);
+            if let Some(mode) = &mut self.pane_resize
+                && mode.parent.is_none()
+            {
+                mode.parent = Some(thread_id);
+            }
+        }
         self.active_thread_id = Some(thread_id);
         self.active_thread_rx = receiver;
         self.refresh_pending_thread_approvals().await;
@@ -123,6 +134,9 @@ impl App {
         let Some(active_id) = self.active_thread_id else {
             return;
         };
+        if let Some(pane) = self.sidebars.get_mut(&Some(active_id)) {
+            pane.opening = None;
+        }
         let input_state = self.chat_widget.capture_thread_input_state();
         let recap_progress = self.recap.progress();
         if let Some(channel) = self.thread_event_channels.get_mut(&active_id) {
@@ -147,7 +161,12 @@ impl App {
             .keys()
             .copied()
             .chain(self.agent_navigation.tracked_thread_ids())
-            .filter(|id| !self.side_threads.contains_key(id))
+            .filter(|id| {
+                !self.side_threads.contains_key(id)
+                    && !self
+                        .saved_openings
+                        .preparing(*id, self.thread_event_channels.get(id))
+            })
         {
             self.agents_overview
                 .dispatched_requests
@@ -293,6 +312,12 @@ impl App {
         thread_id: ThreadId,
         request: &ServerRequest,
     ) -> std::io::Result<Option<ThreadInteractiveRequest>> {
+        if self
+            .saved_openings
+            .preparing(thread_id, self.thread_event_channels.get(&thread_id))
+        {
+            return Ok(None);
+        }
         let thread_label = Some(self.thread_label(thread_id));
         Ok(match request {
             ServerRequest::CommandExecutionRequestApproval { params, .. } => {
@@ -1021,7 +1046,11 @@ impl App {
                 continue;
             }
 
-            if store.lock().await.has_pending_thread_approvals() {
+            let pending = {
+                let store = store.lock().await;
+                store.attachment_prefix.is_none() && store.has_pending_thread_approvals()
+            };
+            if pending {
                 pending_thread_ids.insert(thread_id);
                 // Approval requests can arrive before the thread's metadata.
                 if self.agent_navigation.get(&thread_id).is_none() {
@@ -1063,6 +1092,7 @@ impl App {
         if self.abandoned_side_threads.contains(&thread_id) {
             return Ok(());
         }
+        self.track_side_chat_title(thread_id, &notification);
         if self.current_displayed_thread_id() == Some(thread_id)
             && let ServerNotification::TurnCompleted(notification) = &notification
         {
@@ -1152,7 +1182,10 @@ impl App {
             // Lifecycle responses already contain authoritative session state. Their rollout may
             // not exist until the first turn, so inferring it again can wait through reader retries.
             let already_has_session = match self.thread_event_channels.get(&thread_id) {
-                Some(channel) => channel.store.lock().await.session.is_some(),
+                Some(channel) => {
+                    let store = channel.store.lock().await;
+                    store.session.is_some() || store.attachment_prefix.is_some()
+                }
                 None => false,
             };
 
@@ -1561,8 +1594,11 @@ impl App {
         self.recap.seed_from_turns(&turns, now);
         self.schedule_recap_check(thread_id, now);
 
-        self.chat_widget
-            .replay_thread_turns(turns, ReplayKind::ResumeInitialMessages);
+        self.chat_widget.replay_backend_thread_turns(
+            turns,
+            ReplayKind::ResumeInitialMessages,
+            &self.app_server_target,
+        );
         if should_buffer_initial_replay {
             self.app_event_tx
                 .send(AppEvent::EndInitialHistoryReplayBuffer);
@@ -1809,7 +1845,6 @@ impl App {
                 )
             })
             .collect::<Vec<_>>();
-        self.refresh_mcp_startup_expected_servers_from_config();
         let should_buffer_replay = !snapshot.turns.is_empty() || !snapshot.events.is_empty();
         if should_buffer_replay {
             self.app_event_tx
@@ -1842,32 +1877,10 @@ impl App {
             self.chat_widget
                 .remember_realtime_delegated_reasoning_turn(turn_id);
         }
-        let confirmed_message_ids = snapshot
-            .turns
-            .iter()
-            .flat_map(Turn::item_payloads)
-            .chain(snapshot.events.iter().filter_map(|event| {
-                let ThreadBufferedEvent::Notification(notification) = event else {
-                    return None;
-                };
-                if let ServerNotification::ItemStarted(notification) = notification.as_ref() {
-                    Some(&notification.item.payload)
-                } else if let ServerNotification::ItemCompleted(notification) =
-                    notification.as_ref()
-                {
-                    Some(&notification.item.payload)
-                } else {
-                    None
-                }
-            }))
-            .filter_map(|item| {
-                if let ThreadItemPayload::UserMessage { client_id, .. } = item {
-                    client_id.clone()
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
+        let confirmed_message_ids = super::thread_events::confirmed_user_message_ids(
+            &snapshot.turns,
+            snapshot.events.iter(),
+        );
         let recovered_input = snapshot
             .input_state
             .as_ref()
@@ -1883,8 +1896,11 @@ impl App {
             },
         );
         if !snapshot.turns.is_empty() {
-            self.chat_widget
-                .replay_thread_turns(snapshot.turns, ReplayKind::ThreadSnapshot);
+            self.chat_widget.replay_backend_thread_turns(
+                snapshot.turns,
+                ReplayKind::ThreadSnapshot,
+                &self.app_server_target,
+            );
         }
         for (event, changes) in snapshot.events.into_iter().zip(request_changes) {
             reasoning_replay.before_event(&event, &mut self.chat_widget);
@@ -2157,7 +2173,9 @@ impl App {
             // thread, so unrelated shutdowns cannot consume this marker.
             self.pending_shutdown_exit_thread_id = None;
         }
+        // Sidebar chats use their first prompt until they receive an explicit name.
         let automatic_title_user_message = if self.chat_widget.thread_name().is_none()
+            && !(self.side_retention_enabled(tui) && self.active_side_parent_thread_id().is_some())
             && let ThreadBufferedEvent::Notification(notification) = &event
             && let ServerNotification::ItemCompleted(notification) = notification.as_ref()
             && let ThreadItemPayload::UserMessage { content, .. } = &notification.item.payload

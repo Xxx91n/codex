@@ -25,7 +25,7 @@ pub(crate) struct UserHistoryCell {
 #[derive(Debug, Default)]
 pub(crate) enum UserMessagePresentation {
     #[default]
-    Plain,
+    Typed,
     Spoken,
     /// Render each submitted answer as Markdown beneath its question caption.
     AsyncReplies {
@@ -199,6 +199,11 @@ impl UserHistoryCell {
         matches!(self.presentation, UserMessagePresentation::Spoken)
     }
 
+    pub(crate) fn uses_markdown(&self) -> bool {
+        // Inline elements use byte ranges in the literal prompt.
+        matches!(self.presentation, UserMessagePresentation::Typed) && self.text_elements.is_empty()
+    }
+
     pub(crate) fn has_visible_content(&self) -> bool {
         !sanitize_user_text(Cow::Borrowed(&self.message))
             .trim()
@@ -270,19 +275,39 @@ impl HistoryCell for UserHistoryCell {
                 .wrap_algorithm(textwrap::WrapAlgorithm::FirstFit),
         ));
 
-        let wrapped_message =
+        let (wrapped_message, copy_as_prose) =
             if let UserMessagePresentation::AsyncReplies { replies, cwd } = &self.presentation {
-                super::async_replies::render(replies, cwd, usize::from(wrap_width))
+                (
+                    super::async_replies::render(replies, cwd, usize::from(wrap_width)),
+                    false,
+                )
             } else {
                 let marker = if self.is_spoken() {
                     "› ".red().bold()
                 } else {
                     "› ".bold().dim()
                 };
-                prefix_hyperlink_lines(
-                    wrap_user_message(message, text_elements, style, wrap_width),
-                    marker,
-                    "  ".into(),
+                let markdown = if self.uses_markdown() {
+                    crate::markdown::render_markdown_for_viewport(message, wrap_width)
+                } else {
+                    Vec::new()
+                };
+                let copy_as_prose = !crate::markdown_copy::has_visible_markup(&markdown, message);
+                let body = if copy_as_prose {
+                    wrap_user_message(message, text_elements, style, wrap_width)
+                } else {
+                    markdown
+                        .into_iter()
+                        .map(|line| {
+                            let mut line_style = style.patch(line.line.style);
+                            line_style.bg = style.bg;
+                            line.style(line_style).resolve_span_styles()
+                        })
+                        .collect()
+                };
+                (
+                    prefix_hyperlink_lines(body, marker, "  ".into()),
+                    copy_as_prose,
                 )
             };
         if wrapped_images.is_empty() && wrapped_message.is_empty() {
@@ -303,10 +328,7 @@ impl HistoryCell for UserHistoryCell {
         lines.push(HyperlinkLine::new(Line::from("").style(style)));
         for source in lines.iter_mut().filter_map(|line| line.source.as_mut()) {
             source.right_reserve = 1;
-            source.copy_as_prose |= matches!(
-                self.presentation,
-                UserMessagePresentation::Plain | UserMessagePresentation::Spoken
-            );
+            source.copy_as_prose |= copy_as_prose;
         }
         lines
     }
@@ -566,6 +588,7 @@ impl HistoryCell for AgentMessageCell {
 pub(crate) struct AgentMarkdownCell {
     /// Identifies an interrupted reply that can still receive its authoritative completion.
     pub(crate) interrupted_item: Option<(String, String)>,
+    pub(crate) phase: Option<codex_protocol::models::MessagePhase>,
     markdown_source: String,
     copy_source: Option<String>,
     cwd: PathBuf,
@@ -621,12 +644,21 @@ impl AgentMarkdownCell {
             interrupted_item: None,
             markdown_source,
             copy_source: None,
+            phase: None,
             cwd: cwd.to_path_buf(),
             inline_visualization_context,
             rendered_lines,
             spoken_artifacts: false,
             question_titles: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_phase(
+        mut self,
+        phase: Option<codex_protocol::models::MessagePhase>,
+    ) -> Self {
+        self.phase = phase;
+        self
     }
 
     pub(crate) fn with_questions(
@@ -649,7 +681,9 @@ impl AgentMarkdownCell {
     }
 }
 
-fn normalize_whitespace_only_hyperlink_lines(mut lines: Vec<HyperlinkLine>) -> Vec<HyperlinkLine> {
+pub(super) fn normalize_whitespace_only_hyperlink_lines(
+    mut lines: Vec<HyperlinkLine>,
+) -> Vec<HyperlinkLine> {
     for line in &mut lines {
         if line
             .line
@@ -823,7 +857,7 @@ pub(crate) fn new_user_prompt(
         text_elements,
         local_image_paths,
         remote_image_urls,
-        presentation: UserMessagePresentation::Plain,
+        presentation: UserMessagePresentation::Typed,
     }
 }
 

@@ -215,6 +215,7 @@ def codex_rust_crate(
         integration_compile_data_extra = [],
         integration_test_args = [],
         unit_test_args = [],
+        unit_test_env = {},
         binary_test_target_compatible_with = [],
         binary_unit_test_windows_runtime = None,
         integration_test_timeout = None,
@@ -268,6 +269,7 @@ def codex_rust_crate(
             tests, including resources embedded with include_str! or include_bytes!.
         integration_test_args: Optional args for integration test binaries.
         unit_test_args: Optional args for the unit test binary.
+        unit_test_env: Extra runtime environment entries for library unit tests.
         binary_test_target_compatible_with: Platform constraints for binary unit tests.
         binary_unit_test_windows_runtime: Runtime directory containing bin/ DLLs for Windows binary unit tests.
         integration_test_timeout: Optional Bazel timeout for integration test
@@ -321,6 +323,10 @@ def codex_rust_crate(
         "BAZEL_PACKAGE": native.package_name(),
         "CARGO_PKG_NAME": package_data["package_name"],
     } | rustc_env
+
+    # Insta also reads this during macro expansion. Match the test launcher's
+    # workspace-relative root instead of embedding CARGO_MANIFEST_DIR.
+    test_rustc_env = rustc_env | {"INSTA_WORKSPACE_ROOT": "."}
 
     manifest_relpath = native.package_name()
     if manifest_relpath.startswith("codex-rs/"):
@@ -389,7 +395,7 @@ def codex_rust_crate(
                 "--remap-path-prefix=../codex-rs=",
                 "--remap-path-prefix=codex-rs=",
             ],
-            rustc_env = rustc_env,
+            rustc_env = test_rustc_env,
             data = test_data_extra + [binary for binary in extra_binaries if binary not in test_data_extra],
             tags = test_tags + ["manual"],
             version = crate_version,
@@ -406,7 +412,7 @@ def codex_rust_crate(
 
         workspace_root_test(
             name = unit_test_name,
-            env = test_env,
+            env = test_env | unit_test_env,
             runfile_env = {
                 binary: "CARGO_BIN_EXE_" + Label(binary).name
                 for binary in extra_binaries
@@ -475,7 +481,7 @@ def codex_rust_crate(
                 "--remap-path-prefix=../codex-rs=",
                 "--remap-path-prefix=codex-rs=",
             ],
-            rustc_env = rustc_env,
+            rustc_env = test_rustc_env,
             data = test_data_extra,
             tags = test_tags + ["manual"],
             version = crate_version,
@@ -612,7 +618,7 @@ def codex_rust_crate(
                     "--remap-path-prefix=../codex-rs=",
                     "--remap-path-prefix=codex-rs=",
                 ],
-                rustc_env = rustc_env,
+                rustc_env = test_rustc_env,
                 target_compatible_with = WINDOWS_GNULLVM_INCOMPATIBLE,
                 tags = test_tags + ["manual"],
                 version = crate_version,
@@ -653,7 +659,7 @@ def codex_rust_crate(
                     "--remap-path-prefix=../codex-rs=",
                     "--remap-path-prefix=codex-rs=",
                 ],
-                rustc_env = rustc_env,
+                rustc_env = test_rustc_env,
                 env = integration_test_cargo_env,
                 target_compatible_with = WINDOWS_GNULLVM_INCOMPATIBLE,
                 tags = test_tags,
@@ -726,7 +732,7 @@ def codex_rust_crate(
                 "--remap-path-prefix=../codex-rs=",
                 "--remap-path-prefix=codex-rs=",
             ],
-            rustc_env = rustc_env,
+            rustc_env = test_rustc_env,
             env = integration_test_cargo_env,
             target_compatible_with = WINDOWS_GNULLVM_ONLY,
             tags = test_tags + ["manual"],

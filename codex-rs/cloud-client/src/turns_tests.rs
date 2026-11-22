@@ -6,8 +6,13 @@ fn request() -> AddUserMessageRequest {
     AddUserMessageRequest {
         thread_id: "t".into(),
         client_user_message_id: "m".into(),
-        text: "hello".into(),
+        input: vec![UserMessageInput::Text {
+            text: "hello".into(),
+            text_elements: vec![],
+        }],
         turn_trigger: None,
+        model: None,
+        effort: None,
         mode: SubmissionMode::StartIfIdle,
         shared_access: true,
     }
@@ -23,6 +28,7 @@ fn admitted(outcome: u8) -> Vec<u8> {
 async fn submission_preserves_admission_variants_and_wire_identity() {
     for (mode, mode_number, outcome_number) in [
         (SubmissionMode::StartIfIdle, 3, 1),
+        (SubmissionMode::Steer, 1, 1),
         (SubmissionMode::Steer, 1, 2),
         (SubmissionMode::Queue, 2, 3),
         (SubmissionMode::Queue, 2, 4),
@@ -37,11 +43,14 @@ async fn submission_preserves_admission_variants_and_wire_identity() {
         }
         payload.extend([0xa0, 0x06, 7]); // Unknown metadata survives.
         let mut fixture = fixture(response(vec![frame(&payload)], tonic::Status::ok(""))).await;
-        let turn_trigger = (mode_number == 3).then(|| "safety_recourse_follow_up".to_owned());
+        let has_selection = !matches!(mode, SubmissionMode::Queue);
+        let turn_trigger = (mode_number == 3).then(|| "user".to_owned());
         let result = fixture
             .client
             .add_user_message(&AddUserMessageRequest {
                 turn_trigger,
+                model: has_selection.then(|| "selected-model".into()),
+                effort: has_selection.then(|| "high".into()),
                 mode,
                 ..request()
             })
@@ -84,8 +93,11 @@ async fn submission_preserves_admission_variants_and_wire_identity() {
             format!("{result:?} {:?}", result.outcome),
             "Admission([redacted]) AdmissionOutcome([redacted])"
         );
+        let effort = message(/*tag*/ 9, b"high");
+        let model = message(/*tag*/ 12, b"selected-model");
         let expected_request = [
             message(/*tag*/ 4, b"m"),
+            if has_selection { effort } else { vec![] },
             message(
                 /*tag*/ 11,
                 &message(
@@ -93,9 +105,10 @@ async fn submission_preserves_admission_variants_and_wire_identity() {
                     &message(/*tag*/ 1, &message(/*tag*/ 1, b"hello")),
                 ),
             ),
+            if has_selection { model } else { vec![] },
             message(/*tag*/ 23, b"t"),
             if mode_number == 3 {
-                message(/*tag*/ 25, b"safety_recourse_follow_up")
+                message(/*tag*/ 25, b"user")
             } else {
                 Vec::new()
             },
@@ -104,6 +117,80 @@ async fn submission_preserves_admission_variants_and_wire_identity() {
         .concat();
         assert_request(&mut fixture, "AddUserMessage", &expected_request).await;
     }
+}
+#[tokio::test]
+async fn image_submission_preserves_order_references_and_optional_detail() {
+    let url = "DaTa:image/png;base64,AA==";
+    let label = "[Image #1]";
+    let text = format!("é {label}");
+    let input = vec![
+        UserMessageInput::Image {
+            image: ImageReference::Url(url.into()),
+            detail: None,
+        },
+        UserMessageInput::Text {
+            text: text.clone(),
+            text_elements: vec![UserMessageTextElement {
+                start: 3,
+                end: text.len(),
+                placeholder: Some(label.into()),
+            }],
+        },
+        UserMessageInput::Image {
+            image: ImageReference::FileId("file-private".into()),
+            detail: Some(ImageDetail::High),
+        },
+    ];
+    for part in &input {
+        assert_eq!(format!("{part:?}"), "UserMessageInput([redacted])");
+    }
+    let mut fixture = fixture(response(
+        vec![frame(&admitted(/*outcome*/ 3))],
+        tonic::Status::ok(""),
+    ))
+    .await;
+    let result = fixture
+        .client
+        .add_user_message(&AddUserMessageRequest { input, ..request() })
+        .await
+        .unwrap();
+    assert_eq!(
+        result.outcome,
+        AdmissionOutcome::Duplicate {
+            turn_id: Some("u".into())
+        }
+    );
+
+    let span = [
+        message(/*tag*/ 1, b"\x08\x0d\x10\x03"),
+        message(/*tag*/ 2, label.as_bytes()),
+    ]
+    .concat();
+    let text = [
+        message(/*tag*/ 1, text.as_bytes()),
+        message(/*tag*/ 2, &message(/*tag*/ 1, &span)),
+    ]
+    .concat();
+    let url = message(/*tag*/ 1, &message(/*tag*/ 2, url.as_bytes()));
+    let file = message(
+        /*tag*/ 2,
+        &[vec![0x08, 3], message(/*tag*/ 2, b"file-private")].concat(),
+    );
+    let values = [
+        message(/*tag*/ 1, &message(/*tag*/ 2, &url)),
+        message(/*tag*/ 1, &message(/*tag*/ 1, &text)),
+        message(/*tag*/ 1, &message(/*tag*/ 2, &file)),
+    ]
+    .concat();
+    let expected = [
+        message(/*tag*/ 4, b"m"),
+        message(/*tag*/ 11, &values),
+        message(/*tag*/ 23, b"t"),
+        vec![0xd0, 1, 1, 0xf0, 1, 3],
+    ]
+    .concat();
+    assert_request(&mut fixture, "AddUserMessage", &expected).await;
+    assert!(fixture.requests.try_recv().is_err());
 }
 #[tokio::test]
 async fn duplicate_can_omit_turn_but_malformed_admission_is_unknown() {
@@ -203,7 +290,57 @@ async fn invalid_input_never_sends_and_diagnostics_redact() {
     let mut fixture = fixture(response(vec![frame(&[])], tonic::Status::ok(""))).await;
     for input in [
         AddUserMessageRequest {
-            text: " ".into(),
+            mode: SubmissionMode::Queue,
+            effort: Some("high".into()),
+            model: Some("selected-model".into()),
+            ..request()
+        },
+        AddUserMessageRequest {
+            input: vec![],
+            ..request()
+        },
+        AddUserMessageRequest {
+            input: vec![UserMessageInput::Text {
+                text: "x".repeat(MAX_MESSAGE_BYTES),
+                text_elements: vec![],
+            }],
+            ..request()
+        },
+        AddUserMessageRequest {
+            input: vec![UserMessageInput::Image {
+                image: ImageReference::Url(format!(
+                    "data:,{}",
+                    "A".repeat(4 * 1024 * 1024 - 256 * 1024)
+                )),
+                detail: None,
+            }],
+            ..request()
+        },
+        AddUserMessageRequest {
+            input: vec![UserMessageInput::Image {
+                image: ImageReference::Url("https://example.com/image.png".into()),
+                detail: None,
+            }],
+            ..request()
+        },
+        AddUserMessageRequest {
+            input: vec![
+                UserMessageInput::Text {
+                    text: "hello".into(),
+                    text_elements: vec![],
+                },
+                UserMessageInput::Image {
+                    image: ImageReference::FileId("".into()),
+                    detail: Some(ImageDetail::Auto),
+                },
+            ],
+            ..request()
+        },
+        AddUserMessageRequest {
+            input: vec![UserMessageInput::Text {
+                text: " ".into(),
+                text_elements: vec![],
+            }],
             ..request()
         },
         AddUserMessageRequest {
@@ -216,6 +353,19 @@ async fn invalid_input_never_sends_and_diagnostics_redact() {
         },
     ] {
         assert_eq!(format!("{input:?}"), "AddUserMessageRequest([redacted])");
+        assert!(matches!(
+            fixture.client.add_user_message(&input).await,
+            Err(MutationError::InvalidRequest)
+        ));
+    }
+    for url in ["data:image/png;base64,", "data:,", "data:no-comma"] {
+        let input = AddUserMessageRequest {
+            input: vec![UserMessageInput::Image {
+                image: ImageReference::Url(url.into()),
+                detail: None,
+            }],
+            ..request()
+        };
         assert!(matches!(
             fixture.client.add_user_message(&input).await,
             Err(MutationError::InvalidRequest)
@@ -239,6 +389,91 @@ async fn invalid_input_never_sends_and_diagnostics_redact() {
     }
     assert!(fixture.requests.try_recv().is_err());
 }
+#[tokio::test]
+async fn image_preflight_applies_exact_encoded_envelope_boundary() {
+    let cap = 4 * 1024 * 1024 - 256 * 1024;
+    for extra in [0, 1] {
+        // With these IDs and settings, the nested wire envelope adds 38 bytes.
+        let url = format!("data:,{}", "A".repeat(cap - 38 - "data:,".len() + extra));
+        let expected = [
+            message(/*tag*/ 4, b"m"),
+            message(
+                /*tag*/ 11,
+                &message(
+                    /*tag*/ 1,
+                    &message(
+                        /*tag*/ 2,
+                        &message(/*tag*/ 1, &message(/*tag*/ 2, url.as_bytes())),
+                    ),
+                ),
+            ),
+            message(/*tag*/ 23, b"t"),
+            vec![0xd0, 1, 1, 0xf0, 1, 3],
+        ]
+        .concat();
+        assert_eq!(expected.len(), cap + extra);
+        let mut fixture = fixture(response(
+            vec![frame(&admitted(/*outcome*/ 3))],
+            tonic::Status::ok(""),
+        ))
+        .await;
+        let input = vec![UserMessageInput::Image {
+            image: ImageReference::Url(url),
+            detail: None,
+        }];
+        let result = fixture
+            .client
+            .add_user_message(&AddUserMessageRequest { input, ..request() })
+            .await;
+        if extra == 0 {
+            result.unwrap();
+            assert_request(&mut fixture, "AddUserMessage", &expected).await;
+        } else {
+            assert!(matches!(result, Err(MutationError::InvalidRequest)));
+            assert!(fixture.requests.try_recv().is_err());
+        }
+    }
+}
+
+#[tokio::test]
+async fn plain_text_retains_limit_above_image_forwarding_cap() {
+    let mut fixture = fixture(response(
+        vec![frame(&admitted(/*outcome*/ 3))],
+        tonic::Status::ok(""),
+    ))
+    .await;
+    let text = "x".repeat(4 * 1024 * 1024);
+    let input = vec![UserMessageInput::Text {
+        text: text.clone(),
+        text_elements: vec![],
+    }];
+    let result = fixture
+        .client
+        .add_user_message(&AddUserMessageRequest { input, ..request() })
+        .await
+        .unwrap();
+    assert_eq!(
+        result.outcome,
+        AdmissionOutcome::Duplicate {
+            turn_id: Some("u".into())
+        }
+    );
+    let expected = [
+        message(/*tag*/ 4, b"m"),
+        message(
+            /*tag*/ 11,
+            &message(
+                /*tag*/ 1,
+                &message(/*tag*/ 1, &message(/*tag*/ 1, text.as_bytes())),
+            ),
+        ),
+        message(/*tag*/ 23, b"t"),
+        vec![0xd0, 1, 1, 0xf0, 1, 3],
+    ]
+    .concat();
+    assert_request(&mut fixture, "AddUserMessage", &expected).await;
+}
+
 #[tokio::test]
 async fn dropping_pending_submission_does_not_send_a_retry_or_interrupt() {
     let (sender, dropped) = tokio::sync::oneshot::channel::<()>();

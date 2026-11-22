@@ -3,9 +3,8 @@
 use crate::config::Config;
 use codex_features::Feature;
 use codex_login::AuthManager;
+use codex_protocol::error::Result as CodexResult;
 use codex_runtime_agent_instance::RuntimeAuthManager;
-use codex_runtime_agent_instance::RuntimeRegistrationMetadata;
-use codex_runtime_agent_instance::RuntimeRole;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -38,16 +37,28 @@ pub(crate) fn runtime_for_config(
         .enabled(Feature::RuntimeAgentInstances)
         .then(|| {
             Arc::clone(slot.get_or_init(|| {
-                Arc::new(RuntimeAuthManager::for_chatgpt(
+                Arc::new(RuntimeAuthManager::for_codex(
                     credentials,
-                    installation_id.to_owned(),
-                    config.chatgpt_base_url.clone(),
-                    RuntimeRegistrationMetadata {
-                        harness: Some("codex".to_string()),
-                        harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-                        role: RuntimeRole::Orchestrator,
-                    },
+                    &config.chatgpt_base_url,
+                    installation_id,
                 ))
             }))
         })
 }
+
+pub(crate) fn is_openai_realtime_url(base_url: &str) -> CodexResult<bool> {
+    let Ok(mut url) = url::Url::parse(base_url) else {
+        return Ok(false);
+    };
+    if url.scheme() == "wss" && url.set_scheme("https").is_err() {
+        return Ok(false);
+    }
+    codex_model_provider::validate_runtime_destination(Some(url.as_str()))?;
+    Ok(codex_runtime_agent_instance::is_openai_api_url(
+        url.as_str(),
+    ))
+}
+
+#[cfg(test)]
+#[path = "runtime_auth_tests.rs"]
+mod tests;

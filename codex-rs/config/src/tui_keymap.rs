@@ -141,8 +141,16 @@ pub struct TuiGlobalKeymap {
     pub focus_main_composer: Option<KeybindingsSpec>,
     /// Focus the side conversation, or hide it when already focused.
     pub focus_sidebar_content: Option<KeybindingsSpec>,
+    /// Open the sidebar tab chooser.
+    pub focus_sidebar_tabs: Option<KeybindingsSpec>,
     /// Hide the focused sidebar pane.
     pub hide_pane: Option<KeybindingsSpec>,
+    /// Close the active sidebar tab.
+    pub close_sidebar_tab: Option<KeybindingsSpec>,
+    /// Switch to the previous sidebar tab.
+    pub sidebar_up: Option<KeybindingsSpec>,
+    /// Switch to the next sidebar tab.
+    pub sidebar_down: Option<KeybindingsSpec>,
     /// Focus the parent conversation.
     pub focus_pane_left: Option<KeybindingsSpec>,
     /// Focus the open side conversation.

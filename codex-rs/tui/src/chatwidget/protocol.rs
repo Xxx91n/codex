@@ -87,6 +87,7 @@ impl ChatWidget {
                 self.on_thread_settings_updated(notification);
             }
             ServerNotification::TurnStarted(notification) => {
+                self.turn_lifecycle.has_turn_history = true;
                 if self
                     .bottom_pane
                     .dismiss_view_by_id(safety_recourse::VIEW_ID)
@@ -114,6 +115,10 @@ impl ChatWidget {
                         self.on_replayed_task_started(notification.turn.started_at);
                     } else {
                         self.on_task_started();
+                        if self.turn_lifecycle.admitted_turn_id == self.turn_lifecycle.last_turn_id
+                        {
+                            self.turn_lifecycle.admitted_turn_id = None;
+                        }
                     }
                 }
             }
@@ -129,7 +134,10 @@ impl ChatWidget {
             }
             ServerNotification::AgentMessageDelta(notification) => {
                 self.restore_realtime_transcripts_before_turn(&notification.turn_id);
-                if !self.is_realtime_delegated_reasoning_turn(&notification.turn_id)
+                if !self
+                    .transcript
+                    .has_replayed_cloud_text(&notification.turn_id, &notification.item_id)
+                    && !self.is_realtime_delegated_reasoning_turn(&notification.turn_id)
                     && (from_replay
                         || !self.is_realtime_delegated_agent_item(
                             &notification.turn_id,
@@ -447,6 +455,13 @@ impl ChatWidget {
         notification: TurnCompletedNotification,
         replay_kind: Option<ReplayKind>,
     ) {
+        if replay_kind.is_none()
+            && notification.turn.status != TurnStatus::InProgress
+            && self.turn_lifecycle.admitted_turn_id.as_deref()
+                == Some(notification.turn.id.as_str())
+        {
+            self.turn_lifecycle.admitted_turn_id = None;
+        }
         // User-message dedupe only suppresses the app-server echo of a prompt
         // this TUI already rendered locally. Once that turn ends, another
         // client can submit the same text and it still needs its own user cell.
@@ -506,7 +521,7 @@ impl ChatWidget {
                 } else {
                     TurnAbortReason::Interrupted
                 };
-                self.on_interrupted_turn(reason);
+                self.on_interrupted_server_turn(reason, &notification.turn.id);
             }
             TurnStatus::Failed => {
                 if replay_kind.is_none() {
@@ -591,6 +606,9 @@ impl ChatWidget {
                 // render with their choices on completion.
                 if delegated
                     || self.is_realtime_delegated_reasoning_turn(&notification.turn_id)
+                    || self
+                        .transcript
+                        .has_replayed_cloud_text(&notification.turn_id, &id)
                     || questions.is_some()
                     || text.is_empty()
                 {

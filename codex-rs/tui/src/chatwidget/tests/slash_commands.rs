@@ -1636,6 +1636,7 @@ async fn slash_copy_picker_uses_completed_commentary_during_active_turn() {
             current_thread_id,
             "active".to_string(),
             AppServerThreadItemPayload::AgentMessage {
+                moderation: None,
                 id: "active-commentary".to_string(),
                 text: commentary.to_string(),
                 phase: Some(MessagePhase::Commentary),
@@ -2591,7 +2592,7 @@ async fn copy_shortcut_can_be_remapped() {
         let paste = KeyEvent::new(code, modifiers);
         assert_matches!(
             chat.handle_key_event(paste),
-            crate::chatwidget::KeyEventAction::PasteImage { text_fallback }
+            crate::chatwidget::KeyEventAction::PasteImage { text_fallback, .. }
                 if text_fallback == (cfg!(windows) && modifiers == KeyModifiers::CONTROL)
                     .then_some(code)
         );
@@ -2608,7 +2609,8 @@ async fn copy_shortcut_can_be_remapped() {
         assert_matches!(
             chat.handle_key_event(shift_insert),
             KeyEventAction::PasteImage {
-                text_fallback: Some(KeyCode::Insert)
+                text_fallback: Some(KeyCode::Insert),
+                ..
             }
         );
         assert_eq!(chat.bottom_pane.composer_text(), "q");
@@ -3867,14 +3869,14 @@ async fn transcript_copy_feedback_stays_in_the_footer_without_history_or_interru
     assert!(operations.try_recv().is_err());
     insta::assert_snapshot!(
         "transcript_copy_success",
-        render_bottom_popup(&chat, /*width*/ 80)
+        normalize_snapshot_paths(render_bottom_popup(&chat, /*width*/ 80))
     );
     chat.show_selection_copy_result(Ok(crate::clipboard_copy::CopyStatus::Unconfirmed));
     assert_eq!(drain_insert_history(&mut events).len(), 0);
     assert!(operations.try_recv().is_err());
     insta::assert_snapshot!(
         "transcript_copy_unconfirmed",
-        render_bottom_popup(&chat, /*width*/ 80)
+        normalize_snapshot_paths(render_bottom_popup(&chat, /*width*/ 80))
     );
     chat.open_warnings(&[Arc::new(history_cell::new_warning_event(
         "selected café".into(),
@@ -3884,7 +3886,7 @@ async fn transcript_copy_feedback_stays_in_the_footer_without_history_or_interru
     assert!(operations.try_recv().is_err());
     insta::assert_snapshot!(
         "transcript_copy_failure",
-        render_bottom_popup(&chat, /*width*/ 80)
+        normalize_snapshot_paths(render_bottom_popup(&chat, /*width*/ 80))
     );
 }
 

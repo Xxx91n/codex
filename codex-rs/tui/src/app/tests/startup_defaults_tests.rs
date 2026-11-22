@@ -24,7 +24,7 @@ pub(super) async fn run_startup_for_test(
     selection: SessionSelection,
     app_server_target: AppServerTarget,
 ) -> Result<AppExitInfo> {
-    App::run(
+    crate::boxed_future!(App::run(
         tui,
         initial_backends,
         config.clone(),
@@ -58,7 +58,7 @@ pub(super) async fn run_startup_for_test(
         crate::startup_draft::tests::quiet_startup_test_pump(),
         /*managed_worktree*/ None,
         /*daemon_cli_executable*/ None,
-    )
+    ))
     .await
 }
 
@@ -122,6 +122,13 @@ async fn agents_overview_startup_restores_saved_grouping() -> Result<()> {
     insta::assert_snapshot!(grouping_header, @"Agent command center  Group: Status  g");
     proxy.abort();
     Ok(())
+}
+
+fn layered_config_read_count(requests: &RecordedRequests) -> usize {
+    recorded_params(requests, "config/read")
+        .iter()
+        .filter(|params| params["includeLayers"] == true)
+        .count()
 }
 
 #[tokio::test]
@@ -220,7 +227,7 @@ async fn cli_fork_omits_implicit_model_and_effort() -> Result<()> {
     assert_eq!(fork[0]["model"], serde_json::Value::Null);
     assert!(fork[0]["config"].get("model_reasoning_effort").is_none());
     assert_eq!(fork[0]["serviceTier"], serde_json::Value::Null);
-    assert!(recorded_params(&requests, "config/read").is_empty());
+    assert_eq!(layered_config_read_count(&requests), 0);
     drop(run);
     proxy.abort();
     Ok(())
@@ -665,7 +672,10 @@ async fn fresh_startup_reads_destination_and_cleared_model_uses_catalog() -> Res
             AppServerTarget::Embedded
         };
         let bootstrap = server.bootstrap(&config).await?;
-        assert_eq!(bootstrap.default_model, "stale-client-model");
+        assert_eq!(
+            bootstrap.default_model.as_deref(),
+            Some("stale-client-model")
+        );
         let defaults_read = prepare_fresh_startup_config(
             &mut config,
             &server,
@@ -677,7 +687,8 @@ async fn fresh_startup_reads_destination_and_cleared_model_uses_catalog() -> Res
         .await?;
         assert!(!defaults_read.prompt_windows_sandbox);
         assert_eq!(config.model, None);
-        let selected_model = startup_model(&config, &bootstrap, /*server_defaults_read*/ true);
+        let selected_model =
+            startup_model(&config, &bootstrap, /*server_defaults_read*/ true)?;
         assert_ne!(selected_model, "stale-client-model");
         let started = crate::app_server_session::start_thread_with_request_handle(
             server.request_handle(),
@@ -718,10 +729,11 @@ async fn fresh_startup_reads_destination_and_cleared_model_uses_catalog() -> Res
         if !remote {
             let rendered = render_bottom_popup(&app.chat_widget, /*width*/ 80)
                 .replace(&destination.path().display().to_string(), "<PROJECT>");
-            insta::assert_snapshot!(rendered, @r"
+            insta::assert_snapshot!(rendered, @"
             › Ask Codex to do anything
 
               GPT-6.1-Sol high · <PROJECT>
+              ? for shortcuts
             ");
         }
         let expected_cwd = if override_cwd {
@@ -782,7 +794,7 @@ async fn fresh_startup_observes_config_edits_after_directory_trust() -> Result<(
     )
     .await?;
     let bootstrap = server.bootstrap(&config).await?;
-    let reads_before = recorded_params(&requests, "config/read").len();
+    let reads_before = layered_config_read_count(&requests);
     let trust = crate::config_update::read_remote_project_trust(
         server.request_handle(),
         config.cwd.as_path(),
@@ -798,7 +810,7 @@ async fn fresh_startup_observes_config_edits_after_directory_trust() -> Result<(
         (
             starts.len(),
             &starts[0]["serviceTier"],
-            recorded_params(&requests, "config/read").len() - reads_before,
+            layered_config_read_count(&requests) - reads_before,
         ),
         (1, &serde_json::json!("flex"), 2),
     );
@@ -921,11 +933,18 @@ async fn startup_failure_shuts_down_every_initial_backend() -> Result<()> {
             crate::app_server_session::ThreadParamsMode::Embedded,
         )
     });
+    let mut initial_backends = InitialBackendSessions::singleton(first);
+    initial_backends.register(
+        second,
+        AppServerTarget::Embedded,
+        app.config.clone(),
+        app.local_settings.clone(),
+    );
     let mut tui = crate::tui::test_support::make_test_tui()?;
     let (result, ()) = tokio::join!(
         run_startup_for_test(
             &mut tui,
-            InitialBackendSessions::multiple(first, vec![second]),
+            initial_backends,
             app.config.clone(),
             /*bootstrap*/ None,
             SessionSelection::StartFresh,

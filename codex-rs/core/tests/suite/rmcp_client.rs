@@ -137,6 +137,8 @@ use tokio::time::Instant;
 use tokio::time::sleep;
 use wiremock::MockServer;
 
+#[path = "mcp_network_policy_compat_tests.rs"]
+mod network_policy_compat_tests;
 #[path = "mcp_oauth_refresh_tests.rs"]
 mod oauth_refresh_tests;
 #[path = "mcp_sandbox_tests.rs"]
@@ -1652,10 +1654,25 @@ async fn mcp_pagination_preserves_valid_tools_and_rejects_oversized_cursors(
         .build_with_auto_env(&server)
         .await?;
 
+    let mut started = std::collections::BTreeSet::new();
     let startup = loop {
         let event = fixture.codex.next_event().await?;
-        if let EventMsg::McpStartupComplete(startup) = event.msg {
-            break startup;
+        match event.msg {
+            EventMsg::McpStartupUpdate(update)
+                if matches!(update.server.as_str(), "paginated" | "rejected") =>
+            {
+                if matches!(update.status, McpStartupStatus::Starting) {
+                    started.insert(update.server);
+                } else {
+                    assert_eq!(
+                        started.len(),
+                        2,
+                        "both eager starts precede the first terminal status"
+                    );
+                }
+            }
+            EventMsg::McpStartupComplete(startup) => break startup,
+            _ => {}
         }
     };
     assert!(startup.ready.iter().any(|name| name == "paginated"));

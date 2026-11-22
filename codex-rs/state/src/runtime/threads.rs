@@ -817,6 +817,31 @@ ON CONFLICT(id) DO NOTHING
         Ok(result.rows_affected() > 0)
     }
 
+    /// Record a token count when the thread still matches its observed source and any
+    /// required spawn edge exists. Otherwise the caller must use normal metadata repair.
+    pub async fn update_thread_token_usage(
+        &self,
+        metadata: &crate::ThreadMetadata,
+        updated_at: DateTime<Utc>,
+        total_tokens: i64,
+    ) -> anyhow::Result<bool> {
+        let updated_at = self.allocate_thread_updated_at(updated_at)?;
+        let result = sqlx::query(
+            "UPDATE threads SET updated_at = ?, updated_at_ms = ?, tokens_used = ?
+             WHERE id = ? AND source = ?
+               AND (? OR EXISTS (SELECT 1 FROM thread_spawn_edges WHERE child_thread_id = threads.id))",
+        )
+        .bind(datetime_to_epoch_seconds(updated_at))
+        .bind(datetime_to_epoch_millis(updated_at))
+        .bind(total_tokens.max(0))
+        .bind(metadata.id.to_string())
+        .bind(metadata.source.as_str())
+        .bind(thread_spawn_parent_thread_id_from_source_str(&metadata.source).is_none())
+        .execute_with_busy_retry(self.pool.as_ref())
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn touch_thread_recency_at(
         &self,
         thread_id: ThreadId,
@@ -1126,10 +1151,16 @@ ON CONFLICT(id) DO UPDATE SET
         Ok(())
     }
 
-    /// Apply rollout items incrementally using the underlying database.
+    /// Build metadata using the provider configured for this state runtime.
+    pub fn build_thread_metadata(&self, builder: &ThreadMetadataBuilder) -> crate::ThreadMetadata {
+        builder.build(&self.default_provider)
+    }
+
+    /// Apply rollout items incrementally, keeping existing fields except the seed rollout path.
+    /// The seed stays boxed to keep callers' async frames small.
     pub async fn apply_rollout_items(
         &self,
-        builder: &ThreadMetadataBuilder,
+        mut metadata: Box<crate::ThreadMetadata>,
         items: &[RolloutItem],
         new_thread_memory_mode: Option<&str>,
         updated_at_override: Option<DateTime<Utc>>,
@@ -1137,11 +1168,13 @@ ON CONFLICT(id) DO UPDATE SET
         if items.is_empty() {
             return Ok(());
         }
-        let existing_metadata = self.get_thread(builder.id).await?;
-        let mut metadata = existing_metadata
-            .clone()
-            .unwrap_or_else(|| builder.build(&self.default_provider));
-        metadata.rollout_path = builder.rollout_path.clone();
+        let thread_id = metadata.id;
+        let existing_metadata = self.get_thread(thread_id).await?;
+        if let Some(existing) = existing_metadata.as_ref() {
+            let rollout_path = std::mem::take(&mut metadata.rollout_path);
+            *metadata = existing.clone();
+            metadata.rollout_path = rollout_path;
+        }
         for item in items {
             apply_rollout_item(&mut metadata, item, &self.default_provider);
         }
@@ -1150,7 +1183,7 @@ ON CONFLICT(id) DO UPDATE SET
         }
         let updated_at = match updated_at_override {
             Some(updated_at) => Some(updated_at),
-            None => file_modified_time_utc(builder.rollout_path.as_path()).await,
+            None => file_modified_time_utc(metadata.rollout_path.as_path()).await,
         };
         if let Some(updated_at) = updated_at {
             metadata.updated_at = updated_at;
@@ -1164,7 +1197,7 @@ ON CONFLICT(id) DO UPDATE SET
         upsert_result?;
         if let Some(memory_mode) = extract_memory_mode(items)
             && let Err(err) = self
-                .set_thread_memory_mode(builder.id, memory_mode.as_str())
+                .set_thread_memory_mode(thread_id, memory_mode.as_str())
                 .await
         {
             return Err(err);
@@ -1240,7 +1273,7 @@ ON CONFLICT(id) DO UPDATE SET
         for (thread_id, thread_id_string) in thread_ids.iter().zip(&thread_id_strings) {
             sqlx::query("DELETE FROM logs WHERE thread_id = ?")
                 .bind(thread_id_string)
-                .execute_with_busy_retry(self.logs_pool.as_ref())
+                .execute_with_busy_retry(self.diagnostic_logs_pool()?)
                 .await?;
             self.thread_queue.delete_thread_queue(*thread_id).await?;
             self.delete_versioned_thread_memory(*thread_id).await?;
@@ -1337,7 +1370,7 @@ WITH RECURSIVE subtree(child_thread_id, parent_thread_id) AS (
         Some(crate::ThreadRelationFilter::DescendantsOf(_)) => builder.push(
             ", subtree.parent_thread_id AS parent_thread_id\nFROM subtree\nCROSS JOIN threads ON threads.id = subtree.child_thread_id",
         ),
-        Some(crate::ThreadRelationFilter::AttachedThreadsOf(_)) => {
+        Some(crate::ThreadRelationFilter::AttachedThreadsOf(_) | crate::ThreadRelationFilter::IncludeAttached) => {
             builder.push(", NULL AS parent_thread_id\nFROM threads")
         }
         None => builder.push(" FROM threads"),
@@ -1346,11 +1379,14 @@ WITH RECURSIVE subtree(child_thread_id, parent_thread_id) AS (
         builder,
         filters,
         /*include_thread_id_tiebreaker*/ true,
-        /*include_empty_preview*/ relation_filter.is_some(),
+        relation_filter,
     );
     if !matches!(
         relation_filter,
-        Some(crate::ThreadRelationFilter::AttachedThreadsOf(_))
+        Some(
+            crate::ThreadRelationFilter::AttachedThreadsOf(_)
+                | crate::ThreadRelationFilter::IncludeAttached
+        )
     ) {
         builder.push(EXCLUDE_ATTACHED_THREADS);
     }
@@ -1367,17 +1403,19 @@ WITH RECURSIVE subtree(child_thread_id, parent_thread_id) AS (
             builder.push(" AND threads.attached_thread_parent_id = ");
             builder.push_bind(parent.to_string());
         }
-        None => {}
+        Some(crate::ThreadRelationFilter::IncludeAttached) | None => {}
     }
     let order_by_index = match (relation_filter, filters.cwd_filters) {
         // Relationship listings are expected to be much smaller than the global thread table.
         // Prefer the relationship index and sort the matches instead of scanning the
         // timestamp index until enough related threads happen to be found.
-        (Some(_), _) => OrderByIndex::Disabled,
+        (Some(relation), _) if relation != crate::ThreadRelationFilter::IncludeAttached => {
+            OrderByIndex::Disabled
+        }
         // Multi-cwd listing is supported but at the time of writing has no current use in production.
         // Preserve its query plan so the global timestamp index does not regress cwd filtering into a scan.
-        (None, Some(cwd_filters)) if cwd_filters.len() > 1 => OrderByIndex::Disabled,
-        (None, Some(_) | None) => OrderByIndex::Enabled,
+        (_, Some(cwd_filters)) if cwd_filters.len() > 1 => OrderByIndex::Disabled,
+        (_, Some(_) | None) => OrderByIndex::Enabled,
     };
     push_thread_order_and_limit(
         builder,
@@ -1490,7 +1528,7 @@ pub(super) fn push_thread_filters<'a>(
         builder,
         options,
         include_thread_id_tiebreaker,
-        /*include_empty_preview*/ false,
+        /*relation_filter*/ None,
     );
 }
 
@@ -1498,7 +1536,7 @@ fn push_thread_filters_with_preview<'a>(
     builder: &mut QueryBuilder<Sqlite>,
     options: ThreadFilterOptions<'a>,
     include_thread_id_tiebreaker: bool,
-    include_empty_preview: bool,
+    relation_filter: Option<crate::ThreadRelationFilter>,
 ) {
     let ThreadFilterOptions {
         archived_only,
@@ -1518,8 +1556,18 @@ fn push_thread_filters_with_preview<'a>(
     } else {
         builder.push(" AND threads.archived = 0");
     }
-    if !archived_only && !include_empty_preview && !matches!(section, Some(Some(_))) {
-        builder.push(" AND threads.preview <> ''");
+    if !archived_only && !matches!(section, Some(Some(_))) {
+        match relation_filter {
+            None => {
+                builder.push(" AND threads.preview <> ''");
+            }
+            Some(crate::ThreadRelationFilter::IncludeAttached) => {
+                builder.push(
+                    " AND (threads.preview <> '' OR threads.attached_thread_parent_id IS NOT NULL)",
+                );
+            }
+            Some(_) => {}
+        }
     }
     match section {
         Some(Some(section)) => {
@@ -2229,7 +2277,7 @@ mod tests {
             .await?;
         seed_thread_cleanup_state(&runtime, thread_id, child_thread_id).await?;
 
-        runtime.logs_pool.close().await;
+        runtime.diagnostic_logs_pool().unwrap().close().await;
         runtime
             .delete_thread(thread_id)
             .await
@@ -2266,7 +2314,7 @@ mod tests {
             .await?;
         sqlx::query("INSERT INTO logs (ts, ts_nanos, level, target, feedback_log_body, thread_id) VALUES (1, 0, 'INFO', 'test', 'feedback log', ?)")
             .bind(thread_id.to_string())
-            .execute(runtime.logs_pool.as_ref())
+            .execute(runtime.diagnostic_logs_pool().unwrap())
             .await?;
         Ok(())
     }
@@ -2994,7 +3042,9 @@ mod tests {
 
         runtime
             .apply_rollout_items(
-                &builder, &items, /*new_thread_memory_mode*/ None,
+                Box::new(runtime.build_thread_metadata(&builder)),
+                &items,
+                /*new_thread_memory_mode*/ None,
                 /*updated_at_override*/ None,
             )
             .await
@@ -3077,7 +3127,9 @@ mod tests {
 
         runtime
             .apply_rollout_items(
-                &builder, &items, /*new_thread_memory_mode*/ None,
+                Box::new(runtime.build_thread_metadata(&builder)),
+                &items,
+                /*new_thread_memory_mode*/ None,
                 /*updated_at_override*/ None,
             )
             .await
@@ -3455,6 +3507,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn token_usage_preserves_concurrent_edits_and_requires_current_spawn_metadata()
+    -> Result<()> {
+        let home = tempfile::tempdir()?;
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(home.path().abs()),
+            "test-provider".to_string(),
+        )
+        .await?;
+        let thread_id = ThreadId::new();
+        let parent = ThreadId::new();
+        let mut metadata = test_thread_metadata(home.path(), thread_id, home.path().to_path_buf());
+        metadata.tokens_used = 42;
+        metadata.source = serde_json::json!({
+            "subagent": { "thread_spawn": { "parent_thread_id": parent, "depth": 1 } }
+        })
+        .to_string();
+        runtime.upsert_thread(&metadata).await?;
+        runtime.update_thread_title(thread_id, "new title").await?;
+        let mut expected = runtime.get_thread(thread_id).await?.expect("thread");
+        let updated_at = expected.updated_at + chrono::Duration::seconds(2);
+        assert!(
+            runtime
+                .update_thread_token_usage(&metadata, updated_at, /*total_tokens*/ -1)
+                .await?
+        );
+        expected.updated_at = updated_at;
+        expected.tokens_used = 0;
+        assert_eq!(runtime.get_thread(thread_id).await?, Some(expected.clone()));
+
+        sqlx::query("DELETE FROM thread_spawn_edges WHERE child_thread_id = ?")
+            .bind(thread_id.to_string())
+            .execute(runtime.pool.as_ref())
+            .await?;
+        assert!(
+            !runtime
+                .update_thread_token_usage(&metadata, updated_at, /*total_tokens*/ 123)
+                .await?
+        );
+        metadata.source = "cli".to_string();
+        assert!(
+            !runtime
+                .update_thread_token_usage(&metadata, updated_at, /*total_tokens*/ 123)
+                .await?
+        );
+        assert_eq!(runtime.get_thread(thread_id).await?, Some(expected));
+        assert!(runtime.list_thread_spawn_children(parent).await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn touch_thread_recency_at_is_monotonic_and_survives_stale_upsert() {
         let codex_home = unique_temp_dir();
         let runtime = StateRuntime::init(
@@ -3805,7 +3907,7 @@ mod tests {
 
         runtime
             .apply_rollout_items(
-                &builder,
+                Box::new(runtime.build_thread_metadata(&builder)),
                 &items,
                 /*new_thread_memory_mode*/ None,
                 Some(override_updated_at),

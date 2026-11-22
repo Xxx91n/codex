@@ -16,6 +16,7 @@ fn thread_settings_for_test(
         thread_id: thread_id.to_string(),
         thread_settings: codex_app_server_protocol::ThreadSettings {
             disabled_plugin_ids: Vec::new(),
+            environments: None,
             cwd: test_path_buf("/tmp/thread-settings").abs(),
             approval_policy: AskForApproval::OnRequest,
             approvals_reviewer: codex_app_server_protocol::ApprovalsReviewer::AutoReview,
@@ -964,6 +965,7 @@ async fn live_app_server_turn_completed_clears_working_status_after_answer_item(
     assert_eq!(status.header(), "Working");
 
     let item = AppServerThreadItemPayload::AgentMessage {
+        moderation: None,
         id: "msg-1".to_string(),
         text: "Yes. What do you need?".to_string(),
         phase: Some(MessagePhase::FinalAnswer),
@@ -1047,6 +1049,7 @@ async fn live_app_server_turn_started_sets_feedback_turn_id() {
         crate::app_event::FeedbackCategory::Bug,
         /*include_logs*/ false,
         crate::bottom_pane::FeedbackAudience::External,
+        /*can_save*/ true,
     );
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -1057,6 +1060,7 @@ async fn live_app_server_turn_started_sets_feedback_turn_id() {
             reason: None,
             turn_id: Some(turn_id),
             include_logs: false,
+            destination: crate::app_event::FeedbackDestination::OpenAi,
         }) if turn_id == "turn-1"
     );
 }
@@ -1773,6 +1777,7 @@ async fn live_app_server_turn_completion_repairs_dropped_message_deltas() {
     );
     completed_turn.items_view = codex_app_server_protocol::TurnItemsView::Summary;
     completed_turn.items = vec![ThreadItem::untimed(AppServerThreadItemPayload::AgentMessage {
+        moderation: None,
         id: "msg-1".to_string(),
         text: concat!(
             "The transport kept this.\nAnd dropped this.\n\n",
@@ -1799,6 +1804,7 @@ async fn live_app_server_turn_completion_repairs_dropped_message_deltas() {
         .filter_map(|event| match event {
             AppEvent::ConsolidateAgentMessage {
                 source,
+                phase: Some(MessagePhase::FinalAnswer),
                 scrollback_reflow,
                 ..
             } => {
