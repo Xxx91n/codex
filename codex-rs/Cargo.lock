@@ -3970,7 +3970,7 @@ dependencies = [
 
 [[package]]
 name = "codex-http-headers-helper"
-version = "0.0.0"
+version = "0.170.0-tri.1"
 dependencies = [
  "anyhow",
  "codex-utils-process",
