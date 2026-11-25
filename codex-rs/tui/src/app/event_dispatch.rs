@@ -103,6 +103,7 @@ impl App {
                     | AppEvent::ManagedWorktreeCreated(_)
                     | AppEvent::AgentsOverviewWorktreeCreated(_)
                     | AppEvent::AgentsOverviewPinToggled { .. }
+                    | AppEvent::AgentsOverviewUsageLoaded { .. }
                     | AppEvent::AppendMessageHistoryEntry { .. }
                     | AppEvent::BeginInitialHistoryReplayBuffer
                     | AppEvent::BeginThreadSwitchHistoryReplayBuffer
@@ -110,6 +111,26 @@ impl App {
                     | AppEvent::FatalExitRequest(_)
             )
         {
+            return Ok(AppRunControl::Continue);
+        }
+        let overview_action_thread = match &event {
+            AppEvent::ForkAgentsOverviewThread { thread_id }
+            | AppEvent::RenameAgentsOverviewThread { thread_id, .. }
+            | AppEvent::ToggleAgentsOverviewPin { thread_id, .. }
+            | AppEvent::RunAgentsOverviewAction { thread_id, .. }
+            | AppEvent::StopAgentsOverviewThread { thread_id } => Some(*thread_id),
+            _ => None,
+        };
+        let overview_action_owner = match &event {
+            AppEvent::NewAgentsOverviewSession { backend_id, .. }
+            | AppEvent::NewAgentsOverviewWorktree { backend_id, .. } => *backend_id,
+            _ => overview_action_thread.and_then(|id| self.backend_registry.owner(id)),
+        };
+        if overview_action_owner.is_some_and(|owner| owner != app_server.backend_id()) {
+            if matches!(&event, AppEvent::ToggleAgentsOverviewPin { .. }) {
+                self.repaint_agents_overview();
+            }
+            self.add_agents_overview_error("Open this task before using that action.".into());
             return Ok(AppRunControl::Continue);
         }
         if matches!(
@@ -2445,6 +2466,28 @@ impl App {
                     offer.handle.close();
                 }
             }
+            AppEvent::RealtimeCallCreated { thread_id, attempt_id, result } => {
+                if let Some(owner) = self.voice_widget_for_thread(thread_id)
+                    && owner.is_starting_realtime_attempt(thread_id, attempt_id)
+                {
+                    let result = match result {
+                        Ok(call) => {
+                            owner.accept_realtime_call(call.answer_sdp);
+                            app_server.thread_realtime_start(thread_id, call.call_id).await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = result
+                        && !self.recover_transport_error(&error)
+                        && let Some(owner) = self.voice_widget_for_thread(thread_id)
+                    {
+                        owner.on_realtime_error(
+                            format!("Voice conversation failed: {error:#}"),
+                            crate::chatwidget::RealtimeFailureCause::AppServerRequest,
+                        );
+                    }
+                }
+            }
             AppEvent::RealtimeWebrtcConnected {
                 thread_id,
                 attempt_id,
@@ -3209,7 +3252,7 @@ impl App {
                     self.refresh_changed_agents_overview_threads(app_server);
                 }
             }
-            AppEvent::NewAgentsOverviewSession { cwd } => {
+            AppEvent::NewAgentsOverviewSession { cwd, .. } => {
                 return Box::pin(self.new_agents_overview_session(tui, app_server, cwd)).await;
             }
             AppEvent::AgentsOverviewThreadsLoaded { request_id, result } => {
@@ -3257,7 +3300,7 @@ impl App {
                 return control;
             }
             AppEvent::ForkAgentsOverviewThreadReady { .. } => unreachable!("normalized above"),
-            AppEvent::NewAgentsOverviewWorktree { cwd } => {
+            AppEvent::NewAgentsOverviewWorktree { cwd, .. } => {
                 Box::pin(self.new_agents_overview_worktree(tui, app_server, cwd)).await;
             }
             AppEvent::AgentsOverviewWorktreeCreated(result) => {
@@ -3278,7 +3321,7 @@ impl App {
             AppEvent::RenameAgentsOverviewThread { thread_id, name } => {
                 match app_server.thread_set_name(thread_id, name.clone()).await {
                     Ok(()) => {
-                        self.chat_widget.expect_manual_thread_name(thread_id, name);
+                        self.chat_widget.display_thread_name(thread_id, name);
                         self.cancel_thread_title_generation(thread_id);
                     }
                     Err(error) => {
@@ -3316,6 +3359,7 @@ impl App {
                 thread_id,
                 destination,
                 prompt,
+                fallback_title,
                 effort,
                 result,
             } => {
@@ -3324,6 +3368,7 @@ impl App {
                     thread_id,
                     destination,
                     prompt,
+                    fallback_title,
                     effort,
                     result,
                     cancellation,

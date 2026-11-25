@@ -1329,7 +1329,11 @@ impl ModelClient {
 
     fn prepare_response_items_for_request(&self, input: &mut [ResponseItem]) {
         for item in input {
-            if item.id().is_some_and(|id| !id.is_prefixed()) {
+            // A provider can echo a bare reserved prefix or return an opaque ID.
+            if item
+                .id()
+                .is_some_and(|id| id.allocation().is_none() && !id.is_prefixed())
+            {
                 item.set_id(/*new_id*/ None);
             }
             if !self.state.content_item_kinds_enabled {
@@ -2583,6 +2587,10 @@ impl ModelClientSession {
                 while let Some(event) = stream.next().await {
                     match event {
                         Ok(ResponseEvent::Completed { .. }) => break,
+                        Err(err) if err.requires_http_fallback() => {
+                            self.try_switch_fallback_transport(session_telemetry, model_info);
+                            break;
+                        }
                         Err(err) => return Err(err),
                         _ => {}
                     }
@@ -2776,9 +2784,10 @@ fn map_response_stream(
     let interrupt = api_stream.interrupt.take();
     let preempt = api_stream.preempt.take();
     let (last_response_tx, last_response_rx) = oneshot::channel();
+    let events = crate::model_request::intercept_stream(Box::pin(api_stream), interceptors);
     let mut stream = map_response_events(
         upstream_request_id,
-        crate::model_request::intercept_stream(Box::pin(api_stream), interceptors),
+        events,
         session_telemetry,
         inference_trace_attempt,
         client,
@@ -2875,6 +2884,7 @@ where
                     response_id,
                     token_usage,
                     usage_metadata,
+                    reasoning_removals,
                     end_turn,
                 }) => {
                     feedback_tags!(last_model_response_id = &response_id);
@@ -2899,6 +2909,7 @@ where
                             response_id,
                             token_usage,
                             usage_metadata,
+                            reasoning_removals,
                             end_turn,
                         }))
                         .await
