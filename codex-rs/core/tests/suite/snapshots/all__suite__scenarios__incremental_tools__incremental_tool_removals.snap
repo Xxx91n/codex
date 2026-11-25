@@ -1,6 +1,7 @@
 ---
 source: core/tests/suite/scenarios_incremental_tools.rs
-expression: "context_snapshot::format_request_history_snapshot(\"MCP refreshes remove one tool, then its whole namespace, before restoring both tools. Removal notices append alone; restoration appends one developer notice before both namespace declarations. Unchanged turns do not repeat updates.\",\n&requests,\n&ContextSnapshotOptions::default().rewrite_known_segments().include_request_settings(),)"
+assertion_line: 691
+expression: "context_snapshot::format_request_history_snapshot(scenario, &requests,\n&ContextSnapshotOptions::default().rewrite_known_segments().include_request_settings(),)"
 ---
 Scenario: MCP refreshes remove one tool, then its whole namespace, before restoring both tools. Removal notices append alone; restoration appends one developer notice before both namespace declarations. Unchanged turns do not repeat updates.
 
@@ -16,7 +17,7 @@ Settings:
   text: {"verbosity":"low"}
   tool_choice: "auto"
 -- request 1 (turn) --
-00:additional_tools/developer (3; hash=c6476125e1d67bb3):
+00:additional_tools/developer (3; hash=bc288fa89530a658):
         - namespace/functions; hash=6475578c7f948d18
           - function/exec_command
           - function/write_stdin
@@ -26,7 +27,7 @@ Settings:
           - function/request_user_input
           - custom/apply_patch
           - function/view_image
-        - namespace/multi_agent_v1: Tools for spawning and managing sub-agents.; hash=2327142bda177c50
+        - namespace/multi_agent_v1: Tools for spawning and managing sub-agents.; hash=3277a15eca758c1f
           - function/close_agent
           - function/resume_agent
           - function/send_input

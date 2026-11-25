@@ -1,5 +1,6 @@
 ---
 source: core/tests/suite/scenarios_incremental_tools.rs
+assertion_line: 142
 expression: "context_snapshot::format_request_history_snapshot(\"Request 1 starts the parent thread. Request 2 is the prediction child's only turn. Request 3 continues the original parent and verifies that it still has its MCP tools.\",\n&requests,\n&ContextSnapshotOptions::default().rewrite_known_segments().include_request_settings(),)"
 ---
 Scenario: Request 1 starts the parent thread. Request 2 is the prediction child's only turn. Request 3 continues the original parent and verifies that it still has its MCP tools.
@@ -16,8 +17,8 @@ Settings:
   text: {"verbosity":"low"}
   tool_choice: "auto"
 -- request 1 (turn) --
-00:additional_tools/developer (1; hash=638dc23247f41f35):
-        - namespace/functions; hash=f730aa90585570c5
+00:additional_tools/developer (1; hash=335b077d7a89f48a):
+        - namespace/functions; hash=5d540971226884e4
           - custom/exec
           - function/wait
           - function/request_user_input
@@ -40,8 +41,8 @@ Settings:
 ## Window 2 (after request 2: input diverged at item 05)
 Settings: same as window 1
 -- request 3 (turn) --
-00:additional_tools/developer (1; hash=638dc23247f41f35):
-        - namespace/functions; hash=f730aa90585570c5
+00:additional_tools/developer (1; hash=335b077d7a89f48a):
+        - namespace/functions; hash=5d540971226884e4
           - custom/exec
           - function/wait
           - function/request_user_input
