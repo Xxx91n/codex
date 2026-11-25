@@ -563,6 +563,7 @@ async fn emit_chat_completion_items(
             token_usage: usage,
             end_turn: Some(true),
             usage_metadata: None,
+            reasoning_removals: None,
         }))
         .await;
     Ok(())
