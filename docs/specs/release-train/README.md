@@ -79,8 +79,12 @@
 | `codex-rs/model-provider/src/provider.rs` | 保留 fork 的 `RemoteCompactionSupport` 导入与 `capabilities()` 非 Responses 降级；`models_manager_with_cache` 取上游 `ModelCatalogSettings::with_cache`；测试取上游 `provider_tests.rs` 拆分，fork 的 5 处 anthropic 字段与 `capabilities_remote_compaction_follows_wire_api` 迁入该文件 |
 | `codex-rs/otel/src/metrics/names.rs` | 常量取并集：保留 `STOP_REASON_*`，并入上游 websocket / critical-path 常量 |
 | `codex-rs/state/src/sqlite.rs` | 迁移执行用上游 `retry_on_busy` + 单事务 `run_direct` 包装；`MigrateError::VersionMismatch` 时先回滚，再走 fork 的 drift 检测 / `repair_eol_checksum_family`，然后重跑同一包装一次；fork 的 maintained-family 收尾块保留 |
+| `codex-rs/features/src/lib.rs` | 取 fork 侧：`IncrementalToolsLegacy` 保持 `Stage::Stable` / `default_enabled: true`；cut 带来的 `MultiEnvironmentMcp` 条目保留。合并结果必须等于 `rust-v0.170.0` 的同名文件（blob `1620efc136`）（签字范围：仅 0.170.0 格 merge cut 72532ecae，#32） |
+| `codex-rs/core/tests/suite/scenarios_incremental_tools.rs` | 取 fork 侧测试矩阵（两个 Bedrock provider 的默认期望为 true，opt-out 用例保留）；结果必须等于 `rust-v0.170.0` 的同名文件（blob `52ba3fd292`）。不得回退到 `2c4d57665` 之前的矩阵（签字范围：仅 0.170.0 格 merge cut 72532ecae，#32） |
 
 白名单是活表：新增冲突文件必须经人确认后入表，不得由执行者自行判断。
+
+重复提交判定：`cut..tag` 中与既有分支提交 `git patch-id --stable` 输出完全相同的提交判为已应用，跳过，不 cherry-pick；判定以 patch-id 相等为准，不以标题或文件清单相似为准。
 
 ## 8. 发版前置门（R-08）
 
