@@ -156,9 +156,9 @@ fn turn_history_marker(
 ) -> Option<ResponseItem> {
     match (marker, force_developer) {
         (InterruptedTurnHistoryMarker::Disabled, _) => None,
-        (InterruptedTurnHistoryMarker::ContextualUser, false) => Some(ContextualUserFragment::into(
-            crate::context::TurnAborted::new(user_guidance),
-        )),
+        (InterruptedTurnHistoryMarker::ContextualUser, false) => Some(
+            ContextualUserFragment::into(crate::context::TurnAborted::new(user_guidance)),
+        ),
         (InterruptedTurnHistoryMarker::ContextualUser, true)
         | (InterruptedTurnHistoryMarker::Developer, _) => {
             let marker = crate::context::TurnAborted::new(developer_guidance);

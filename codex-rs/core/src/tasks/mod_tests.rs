@@ -652,8 +652,11 @@ fn preempted_marker_renders_the_spec_sentence_and_not_the_esc_wording() {
 
     assert_ne!(
         contextual,
-        interrupted_turn_history_marker(InterruptedTurnHistoryMarker::ContextualUser)
-            .expect("the Esc marker stays available"),
+        interrupted_turn_history_marker(
+            InterruptedTurnHistoryMarker::ContextualUser,
+            /*cause*/ None
+        )
+        .expect("the Esc marker stays available"),
         "preemption must not inherit the wording written for the user's Esc"
     );
 }

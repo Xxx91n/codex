@@ -216,8 +216,8 @@ impl SamplingStream {
         // buffered here can be an unpaired tool call, and none of it was
         // dispatched, which is why the reconciler does not run over it.
         while let Some(event) = self.next().await {
-            match event {
-                Ok(SamplingEvent { event: Ok(ResponseEvent::OutputItemDone(item)), .. }) => {
+            match event.event {
+                Ok(ResponseEvent::OutputItemDone(item)) => {
                     retained.push(item);
                 }
                 Ok(_) => {}

@@ -1008,7 +1008,7 @@ async fn dispatch_resolves_chat_wire_qualified_names_to_namespaced_handlers() ->
             /*call_state*/ None,
         )
         .await?;
-    let response = result.into_response().item;
+    let response = result.into_response(/*file_backed_tool_audio*/ false).item;
     match response {
         ResponseItem::FunctionCallOutput { call_id, .. } => {
             assert_eq!(call_id.as_deref(), Some("qualified-call"));

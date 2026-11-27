@@ -2740,6 +2740,7 @@ impl ModelClientSession {
         inference_trace: &InferenceTraceContext,
     ) -> Result<OpenedModelResponse> {
         let wire_api = self.client.state.provider.info().wire_api;
+        let fork_effort = sampling.reasoning_effort.clone();
         match wire_api {
             WireApi::Responses => {
                 if self.client.responses_websocket_enabled() {
@@ -2781,7 +2782,7 @@ impl ModelClientSession {
             WireApi::Chat => {
                 self.stream_chat_completions(
                     prompt,
-                    effort.clone(),
+                    fork_effort.clone(),
                     model_info,
                     session_telemetry,
                     responses_metadata,
@@ -2792,7 +2793,7 @@ impl ModelClientSession {
             WireApi::Anthropic => {
                 self.stream_anthropic_messages(
                     prompt,
-                    effort.clone(),
+                    fork_effort.clone(),
                     model_info,
                     session_telemetry,
                     responses_metadata,

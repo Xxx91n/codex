@@ -7,6 +7,7 @@ use codex_api::ChatCompletionsOptions as ApiChatCompletionsOptions;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_otel::SessionTelemetry;
+use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ResponseItem;
@@ -17,6 +18,7 @@ use codex_response_debug_context::extract_response_debug_context_from_api_error;
 use codex_rollout_trace::InferenceTraceContext;
 use codex_tools::create_tools_json_for_chat_completions;
 use serde_json::json;
+use std::sync::Arc;
 use tracing::debug;
 
 use super::content_items_to_text;
@@ -25,12 +27,11 @@ use crate::client::AuthRequestTelemetryContext;
 use crate::client::CHAT_COMPLETIONS_ENDPOINT;
 use crate::client::ClientRouting;
 use crate::client::ModelClientSession;
+use crate::client::OpenedModelResponse;
 use crate::client::PendingUnauthorizedRetry;
 use crate::client::RequestRouteTelemetry;
 use crate::client::handle_unauthorized;
-use crate::client::OpenedModelResponse;
 use crate::client_common::Prompt;
-use crate::client_common::ResponseStream;
 use crate::responses_metadata::CodexResponsesMetadata;
 
 impl ModelClientSession {
@@ -42,13 +43,13 @@ impl ModelClientSession {
     /// work in-process without an external translation layer.
     pub(crate) async fn stream_chat_completions(
         &self,
-        prompt: &Prompt,
+        prompt: &Arc<Prompt>,
         effort: Option<ReasoningEffortConfig>,
         model_info: &ModelInfo,
         session_telemetry: &SessionTelemetry,
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
-    ) -> Result<ResponseStream> {
+    ) -> Result<OpenedModelResponse> {
         let auth_manager = self.client.state.provider.auth_manager();
         let mut auth_recovery = auth_manager
             .as_ref()
@@ -92,7 +93,7 @@ impl ModelClientSession {
                 compression: responses_options.compression,
             };
 
-            let request = self.build_chat_request(prompt, model_info, effort.clone())?;
+            let request = self.build_chat_request(prompt.as_ref(), model_info, effort.clone())?;
             let client = ApiChatCompletionsClient::new(
                 transport,
                 client_setup.api_provider,
@@ -101,7 +102,14 @@ impl ModelClientSession {
             .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
             let inference_trace_attempt = inference_trace.start_attempt();
             inference_trace_attempt.add_request_headers(&mut options.extra_headers);
-            inference_trace_attempt.record_started(&request);
+            let request_body =
+                serde_json::to_vec(&request).map_err(|error| CodexErr::from(error))?;
+            inference_trace_attempt.record_started(
+                request_body,
+                Arc::clone(prompt),
+                /*stripped_tool_output_ids*/ Vec::new(),
+                || Ok(None),
+            );
 
             let interceptors = crate::model_request::prepare(
                 &self.client.request_contributors,
@@ -112,7 +120,7 @@ impl ModelClientSession {
             );
             match client.stream_request(request, options).await {
                 Ok(stream) => {
-                    let stream = OpenedModelResponse {
+                    let opened = OpenedModelResponse {
                         stream,
                         telemetry: session_telemetry.clone(),
                         trace: inference_trace_attempt,
@@ -122,9 +130,8 @@ impl ModelClientSession {
                         // The handle only means something paired with this wire's
                         // own reconciler (ADR-0013); `deliver` assembles the seam.
                         preempt_reconciler: Some(reconcile_preempted),
-                    }
-                    .into_raw_stream()?;
-                    return Ok(stream);
+                    };
+                    return Ok(opened);
                 }
                 Err(ApiError::Transport(unauthorized_transport))
                     if self
