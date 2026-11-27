@@ -206,8 +206,7 @@ impl ModelClientSession {
                     .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
             let inference_trace_attempt = inference_trace.start_attempt();
             inference_trace_attempt.add_request_headers(&mut options.extra_headers);
-            let request_body =
-                serde_json::to_vec(&request).map_err(|error| CodexErr::from(error))?;
+            let request_body = serde_json::to_vec(&request).map_err(CodexErr::from)?;
             inference_trace_attempt.record_started(
                 request_body,
                 Arc::clone(prompt),
