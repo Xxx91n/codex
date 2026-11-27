@@ -32,7 +32,7 @@ use crate::client::ModelClientSession;
 use crate::client::PendingUnauthorizedRetry;
 use crate::client::RequestRouteTelemetry;
 use crate::client::handle_unauthorized;
-use crate::client::map_response_stream;
+use crate::client::OpenedModelResponse;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseStream;
 use crate::responses_metadata::CodexResponsesMetadata;
@@ -216,14 +216,18 @@ impl ModelClientSession {
             );
             match client.stream_request(request, options).await {
                 Ok(stream) => {
-                    let (stream, _) = map_response_stream(
+                    let stream = OpenedModelResponse {
                         stream,
-                        session_telemetry.clone(),
-                        inference_trace_attempt,
-                        &self.client.state,
+                        telemetry: session_telemetry.clone(),
+                        trace: inference_trace_attempt,
+                        client: std::sync::Arc::clone(&self.client.state),
                         interceptors,
-                        Some(reconcile_preempted),
-                    );
+                        continuation: None,
+                        // The handle only means something paired with this wire's
+                        // own reconciler (ADR-0013); `deliver` assembles the seam.
+                        preempt_reconciler: Some(reconcile_preempted),
+                    }
+                    .into_raw_stream()?;
                     return Ok(stream);
                 }
                 Err(ApiError::Transport(unauthorized_transport))

@@ -79,6 +79,13 @@
 | `codex-rs/model-provider/src/provider.rs` | 保留 fork 的 `RemoteCompactionSupport` 导入与 `capabilities()` 非 Responses 降级；`models_manager_with_cache` 取上游 `ModelCatalogSettings::with_cache`；测试取上游 `provider_tests.rs` 拆分，fork 的 5 处 anthropic 字段与 `capabilities_remote_compaction_follows_wire_api` 迁入该文件 |
 | `codex-rs/otel/src/metrics/names.rs` | 常量取并集：保留 `STOP_REASON_*`，并入上游 websocket / critical-path 常量 |
 | `codex-rs/state/src/sqlite.rs` | 迁移执行用上游 `retry_on_busy` + 单事务 `run_direct` 包装；`MigrateError::VersionMismatch` 时先回滚，再走 fork 的 drift 检测 / `repair_eol_checksum_family`，然后重跑同一包装一次；fork 的 maintained-family 收尾块保留 |
+| `.gitattributes` | 唯一允许的改动：并入上游新增的 `linguist-generated` 行（如 `statusline.d.ts`）。fork 的 sqlx migration `text !eol` 段与上游 LF pin 段原样保留；不得增删改 fork 自己的任何行。2026-11-27 维护者在 issue #35 授权。 |
+| `codex-rs/core/config.schema.json` | fork 的 `StateDbSettingsToml`（含 `migration_checksum_family`）定义保留，上游 schema 结构性改动（重排/新增定义）并入；冲突段手工合并后跑 `just write-config-schema` 校验 |
+| `codex-rs/core/src/client_tests.rs` | fork 的 `map_response_stream` 调用形态（返回 `(stream, last_response_rx)`、显式传 preempt reconciler）保留；上游 `OpenedModelResponse` 结构性改动并入调用点两侧 |
+| `codex-rs/core/src/config/mod.rs` | import 取并集（fork 的 `MigrationChecksumFamily` 与上游新增 import 同时保留）；其余按上游 |
+| `codex-rs/core/src/context/turn_aborted.rs` | fork 的 `PREEMPTED_GUIDANCE` 及其注释（S-07）保留；上游对 guidance 文案的改动并入其余常量 |
+| `codex-rs/core/src/session/turn.rs` | fork 的 `take_preempted_history()` 装配块（ADR-0013/0015 preempt seam）保留；上游中断处理改动并入周边 |
+| `codex-rs/core/src/tasks/mod.rs` | fork 的 `turn_history_marker` 双 guidance 调用（`INTERRUPTED_GUIDANCE` + `INTERRUPTED_DEVELOPER_GUIDANCE`）保留；上游签名/参数变化并入 |
 
 白名单是活表：新增冲突文件必须经人确认后入表，不得由执行者自行判断。
 
