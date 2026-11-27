@@ -494,7 +494,15 @@ impl SqliteConfig {
                             );
                             Err(anyhow::anyhow!(drift.guidance()))
                         }
-                        None => Err(anyhow::Error::from(result.unwrap_err())),
+                        None => {
+                            let error = match result {
+                                Err(error) => error,
+                                Ok(()) => {
+                                    anyhow::bail!("checksum family probe returned unexpectedly")
+                                }
+                            };
+                            Err(error)
+                        }
                     };
                 }
                 // Ticket 31 explicit opt-in (crlf/lf): when every applied
