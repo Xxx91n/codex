@@ -101,6 +101,12 @@ pub enum Error {
     Timeout,
     #[error("gRPC failed; request outcome may be unknown: {0:?}")]
     Rpc(RpcStatus),
+    #[error("Cloud model catalog is unavailable")]
+    ModelCatalogUnavailable,
+    #[error("Cloud model catalog exceeds the response limit")]
+    ModelCatalogTooLarge,
+    #[error("Cloud environment catalog is unavailable")]
+    EnvironmentCatalogUnavailable,
     #[error("invalid gRPC event envelope")]
     InvalidResponse,
     #[error("cloud response contains an unsupported {0}")]

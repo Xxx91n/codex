@@ -9,7 +9,7 @@
 //! Live usage boundaries advance only when a response supplies usable usage.
 //! Oversized instructions keep an incomplete excerpt for bounded root review, including
 //! sources recovered from legacy Guardian checkpoints before their raw history is dropped.
-//! Prompt projections replace unavailable file images without changing retained history.
+//! Prompt projections replace unavailable file images and tool audio without changing retained history.
 
 #[path = "history_rejected_audio.rs"]
 pub(crate) mod rejected_audio;
@@ -25,7 +25,7 @@ use crate::context::world_state::WorldState;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context::world_state::WorldStateUpdate;
 use crate::context_manager::normalize;
-use crate::context_manager::replace_unresolvable_image_files;
+use crate::context_manager::replace_unresolvable_media_files;
 use crate::event_mapping::contextual_dev_fragments;
 use crate::event_mapping::is_contextual_user_message_content;
 use crate::event_mapping::parse_turn_item;
@@ -33,7 +33,6 @@ use crate::guardian::GUARDIAN_MAX_ROOT_MESSAGE_TOKENS;
 use crate::guardian::guardian_truncate_text;
 use crate::session::FileAudioDurations;
 use crate::session::turn_context::TurnContext;
-use crate::utils::json::serialized_json_bytes;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_attachment_store::AttachmentStore;
@@ -70,7 +69,7 @@ use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::WorldStateItem;
-use codex_utils_audio::estimate_audio_token_count;
+use codex_utils_audio::estimate_tool_audio_tokens;
 use codex_utils_cache::BlockingLruCache;
 use codex_utils_cache::sha1_digest;
 use codex_utils_output_truncation::TruncationPolicy;
@@ -79,7 +78,10 @@ use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::approx_tokens_from_byte_count_i64;
 use codex_utils_output_truncation::truncate_function_output_payload;
 use codex_utils_output_truncation::with_serialization_allowance;
+use codex_utils_string::serialized_json_bytes;
+use image::ImageReader;
 use std::collections::BTreeSet;
+use std::io::Cursor;
 use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -103,6 +105,8 @@ fn next_guardian_review_context_revision() -> u64 {
 pub(crate) struct ContextManager {
     item_id_generator: ItemIdGenerator,
     sampling: super::sampling::SamplingProgress,
+    /// Inclusive sequence cutoff for calls that may still be running in the fork source.
+    pub(crate) restored_through_sequence: u64,
     /// The oldest items are at the beginning of the vector. Snapshots share the vector until a
     /// caller needs to mutate it, avoiding deep copies for read-only history consumers.
     items: Arc<Vec<ResponseItemEnvelope>>,
@@ -317,6 +321,7 @@ impl ContextManager {
         Self {
             item_id_generator,
             sampling: Default::default(),
+            restored_through_sequence: 0,
             items: Arc::new(Vec::new()),
             review_history: None,
             review_budgeting: ContextBudgeting::Fixed,
@@ -384,7 +389,16 @@ impl ContextManager {
     }
 
     pub(crate) fn record_retained_context(&mut self, event: &RetainedContextEvent) -> bool {
-        if !Arc::make_mut(&mut self.retained_context).record(event, &self.item_id_generator) {
+        self.record_retained_context_for_persistence(&mut event.clone())
+    }
+
+    pub(crate) fn record_retained_context_for_persistence(
+        &mut self,
+        event: &mut RetainedContextEvent,
+    ) -> bool {
+        if !Arc::make_mut(&mut self.retained_context)
+            .record_and_capture(event, &self.item_id_generator)
+        {
             return false;
         }
         match event {
@@ -666,13 +680,14 @@ impl ContextManager {
         self.sampling.record(&mut processed);
         if let ResponseItem::FunctionCallOutput { output, .. }
         | ResponseItem::CustomToolCallOutput { output, .. } = &mut processed.item
+            && !metadata.is_some_and(|metadata| metadata.tool_audio_budget_applied)
         {
             // The override already includes the tool's serialization allowance.
             let policy = metadata
                 .and_then(|metadata| metadata.history_truncation_token_limit)
                 .map(TruncationPolicy::Tokens)
                 .unwrap_or_else(|| with_serialization_allowance(policy));
-            truncate_function_output_payload(output, policy, estimate_audio_token_count);
+            truncate_function_output_payload(output, policy, estimate_tool_audio_tokens);
         }
         if let Some(review_history) = &mut self.review_history
             && !is_guardian_context_message(item)
@@ -702,7 +717,7 @@ impl ContextManager {
     /// Returns the history prepared for sending to the model. This applies a proper
     /// normalization and drops un-suited items. Unsupported image and audio content
     /// is stripped from messages and tool outputs according to `input_modalities`.
-    /// Unavailable file images are replaced with text placeholders.
+    /// Unavailable file images and tool audio are replaced with text placeholders.
     pub(crate) async fn for_prompt(
         self,
         input_modalities: &[InputModality],
@@ -722,7 +737,7 @@ impl ContextManager {
         image_store: &dyn AttachmentStore,
     ) -> Vec<ResponseItemEnvelope> {
         self.normalize_history(input_modalities);
-        replace_unresolvable_image_files(
+        replace_unresolvable_media_files(
             Arc::make_mut(&mut self.items)
                 .iter_mut()
                 .map(|envelope| &mut envelope.item),
@@ -874,6 +889,9 @@ impl ContextManager {
 
     pub(crate) fn replace_annotated(&mut self, mut items: Vec<ResponseItemEnvelope>) {
         self.sampling = super::sampling::SamplingProgress::restore(&mut items);
+        self.restored_through_sequence = self
+            .restored_through_sequence
+            .min(self.sampling.last_sequence);
         self.retained_context = Arc::default();
         self.user_message_revision = self.user_message_revision.saturating_add(1);
         if let Some(review_history) = &mut self.review_history {
@@ -1172,7 +1190,7 @@ impl ContextManager {
         let items = Arc::make_mut(&mut self.items);
 
         // all function/tool calls must have a corresponding output
-        normalize::ensure_call_outputs_present(items);
+        normalize::ensure_call_outputs_present(items, self.restored_through_sequence);
 
         // Paired outputs must have a corresponding call; named external outputs stand alone.
         normalize::remove_orphan_outputs(items);
@@ -1250,7 +1268,7 @@ impl ContextManager {
     }
 }
 
-/// Configuration updates require harness provenance; raw system messages are never retained.
+/// Configuration updates and internal system messages require harness provenance.
 fn is_api_message(message: &ResponseItem, metadata: Option<&CodexHarnessMetadata>) -> bool {
     match message {
         ResponseItem::Message { role, .. } => role.as_str() != "system",
@@ -1403,7 +1421,7 @@ fn estimate_response_item_model_visible_bytes(
             namespace,
             output,
             ..
-        } => estimate_function_output_bytes(&output.body)
+        } => estimate_function_output_bytes(&output.body, audio_durations)
             .saturating_add(text_bytes(call_id.as_deref().unwrap_or_default()))
             .saturating_add(text_bytes(name.as_deref().unwrap_or_default()))
             .saturating_add(text_bytes(namespace.as_deref().unwrap_or_default())),
@@ -1412,7 +1430,7 @@ fn estimate_response_item_model_visible_bytes(
             name,
             output,
             ..
-        } => estimate_function_output_bytes(&output.body)
+        } => estimate_function_output_bytes(&output.body, audio_durations)
             .saturating_add(text_bytes(call_id))
             .saturating_add(text_bytes(name.as_deref().unwrap_or_default())),
         // These payloads are themselves JSON arguments, rather than transport envelopes
@@ -1507,15 +1525,18 @@ fn estimate_original_image_bytes(image_url: &str) -> Option<i64> {
                 return None;
             }
         };
-        let dynamic = match image::load_from_memory(&bytes) {
-            Ok(dynamic) => dynamic,
+        let dimensions = image::guess_format(&bytes).and_then(|format| {
+            ImageReader::with_format(Cursor::new(bytes.as_slice()), format).into_dimensions()
+        });
+        let (width, height) = match dimensions {
+            Ok(dimensions) => dimensions,
             Err(error) => {
-                tracing::trace!("failed to decode original-detail image bytes: {error}");
+                tracing::trace!("failed to read original-detail image dimensions: {error}");
                 return None;
             }
         };
-        let width = i64::from(dynamic.width());
-        let height = i64::from(dynamic.height());
+        let width = i64::from(width);
+        let height = i64::from(height);
         let patch_size = i64::from(ORIGINAL_IMAGE_PATCH_SIZE);
         let patches_wide = width.saturating_add(patch_size.saturating_sub(1)) / patch_size;
         let patches_high = height.saturating_add(patch_size.saturating_sub(1)) / patch_size;
@@ -1551,27 +1572,21 @@ pub(crate) fn estimate_image_reference_bytes(
     }
 }
 
-fn estimate_audio_bytes(audio_url: &str) -> i64 {
-    i64::try_from(approx_bytes_for_tokens(estimate_audio_token_count(
-        audio_url,
-    )))
-    .unwrap_or(i64::MAX)
-}
-
 fn estimate_audio_reference_bytes(
     audio: &AudioReference,
     audio_durations: &FileAudioDurations,
 ) -> i64 {
-    match audio {
-        AudioReference::Inline { audio_url } => estimate_audio_bytes(audio_url),
-        AudioReference::File { file_id } => {
-            i64::try_from(approx_bytes_for_tokens(audio_durations.tokens(file_id)))
-                .unwrap_or(i64::MAX)
-        }
-    }
+    let tokens = match audio {
+        AudioReference::Inline { .. } => estimate_tool_audio_tokens(audio),
+        AudioReference::File { file_id } => audio_durations.tokens(file_id),
+    };
+    i64::try_from(approx_bytes_for_tokens(tokens)).unwrap_or(i64::MAX)
 }
 
-fn estimate_function_output_bytes(output: &FunctionCallOutputBody) -> i64 {
+fn estimate_function_output_bytes(
+    output: &FunctionCallOutputBody,
+    audio_durations: &FileAudioDurations,
+) -> i64 {
     match output {
         FunctionCallOutputBody::Text(text) => text_bytes(text),
         FunctionCallOutputBody::ContentItems(items) => items
@@ -1581,8 +1596,8 @@ fn estimate_function_output_bytes(output: &FunctionCallOutputBody) -> i64 {
                 FunctionCallOutputContentItem::InputImage { image, detail } => {
                     estimate_image_reference_bytes(image, *detail)
                 }
-                FunctionCallOutputContentItem::InputAudio { audio_url } => {
-                    estimate_audio_bytes(audio_url)
+                FunctionCallOutputContentItem::InputAudio { audio } => {
+                    estimate_audio_reference_bytes(audio, audio_durations)
                 }
                 FunctionCallOutputContentItem::EncryptedContent { encrypted_content } => {
                     i64::try_from(estimate_encrypted_function_output_length(

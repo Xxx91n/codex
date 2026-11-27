@@ -1,6 +1,7 @@
 pub mod cloud_config;
 pub(crate) mod debug_sandbox;
 mod exit_status;
+mod git_credential;
 pub(crate) mod login;
 
 use clap::Args;
@@ -13,6 +14,8 @@ use std::path::PathBuf;
 pub use debug_sandbox::run_command_under_landlock;
 pub use debug_sandbox::run_command_under_seatbelt;
 pub use debug_sandbox::run_command_under_windows_sandbox;
+pub use git_credential::GitCredentialArgs;
+pub use git_credential::run_git_credential;
 pub use login::read_access_token_from_stdin;
 pub use login::read_api_key_from_stdin;
 pub use login::run_login_status;
@@ -106,6 +109,10 @@ fn parse_absolute_path(raw: &str) -> Result<AbsolutePathBuf, String> {
 
 #[derive(Debug, Parser)]
 pub struct LandlockCommand {
+    /// Route outbound TCP through the managed SOCKS proxy.
+    #[arg(long)]
+    pub transparent_tcp: bool,
+
     #[command(flatten)]
     pub sandbox_state: SandboxStateArgs,
 

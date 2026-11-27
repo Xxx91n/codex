@@ -1,3 +1,4 @@
+use crate::agent::helper_daybreak::turn::SavedProgramResolution;
 use std::sync::Arc;
 
 use codex_async_utils::OrCancelExt;
@@ -9,6 +10,7 @@ use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
 
 use crate::client::ModelClientSession;
+use crate::session::SamplingInterrupt;
 use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::startup_prewarm::SessionStartupPrewarmResolution;
@@ -71,17 +73,8 @@ impl SessionTask for RegularTask {
         // not wait on startup prewarm resolution.
         let prewarmed_client_session = async {
             sess.emit_turn_started(&ctx, TaskKind::Regular).await;
+            sess.start_deferred_mcp_reprojection();
             // Regular-start contributors run once, after the task is visible and interruptible.
-            let prepares_mcp = sess
-                .services
-                .extensions
-                .turn_lifecycle_contributors()
-                .iter()
-                .any(|contributor| {
-                    contributor.turn_start_phase(&sess.services.thread_extension_data)
-                        == TurnStartPhase::RegularTaskStart
-                        && contributor.requires_mcp_runtime(&sess.services.thread_extension_data)
-                });
             let preparation = sess
                 .emit_turn_start_lifecycle(
                     &ctx,
@@ -90,10 +83,6 @@ impl SessionTask for RegularTask {
                 )
                 .or_cancel(&cancellation_token)
                 .await;
-            // Even cancelled discovery may have cleared the previous account's catalog.
-            if prepares_mcp {
-                sess.request_mcp_runtime_reprojection();
-            }
             if preparation.is_err() {
                 return SessionStartupPrewarmResolution::Cancelled;
             }
@@ -119,6 +108,19 @@ impl SessionTask for RegularTask {
                 Some(*prewarmed_client_session)
             }
         };
+        if let Some(resolution) = ctx.extension_data.get::<SavedProgramResolution>()
+            && let Err(error) = resolution.validate()
+        {
+            let _ = run_hooks_and_record_inputs(
+                &sess,
+                &ctx,
+                &ctx.capture_current_model_info(),
+                &input,
+                PersistContext::Standard,
+            )
+            .await;
+            return Err(error);
+        }
         Self::run_turns(
             sess,
             ctx,
@@ -148,19 +150,22 @@ impl RegularTask {
                 turn.id = %ctx.sub_id,
             );
             loop {
-                let last_agent_message = run_turn(
+                // Leave stack room for nested event persistence while the turn is polled.
+                let last_agent_message = Box::pin(run_turn(
                     Arc::clone(&sess),
                     Arc::clone(&ctx),
                     next_input,
                     &mut mcp_startup_requirements,
                     prewarmed_client_session.take(),
                     cancellation_token.child_token(),
-                )
+                ))
                 .instrument(run_turn_span.clone())
                 .await?;
-                // Terminal errors are already reported. Let task completion preserve pending
-                // input instead of restarting the failed turn for that same input.
+                // Preserve pending input for the next turn after an error, exhausted budget,
+                // or interrupt instead of reopening this turn.
                 if ctx.terminal_error.lock().await.is_some()
+                    || sess.work_budget().is_exhausted()
+                    || SamplingInterrupt::is_requested_for(&sess, &ctx).await
                     || !sess.input_queue.has_pending_input(&sess.active_turn).await
                 {
                     return Ok(Some(RegularTaskOutput {

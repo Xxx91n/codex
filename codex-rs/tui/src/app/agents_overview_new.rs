@@ -56,7 +56,7 @@ impl App {
                 Box::new(StartupDraftPump::new(
                     tui,
                     StartupDraftInitialScreen::Composer,
-                    StartupDraftSessionAction::NewFromCommandCenter,
+                    StartupDraftSessionAction::NewWhileRunning,
                 ))
             });
         let mut display_config = self.chat_widget.config_ref().clone();
@@ -114,6 +114,7 @@ impl App {
             }
             return Ok(AppRunControl::Continue);
         }
+        self.cancel_cloud_inventory_refresh(app_server).await;
         // Keep folder consent and config loading off the session-start stack frame.
         let Some((config, remote_cwd)) = Box::pin(self.agents_overview_session_config(
             tui,
@@ -167,6 +168,7 @@ impl App {
                 /*session_start_source*/ None,
                 remote_cwd.as_deref(),
                 selected_profile.as_ref(),
+                self.backend_preference_context.local_cwd.as_deref(),
             )),
         )
         .await;
@@ -220,6 +222,8 @@ impl App {
                 return Ok(AppRunControl::Continue);
             }
         }
+        self.backend_registry
+            .register_started(app_server.backend_id(), &started)?;
         self.agents_overview
             .blank_sessions
             .insert(thread_id, started.clone());

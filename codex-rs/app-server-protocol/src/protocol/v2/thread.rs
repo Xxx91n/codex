@@ -4,6 +4,7 @@ use super::AskForApproval;
 use super::SandboxMode;
 use super::SandboxPolicy;
 use super::Thread;
+use super::ThreadEnvironment;
 use super::ThreadHistoryMode;
 use super::ThreadItem;
 use super::ThreadRealtimeItem;
@@ -18,6 +19,7 @@ use super::TurnStatus;
 use super::UserInput;
 use super::shared::v2_enum_from_core;
 use crate::JsonSchema;
+use crate::RequestId;
 use crate::TS;
 use codex_experimental_api_macros::ExperimentalApi;
 pub use codex_protocol::capabilities::CapabilityRootLocation;
@@ -42,6 +44,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
@@ -242,6 +245,12 @@ pub struct ThreadSettingsUpdateParams {
     /// Override the working directory for subsequent turns.
     #[ts(optional = nullable)]
     pub cwd: Option<PathBuf>,
+    /// Replace the environments for future turns without changing the running turn.
+    /// Omitted/null preserves the selection unless `cwd` is also provided, which selects
+    /// the default environments for that directory. [] clears the selection.
+    #[experimental("thread/settings/update.environments")]
+    #[ts(optional = nullable)]
+    pub environments: Option<Vec<TurnEnvironmentParams>>,
     /// Override the approval policy for subsequent turns.
     #[experimental(nested)]
     #[ts(optional = nullable)]
@@ -306,6 +315,11 @@ pub struct ThreadSettings {
     #[serde(default)]
     pub disabled_plugin_ids: Vec<String>,
     pub cwd: AbsolutePathBuf,
+    /// Environments configured for future turns, in priority order, primary first.
+    /// `null` means the server does not expose the selection; [] means none are selected.
+    #[experimental("thread/settings.environments")]
+    #[serde(default)]
+    pub environments: Option<Vec<ThreadEnvironment>>,
     pub approval_policy: AskForApproval,
     pub approvals_reviewer: ApprovalsReviewer,
     pub sandbox_policy: SandboxPolicy,
@@ -939,6 +953,8 @@ pub struct QueuedSubmission {
     pub id: String,
     pub input: Vec<UserInput>,
     pub client_user_message_id: String,
+    /// Metadata retained with this input, including across reconnect and restoration.
+    pub responsesapi_client_metadata: Option<HashMap<String, String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -948,6 +964,9 @@ pub struct ThreadQueueAddParams {
     pub thread_id: String,
     pub input: Vec<UserInput>,
     pub client_user_message_id: String,
+    /// ResponsesAPI metadata captured from the client submitting this input.
+    #[ts(optional = nullable)]
+    pub responsesapi_client_metadata: Option<HashMap<String, String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -986,6 +1005,9 @@ pub struct ThreadQueueUpdateParams {
     pub thread_id: String,
     pub queued_submission_id: String,
     pub input: Vec<UserInput>,
+    /// Non-empty metadata replaces the input's metadata; omission or an empty map preserves it.
+    #[ts(optional = nullable)]
+    pub responsesapi_client_metadata: Option<HashMap<String, String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -1427,6 +1449,10 @@ pub struct ThreadSectionDeleteResponse {}
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ThreadListParams {
+    /// Include persistent threads attached to a parent when searching by title.
+    #[experimental("thread/list.includeAttachedThreads")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_attached_threads: bool,
     /// Show local history visible to the current ChatGPT account. Defaults to false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub current_account_only: bool,
@@ -1436,6 +1462,11 @@ pub struct ThreadListParams {
     /// Optional page size; defaults to a reasonable server-side value.
     #[ts(optional = nullable)]
     pub limit: Option<u32>,
+    /// Restrict results to up to 100 thread IDs before pagination. Omit or send null
+    /// for unrestricted results. An empty list matches nothing. Exclusions still apply.
+    /// Repeat the same IDs on each page. The local store uses indexed metadata for this filter.
+    #[ts(optional = nullable)]
+    pub included_thread_ids: Option<Vec<String>>,
     /// Thread IDs to exclude before applying the result limit. Up to 100
     /// entries; invalid IDs or a larger list are rejected, never truncated.
     /// Send the same exclusions on each page. Omitted, null, or empty means no exclusions.
@@ -1489,9 +1520,8 @@ pub struct ThreadListParams {
     /// exactly matches one of these paths are returned.
     #[ts(optional = nullable, type = "string | Array<string> | null")]
     pub cwd: Option<ThreadListCwdFilter>,
-    /// If true, return from the state DB without scanning JSONL rollouts to
-    /// repair thread metadata. Omitted or false preserves scan-and-repair
-    /// behavior.
+    /// If true, the local store returns indexed metadata without scanning JSONL rollouts
+    /// for repairs. Requests with `includedThreadIds` always use indexed metadata.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub use_state_db_only: bool,
     /// Optional substring filter for the extracted thread title.
@@ -1518,6 +1548,9 @@ pub struct ThreadListParams {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ThreadSearchParams {
+    /// Include persistent threads attached to a parent in search results.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_attached_threads: bool,
     /// Show local history visible to the current ChatGPT account. Defaults to false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub current_account_only: bool,
@@ -1541,7 +1574,8 @@ pub struct ThreadSearchParams {
     /// If false or null, only non-archived threads are returned.
     #[ts(optional = nullable)]
     pub archived: Option<bool>,
-    /// Required substring/full-text query for thread search.
+    /// Required substring/full-text query. `thread/search/stream` limits this to 65,536
+    /// UTF-8 bytes after trimming surrounding whitespace.
     pub search_term: String,
 }
 
@@ -1638,6 +1672,37 @@ pub struct ThreadSearchResponse {
     /// at the start of the page timestamp so same-second updates are not skipped.
     pub backwards_cursor: Option<String>,
 }
+
+/// A best-effort incremental batch for `thread/search/stream`. Match `requestId` to the request
+/// on this connection. Only a small subset of verified matches may be emitted; rows are unique
+/// and arrive in discovery order, but may be dropped under load or fall outside the final sorted
+/// page. Thread fields use stored metadata
+/// and the current watched status; live thread settings are enriched in the final response.
+/// Replace provisional rows with the authoritative final response. No partials follow it or an error.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSearchPartialNotification {
+    pub request_id: RequestId,
+    pub data: Vec<ThreadSearchResult>,
+}
+
+/// Request cancellation on the same connection. `thread/search/cancel` targets only
+/// `thread/search`; `thread/search/stream/cancel` targets only `thread/search/stream`.
+/// Cancellation is idempotent: the cancel response acknowledges the request, and an interrupted
+/// search completes with an error after its subprocess is stopped and reaped. If completion races
+/// cancellation, the original search may still succeed. An already-completed search is unaffected.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSearchCancelParams {
+    pub request_id: RequestId,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadSearchCancelResponse {}
 
 /// Parameters for searching visible message occurrences within one paginated thread.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -1763,6 +1828,10 @@ pub struct ThreadReadResponse {
 /// Calling `thread/guardianReview` subscribes the connection to the thread.
 /// The subscription remains after the review completes, keeping the thread loaded
 /// until the client calls `thread/unsubscribe` or disconnects.
+/// Sequential calls on the same loaded thread can reuse Guardian history across
+/// direct reviews and live approvals. The reviewer keeps a separate conversation
+/// from the actor and follows the parent thread's normal persistence settings.
+/// A retry evaluates the final call again under the current policy.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -1802,6 +1871,34 @@ pub struct ThreadInjectItemsParams {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ThreadInjectItemsResponse {}
+
+/// Prepare an approved plan for the first turn of a fresh thread.
+#[derive(Serialize, Deserialize, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadPrepareApprovedPlanParams {
+    pub thread_id: String,
+    pub markdown: String,
+    /// Absolute path to the optional app-server copy of the plan.
+    #[ts(optional = nullable)]
+    pub attachment_path: Option<String>,
+}
+
+impl fmt::Debug for ThreadPrepareApprovedPlanParams {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ThreadPrepareApprovedPlanParams")
+            .field("thread_id", &self.thread_id)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadPrepareApprovedPlanResponse {
+    /// Initial user prompt. If no attachment is readable, the plan is already in the thread's context.
+    pub prompt: String,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -1871,6 +1968,10 @@ pub struct ThreadItemOutputDeferral {
     #[experimental("thread/items/list.deferOutput.commandExecution")]
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub command_execution: bool,
+    /// Defer nonempty plain-text results from successful MCP tool calls.
+    #[experimental("thread/items/list.deferOutput.mcpToolCall")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mcp_tool_call: bool,
 }
 
 /// Starting position for an item-history page.
@@ -1901,7 +2002,7 @@ pub struct ThreadItemEntry {
     /// Turn containing this item.
     pub turn_id: String,
     pub item: ThreadItem,
-    /// The saved command output was omitted. Fetch the complete item with `thread/items/read`.
+    /// The saved output was omitted. Fetch the complete item with `thread/items/read`.
     #[experimental("thread/items/list.outputDeferred")]
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub output_deferred: bool,

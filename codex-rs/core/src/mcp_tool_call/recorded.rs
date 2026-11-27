@@ -29,13 +29,13 @@ pub(crate) async fn prepare_approval_action(
         .session
         .prepare_mcp_call(advertised_tool)
         .await
-        .ok_or_else(|| {
-            FunctionCallError::RespondToModel(
-                "the requested MCP tool is unavailable on this thread".into(),
-            )
-        })?;
+        .map_err(|err| FunctionCallError::RespondToModel(format!("{err:#}")))?;
     let mcp_invocation = McpInvocation {
-        server: advertised_tool.server_name.clone(),
+        server: advertised_tool.server_name().to_owned(),
+        environment_id: advertised_tool
+            .server_key()
+            .scoped_environment_id()
+            .map(str::to_owned),
         tool: advertised_tool.tool.name.to_string(),
         arguments,
     };
@@ -58,6 +58,7 @@ pub(crate) async fn prepare_approval_action(
         call.config(),
         call.permission_source(),
         call.server_environment_id(),
+        call.server_key(),
         policy,
     )
     .await

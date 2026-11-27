@@ -137,12 +137,22 @@ pub struct TuiGlobalKeymap {
     pub leader: Option<KeybindingsSpec>,
     /// Change where a new conversation runs.
     pub change_host: Option<KeybindingsSpec>,
+    /// Choose a saved environment for a new Cloud conversation.
+    pub choose_cloud_environment: Option<KeybindingsSpec>,
     /// Focus the main conversation composer.
     pub focus_main_composer: Option<KeybindingsSpec>,
     /// Focus the side conversation, or hide it when already focused.
     pub focus_sidebar_content: Option<KeybindingsSpec>,
+    /// Open the sidebar tab chooser.
+    pub focus_sidebar_tabs: Option<KeybindingsSpec>,
     /// Hide the focused sidebar pane.
     pub hide_pane: Option<KeybindingsSpec>,
+    /// Close the active sidebar tab.
+    pub close_sidebar_tab: Option<KeybindingsSpec>,
+    /// Switch to the previous sidebar tab.
+    pub sidebar_up: Option<KeybindingsSpec>,
+    /// Switch to the next sidebar tab.
+    pub sidebar_down: Option<KeybindingsSpec>,
     /// Focus the parent conversation.
     pub focus_pane_left: Option<KeybindingsSpec>,
     /// Focus the open side conversation.
@@ -235,6 +245,10 @@ pub struct TuiComposerKeymap {
     pub history_search_previous: Option<KeybindingsSpec>,
     /// Move to the next match in reverse history search.
     pub history_search_next: Option<KeybindingsSpec>,
+    /// Undo the last edit to the composer draft.
+    pub undo: Option<KeybindingsSpec>,
+    /// Redo an undone composer edit.
+    pub redo: Option<KeybindingsSpec>,
 }
 
 /// Editor context keybindings for text editing inside text areas.
@@ -474,6 +488,8 @@ pub struct TuiPagerKeymap {
     pub close_transcript: Option<KeybindingsSpec>,
     /// Find text in a transcript pager.
     pub find: Option<KeybindingsSpec>,
+    /// Mark Markdown structure under the caret in transcript selection mode.
+    pub mark_markdown: Option<KeybindingsSpec>,
 }
 
 /// List selection context keybindings for popup-style selectable lists.

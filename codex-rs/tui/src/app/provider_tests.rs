@@ -11,9 +11,12 @@ use crate::config_panel::ResumeCurrentAvailability;
 use crate::model_catalog::ModelCatalog;
 use crate::tui::TuiEvent;
 use crate::tui::test_support::make_test_tui;
+use codex_app_server_client::TypedRequestError;
 use codex_protocol::ThreadId;
 use color_eyre::eyre::Result;
 use crossterm::event::KeyCode;
+use crossterm::event::KeyEvent;
+use crossterm::event::KeyModifiers;
 use pretty_assertions::assert_eq;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -202,7 +205,11 @@ async fn space_saves_once_retries_and_preserves_the_current_chat() -> Result<()>
         next_provider_event(&mut events).await,
     );
     // The spawned RPC cannot run until this current-thread test yields.
-    write::start(&mut app, &server, "openai".into());
+    write::Write::Default {
+        id: "openai".into(),
+        name: "OpenAI".into(),
+    }
+    .start(&mut app, &server);
     assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
         matches!(event, AppEvent::InsertHistoryCell(cell) if cell.display_lines(/*width*/ 100)[0]
             .to_string().contains("A provider change is already saving."))
@@ -251,6 +258,7 @@ async fn space_saves_once_retries_and_preserves_the_current_chat() -> Result<()>
 
     // Switch back, then dismiss the picker before the save result is delivered.
     app.chat_widget.handle_key_event(KeyCode::End.into());
+    app.chat_widget.handle_key_event(KeyCode::Up.into());
     app.chat_widget.handle_key_event(KeyCode::Char(' ').into());
     handle(
         &mut app,
@@ -271,8 +279,8 @@ async fn space_saves_once_retries_and_preserves_the_current_chat() -> Result<()>
             _ => None,
         })
         .last()
-        .expect("restart hint in history");
-    insta::assert_snapshot!(cell.display_lines(/*width*/ 160)[0].to_string(), @"• /new now uses openai. Restart the app server and TUI to refresh /model.");
+        .expect("provider selection in history");
+    insta::assert_snapshot!(cell.display_lines(/*width*/ 160)[0].to_string(), @"• New chats now use OpenAI.");
     server.shutdown().await?;
     Ok(())
 }
@@ -293,11 +301,17 @@ async fn only_ambiguous_write_failures_invalidate_the_model_catalog() {
     })));
     let disconnected = Err(std::io::Error::other("connection lost"));
     let unreadable = Ok(Ok(serde_json::Value::Null));
-    for (reply, stale) in [
-        (rejected, false),
-        (overridden, false),
-        (disconnected, true),
-        (unreadable, true),
+    let unknown_method = Ok(Err(JSONRPCErrorError {
+        code: -32600,
+        message: "Invalid request: unknown variant `modelProvider/default/set`".into(),
+        data: None,
+    }));
+    for (reply, stale, upgrade) in [
+        (rejected, false, false),
+        (overridden, false, false),
+        (disconnected, true, false),
+        (unreadable, true, false),
+        (unknown_method, false, true),
     ] {
         let (mut app, mut events, _ops) = make_test_app_with_channels().await;
         let (client, mut commands, _server_events) = CloudClient::channel(/*capacity*/ 1);
@@ -312,16 +326,31 @@ async fn only_ambiguous_write_failures_invalidate_the_model_catalog() {
             items: vec![back()],
             ..Default::default()
         });
-        write::start(&mut app, &server, "gateway".into());
+        write::Write::Default {
+            id: "gateway".into(),
+            name: "Example Gateway".into(),
+        }
+        .start(&mut app, &server);
         let command = commands.recv().await.expect("config write");
+        let codex_app_server_client::CloudOperation::Request(request) = command.operation else {
+            panic!("expected a provider selection request");
+        };
+        assert!(
+            matches!(*request, codex_app_server_protocol::ClientRequest::ModelProviderDefaultSet { params, .. }
+            if params.provider_id == "gateway")
+        );
         command
             .response
             .send(reply)
             .expect("write is awaiting a response");
-        assert!(matches!(
-            next_provider_event(&mut events).await,
-            Event::Written(_)
-        ));
+        let written = next_provider_event(&mut events).await;
+        assert!(matches!(written, Event::Written(_)));
+        if upgrade {
+            handle(&mut app, &mut make_test_tui().unwrap(), &server, written);
+            assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
+                matches!(event, AppEvent::InsertHistoryCell(cell) if cell.display_lines(/*width*/ 120)[0].to_string().contains("Update the connected app server to change the default model provider."))
+            }));
+        }
         let reconnected =
             ModelCatalog::new(Vec::new()).for_backend(backend, &mut app.provider_writes);
         assert_eq!(reconnected.provider_may_have_changed(), stale);
@@ -346,7 +375,7 @@ fn unsupported_list_method_explains_server_compatibility() {
             },
         };
         assert_eq!(
-            request_error(error),
+            rpc::request_error(error),
             "Update the connected app server to browse model providers."
         );
     }
@@ -388,6 +417,98 @@ async fn list_opened_before_first_attachment_shows_the_attached_provider() -> Re
         next_provider_event(&mut events).await,
     );
     assert!(render_bottom_popup(&app.chat_widget, /*width*/ 100).contains("Current chat: ollama"));
+    server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn adding_a_custom_provider_saves_to_the_server_and_preserves_the_default() -> Result<()> {
+    let (mut app, mut events, _ops) = make_test_app_with_channels().await;
+    let mut tui = make_test_tui()?;
+    std::fs::write(
+        app.config.codex_home.join("config.toml"),
+        r#"model_providers.seed = { name = "Existing", env_key = "CATALOG_KEY" }"#,
+    )?;
+    let mut server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+    let (view, load) = loading();
+    app.chat_widget.show_selection_view(view);
+    handle(&mut app, &mut tui, &server, load);
+    handle(
+        &mut app,
+        &mut tui,
+        &server,
+        next_provider_event(&mut events).await,
+    );
+    // Open the existing gateway's scrollable details and enter its editor.
+    app.chat_widget.handle_key_event(KeyCode::End.into());
+    app.chat_widget.handle_key_event(KeyCode::Up.into());
+    app.chat_widget.handle_key_event(KeyCode::Enter.into());
+    handle(
+        &mut app,
+        &mut tui,
+        &server,
+        next_provider_event(&mut events).await,
+    );
+    let Some(Overlay::Static(pager)) = &mut app.overlay else {
+        panic!("expected provider details pager");
+    };
+    let mut terminal = Terminal::new(TestBackend::new(/*width*/ 72, /*height*/ 12))?;
+    terminal.draw(|frame| pager.render(frame.area(), frame.buffer_mut()))?;
+    insta::assert_snapshot!("editable_provider_details", terminal.backend());
+    app.handle_backtrack_overlay_event(&mut tui, &mut server, TuiEvent::Key(KeyCode::Enter.into()))
+        .await?;
+    handle(
+        &mut app,
+        &mut tui,
+        &server,
+        next_provider_event(&mut events).await,
+    );
+    assert!(app.chat_widget.active_view_is(editor::VIEW_ID));
+    assert!(render_bottom_popup(&app.chat_widget, /*width*/ 72).contains("Existing"));
+    app.chat_widget.handle_key_event(KeyCode::Esc.into());
+
+    app.chat_widget.handle_key_event(KeyCode::End.into());
+    app.chat_widget.handle_key_event(KeyCode::Enter.into());
+    handle(
+        &mut app,
+        &mut tui,
+        &server,
+        next_provider_event(&mut events).await,
+    );
+    let chat = &mut app.chat_widget;
+    insta::assert_snapshot!(render_bottom_popup(chat, /*width*/ 72), @r"
+    Create a custom provider or gateway
+
+    › Name*  Team gateway
+      Base URL*  https://gateway.example/v1
+      API key variable  $TEAM_API_KEY
+      Save
+
+    * Required
+    Enter the environment variable name on the app server.
+    tab move · enter next/save · esc back
+    ");
+    for value in ["Team gateway", "https://gateway.example.test/v1"] {
+        chat.handle_paste(value.into());
+        chat.handle_key_event(KeyCode::Enter.into());
+    }
+    chat.handle_paste("CAT".into());
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+    assert!(render_bottom_popup(chat, /*width*/ 19).contains("$CATALOG_KEY"));
+    chat.handle_key_event(KeyCode::Tab.into());
+    chat.handle_key_event(KeyCode::Enter.into());
+    // Process the write, its completion, and the subsequent catalog reload.
+    for _ in 0..4 {
+        handle(
+            &mut app,
+            &mut tui,
+            &server,
+            next_provider_event(&mut events).await,
+        );
+    }
+    let list = render_bottom_popup(&app.chat_widget, /*width*/ 100);
+    assert!(list.contains("Team gateway"));
+    assert!(list.contains("Default for new chats: openai"));
     server.shutdown().await?;
     Ok(())
 }

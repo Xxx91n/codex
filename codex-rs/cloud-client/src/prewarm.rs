@@ -6,6 +6,31 @@ use bytes::Bytes;
 use bytes::BytesMut;
 use prost::Message;
 
+/// A local project's GitHub origins to provision in the default cloud environment.
+/// Callers must supply credential-free origin URLs; this client does not inspect local Git state.
+#[derive(Clone)]
+pub struct ProjectEnvironment {
+    pub name: String,
+    pub origin_urls: Vec<String>,
+    /// Working directory inside the managed environment, when a project selects one.
+    pub cwd: Option<String>,
+}
+
+/// An explicit saved environment or the default environment with a project checkout.
+#[derive(Clone, Debug)]
+pub enum EnvironmentSelection {
+    Saved(String),
+    Project(ProjectEnvironment),
+}
+
+pub(super) const DEFAULT_ENVIRONMENT_CONFIG_ID: &str = "asenvcfg_base";
+
+impl std::fmt::Debug for ProjectEnvironment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProjectEnvironment([redacted])")
+    }
+}
+
 impl Client {
     /// Prewarm an ordinary coding thread in the default managed environment.
     /// The service makes it discoverable when it admits the first user message.
@@ -17,14 +42,56 @@ impl Client {
         model: Option<String>,
         model_provider: Option<String>,
     ) -> Result<crate::ThreadActivation, Error> {
+        self.prewarm_thread(model, model_provider, /*environment*/ None)
+            .await
+    }
+
+    /// Prewarm a coding thread, deferring executor readiness for an explicit environment.
+    pub async fn prewarm_thread(
+        &self,
+        model: Option<String>,
+        model_provider: Option<String>,
+        environment: Option<EnvironmentSelection>,
+    ) -> Result<crate::ThreadActivation, Error> {
+        let deferred_environment = environment.is_some().then_some(true);
+        let managed = match environment {
+            Some(EnvironmentSelection::Saved(id)) => wire::ManagedEnvironment {
+                environment_config_id: Some(id),
+                ..Default::default()
+            },
+            Some(EnvironmentSelection::Project(ProjectEnvironment {
+                name,
+                origin_urls,
+                cwd,
+            })) => wire::ManagedEnvironment {
+                environment_config_id: Some(DEFAULT_ENVIRONMENT_CONFIG_ID.to_owned()),
+                cwd,
+                overrides: Some(wire::EnvironmentOverrides {
+                    repositories: Some(wire::RepositoryOverrides {
+                        values: origin_urls
+                            .into_iter()
+                            .map(|origin_url| wire::RepositoryOverride {
+                                origin_url: Some(origin_url),
+                            })
+                            .collect(),
+                    }),
+                    name: Some(name),
+                }),
+            },
+            None => wire::ManagedEnvironment::default(),
+        };
         let response = self
             .raw_unary(
                 wire::PrewarmRequest {
                     model,
                     model_provider,
+                    plugins_mcp: Some(wire::PluginsMcp {
+                        product_sku: Some("codex".to_owned()),
+                    }),
+                    deferred_environment,
                     environments: Some(wire::EnvironmentList {
                         values: vec![wire::EnvironmentSelection {
-                            managed: Some(wire::ManagedEnvironment {}),
+                            managed: Some(managed),
                         }],
                     }),
                 },
@@ -67,6 +134,15 @@ mod wire {
         pub model: Option<String>,
         #[prost(string, optional, tag = "16")]
         pub model_provider: Option<String>,
+        #[prost(message, optional, tag = "28")]
+        pub plugins_mcp: Option<PluginsMcp>,
+        #[prost(bool, optional, tag = "29")]
+        pub deferred_environment: Option<bool>,
+    }
+    #[derive(Clone, Message)]
+    pub(super) struct PluginsMcp {
+        #[prost(string, optional, tag = "1")]
+        pub product_sku: Option<String>,
     }
     #[derive(Clone, Message)]
     pub(super) struct EnvironmentList {
@@ -79,7 +155,31 @@ mod wire {
         pub managed: Option<ManagedEnvironment>,
     }
     #[derive(Clone, Message)]
-    pub(super) struct ManagedEnvironment {}
+    pub(super) struct ManagedEnvironment {
+        #[prost(string, optional, tag = "1")]
+        pub environment_config_id: Option<String>,
+        #[prost(string, optional, tag = "2")]
+        pub cwd: Option<String>,
+        #[prost(message, optional, tag = "3")]
+        pub overrides: Option<EnvironmentOverrides>,
+    }
+    #[derive(Clone, Message)]
+    pub(super) struct EnvironmentOverrides {
+        #[prost(message, optional, tag = "1")]
+        pub repositories: Option<RepositoryOverrides>,
+        #[prost(string, optional, tag = "2")]
+        pub name: Option<String>,
+    }
+    #[derive(Clone, Message)]
+    pub(super) struct RepositoryOverrides {
+        #[prost(message, repeated, tag = "1")]
+        pub values: Vec<RepositoryOverride>,
+    }
+    #[derive(Clone, Message)]
+    pub(super) struct RepositoryOverride {
+        #[prost(string, optional, tag = "5")]
+        pub origin_url: Option<String>,
+    }
     #[derive(Clone, Message)]
     pub(super) struct PrewarmResponse {
         #[prost(message, optional, tag = "1")]

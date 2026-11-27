@@ -26,24 +26,28 @@ pub use bwrap::system_bwrap_warning;
 pub use codex_mxc_sandbox::CODEX_WINDOWS_MXC_ARG1;
 pub use codex_mxc_sandbox::is_available as windows_mxc_available;
 pub use codex_mxc_sandbox::run_main as run_windows_mxc_main;
+pub use codex_protocol::permissions::compatibility_sandbox_policy_for_permission_profile;
 pub use codex_windows_sandbox::WindowsSandboxProxySettingsMode;
 pub use denial::is_likely_executor_managed_sandbox_denied;
 pub use denial::is_likely_sandbox_denied;
 pub use linux_pid_namespace::LinuxSandboxPidNamespace;
 pub use manager::SandboxCommand;
-pub use manager::SandboxDirectSpawnTransformRequest;
 pub use manager::SandboxExecRequest;
 pub use manager::SandboxManager;
+pub use manager::SandboxNetwork;
+pub use manager::SandboxSelection;
 pub use manager::SandboxTransformError;
 pub use manager::SandboxTransformRequest;
 pub use manager::SandboxType;
 pub use manager::SandboxablePreference;
-pub use manager::compatibility_sandbox_policy_for_permission_profile;
 pub use manager::get_platform_sandbox;
+pub use manager::launch::WrappedSandboxCommand;
 pub use manager::with_managed_mitm_ca_readable_root;
 pub use sandbox_integrity::FileContentsChecker;
 pub use sandbox_integrity::IntegrityFinding;
 pub use sandbox_integrity::IntegrityFindingDetails;
+pub use sandbox_integrity::SandboxIntegrityRequest;
+pub use spawn::SpawnOptions;
 pub use spawn::SpawnRequest;
 pub use spawn::WindowsSandboxSpawnRequest;
 pub use spawn::spawn_process;
@@ -59,7 +63,6 @@ pub use windows::WindowsSandboxFilesystemOverrides;
 pub use windows::permission_profile_supports_windows_restricted_token_sandbox;
 pub use windows::resolve_windows_elevated_filesystem_overrides;
 pub use windows::resolve_windows_restricted_token_filesystem_overrides;
-pub use windows::unsupported_windows_restricted_token_sandbox_reason;
 pub use windows::windows_sandbox_uses_elevated_backend;
 
 use codex_protocol::error::CodexErr;
@@ -79,6 +82,9 @@ impl From<SandboxTransformError> for CodexErr {
             | error @ SandboxTransformError::InvalidCommandCwd { .. }
             | error @ SandboxTransformError::InvalidSandboxPolicyCwd { .. } => {
                 CodexErr::InvalidRequest(error.to_string())
+            }
+            error @ SandboxTransformError::SandboxUnavailable => {
+                CodexErr::UnsupportedOperation(error.to_string())
             }
             SandboxTransformError::MissingLinuxSandboxExecutable => {
                 CodexErr::LandlockSandboxExecutableNotProvided

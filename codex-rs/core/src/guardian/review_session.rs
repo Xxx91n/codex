@@ -5,7 +5,6 @@
 #[path = "review_session_setup.rs"]
 mod setup;
 pub use setup::PreparedGuardianContext;
-pub(super) use setup::prepare_review;
 pub use setup::prepare_review_prewarm;
 pub(crate) use setup::run_guardian_review_session;
 
@@ -279,7 +278,19 @@ async fn run_review_on_session(
     match run_before_review_deadline(
         deadline,
         params.external_cancel.as_ref(),
-        Box::pin(ensure_guardian_node_repl_policy(review_session, params)),
+        Box::pin(async {
+            review_session
+                .session
+                .update_settings(crate::session::session::SessionSettingsUpdate {
+                    step_settings: crate::session::step_settings::StepSettingsUpdate {
+                        request_country: Some(params.parent_context.request_country.clone()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .await?;
+            ensure_guardian_node_repl_policy(review_session, params).await
+        }),
     )
     .await
     {
@@ -588,7 +599,12 @@ async fn run_review_on_session(
         personality: params.personality,
         model: review_model.model.clone(),
         reasoning_effort: review_model.reasoning_effort.clone(),
-        cyber_access_program: parent_turn.cyber_access_program,
+        cyber_access_program: parent_turn.cyber_access_program.filter(|_| {
+            crate::RequiredCyberAccessPrograms::for_thread(
+                &params.parent_session.services.thread_extension_data,
+            )
+            .is_none()
+        }),
         parent_response_id: params
             .parent_context
             .parent_response
@@ -820,7 +836,10 @@ impl codex_guardian_reviewer::ReviewerRuntime for GuardianReviewSession {
     async fn submit_turn(&self, request: TurnInputRequest) -> anyhow::Result<TurnInputSubmission> {
         Ok(self
             .io
-            .submit_turn_input(request, TurnInputMode::StartIfIdle)
+            .submit_turn_input(
+                crate::codex_thread::resolve_client_turn_input(request).await?,
+                TurnInputMode::StartIfIdle,
+            )
             .await?)
     }
 

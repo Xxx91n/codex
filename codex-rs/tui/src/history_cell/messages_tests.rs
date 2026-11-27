@@ -4,6 +4,50 @@ use assert_matches::assert_matches;
 use pretty_assertions::assert_eq;
 
 #[test]
+fn typed_prompt_markdown_keeps_the_prompt_gutter_and_links() {
+    let message = "**testing** _hello_ [example documentation](https://example.test/docs)\n\n- Try the command\n\n```sh\necho '*literal*'\n```";
+    let cell = new_user_prompt(message.into(), Vec::new(), Vec::new(), Vec::new());
+
+    let mut snapshots = Vec::new();
+    for width in [64, 20] {
+        let lines = cell.display_hyperlink_lines(width);
+        assert_eq!(lines, cell.transcript_hyperlink_lines(width));
+        assert!(lines.iter().all(|line| line.width() < usize::from(width)));
+        for (text, modifier) in [("testing", Modifier::BOLD), ("hello", Modifier::ITALIC)] {
+            assert!(lines.iter().flat_map(|line| &line.line.spans).any(|span| {
+                span.content == text && span.style.add_modifier.contains(modifier)
+            }));
+        }
+        let linked_text = lines
+            .iter()
+            .flat_map(|line| {
+                line.hyperlinks
+                    .iter()
+                    .filter(|link| link.destination == "https://example.test/docs")
+                    .flat_map(|link| {
+                        line.line
+                            .to_string()
+                            .chars()
+                            .skip(link.columns.start)
+                            .take(link.columns.len())
+                            .collect::<Vec<_>>()
+                    })
+            })
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>();
+        assert_eq!(linked_text, "exampledocumentationhttps://example.test/docs");
+        let rendered = ratatui::text::Text::from(visible_lines(lines)).to_string();
+        let rendered = rendered
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n");
+        snapshots.push(format!("width {width}\n{rendered}"));
+    }
+    insta::assert_snapshot!(snapshots.join("\n\n"));
+}
+
+#[test]
 fn user_prompt_urls_keep_destinations_across_widths() {
     let url = "https://example.test/terminal-link-wrapping/solid-octants";
     let placeholder = "[Image #1]";
@@ -77,7 +121,7 @@ fn local_image_only_user_message_remains_visible() {
 fn mixed_image_labels_preserve_existing_placeholders_without_duplicates() {
     let placeholder = "[Image #2]";
     let cell = new_user_prompt(
-        format!("{placeholder} compare these"),
+        format!("{placeholder} **compare** these"),
         vec![TextElement::new(
             (0..placeholder.len()).into(),
             Some(placeholder.to_string()),
@@ -166,11 +210,12 @@ fn spoken_user_messages_have_a_red_chevron_without_changing_raw_text() {
             .iter()
             .any(|line| line.to_string() == "› hello from voice")
     );
+    assert_eq!(typed.raw_lines(), vec![Line::from(message)]);
     assert!(
         typed
             .display_lines(/*width*/ 40)
             .iter()
-            .any(|line| { line.to_string() == "›   hello from voice" })
+            .any(|line| line.to_string() == "›   hello from voice")
     );
     assert_eq!(marker.style.fg, Some(Color::Red));
     assert!(marker.style.add_modifier.contains(Modifier::BOLD));
@@ -357,6 +402,20 @@ fn spoken_artifacts_link_only_real_workspace_files_and_preserve_existing_urls() 
     assert_eq!(
         ordinary.display_hyperlink_lines(/*width*/ 90)[0].hyperlinks[0].destination,
         "https://example.com"
+    );
+    let report = workspace.path().join("report.md");
+    std::fs::write(&report, "# Report").expect("report file");
+    let linked = AgentMarkdownCell::new_spoken("[Report](report.md)".into(), workspace.path());
+    let expected = url::Url::from_file_path(report.canonicalize().expect("canonical report"))
+        .expect("workspace file URL")
+        .to_string();
+    assert_eq!(
+        linked.display_hyperlink_lines(/*width*/ 90)[0]
+            .hyperlinks
+            .iter()
+            .filter_map(crate::terminal_hyperlinks::TerminalHyperlink::terminal_destination)
+            .collect::<Vec<_>>(),
+        vec![expected],
     );
     let bare = AgentMarkdownCell::new_spoken("src/lib.rs".to_string(), workspace.path());
     assert_eq!(

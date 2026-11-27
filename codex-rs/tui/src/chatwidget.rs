@@ -52,7 +52,6 @@ use crate::bottom_pane::StatusLineSetupView;
 use crate::bottom_pane::StatusSurfacePreviewData;
 use crate::bottom_pane::StatusSurfacePreviewItem;
 use crate::bottom_pane::TerminalTitleItem;
-use crate::bottom_pane::TerminalTitleSetupView;
 use crate::diff_model::FileChange;
 use crate::git_action_directives::parse_assistant_markdown;
 use crate::legacy_core::config::Config;
@@ -286,6 +285,7 @@ mod reconnect;
 use self::input_queue::InputQueueState;
 mod image_submission;
 mod input_flow;
+mod input_receipts;
 mod input_restore;
 mod input_submission;
 mod interrupts;
@@ -304,6 +304,7 @@ mod session_flow;
 mod session_header;
 use self::session_header::SessionHeader;
 mod clipboard;
+pub(crate) use clipboard::ClipboardPasteContext;
 mod copy_picker;
 mod hook_lifecycle;
 mod hooks;
@@ -374,9 +375,13 @@ pub(crate) use realtime::realtime_delegation_input;
 pub(crate) use realtime::tests::activate_voice_for_thread;
 #[cfg(test)]
 pub(crate) use realtime::tests::commit_realtime_history_events;
+#[cfg(test)]
+pub(crate) use realtime::tests::start_voice_attempt_for_test;
 mod reasoning_shortcuts;
 use self::realtime::RealtimeConversationUiState;
+mod read_only;
 mod rendering;
+pub(crate) use read_only::ReadOnlyThread;
 mod replay;
 mod review;
 mod review_popups;
@@ -396,6 +401,10 @@ use self::status_state::TerminalTitleStatusKind;
 mod status_controls;
 mod status_surface_commands;
 mod status_surfaces;
+mod statusline_reader;
+pub(crate) use statusline_reader::StatuslineReadEvent;
+
+pub(crate) mod statusline_state;
 use self::status_surface_commands::StatusSurfaceOverrides;
 mod streaming;
 use self::status_surfaces::CachedProjectRootName;
@@ -548,6 +557,11 @@ pub(crate) struct ChatWidget {
     has_codex_backend_auth: bool,
     model_catalog: Arc<ModelCatalog>,
     model_popup_request_id: Option<uuid::Uuid>,
+    /// Cloud settings accepted for future turns. Serving model metadata comes from the session.
+    pub(crate) cloud_picker_selection:
+        Option<crate::app_server_session::user_message_submission::CloudModelSelection>,
+    pub(crate) pending_cloud_turn_settings:
+        Option<crate::app_server_session::user_message_submission::PendingCloudTurnSettings>,
     /// An app event has been queued to open the permissions picker, but no view exists yet.
     pub(crate) permission_popup_pending: bool,
     permission_popup_request_id: Option<uuid::Uuid>,
@@ -562,8 +576,11 @@ pub(crate) struct ChatWidget {
     pub(crate) initial_user_message: Option<UserMessage>,
     status_account_display: Option<StatusAccountDisplay>,
     pub(crate) remote_connection: Option<RemoteConnectionStatus>,
+    statusline_read: Option<statusline_reader::ActiveStatuslineRead>,
+    pub(crate) statusline_disconnected: bool,
     /// Remote app servers cannot read image paths on the TUI host.
     pub(crate) snapshot_local_images: bool,
+    pub(crate) thread_params_mode: crate::app_server_session::ThreadParamsMode,
     pending_image_submission: Option<image_submission::PendingImageSubmission>,
     pub(crate) local_worktree_operations: bool,
     pub(crate) windows_sandbox_local_server: bool,
@@ -575,6 +592,7 @@ pub(crate) struct ChatWidget {
     token_usage_pending: bool,
     // Status and polling use account usage reads; response streams may identify meters differently.
     rate_limit_snapshots_by_limit_id: BTreeMap<String, RateLimitSnapshotDisplay>,
+    inherited_quota_provider: Option<String>,
     refreshing_status_outputs: Vec<(u64, StatusHistoryHandle)>,
     next_status_refresh_request_id: u64,
     pending_rate_limit_reset_request_id: Option<u64>,
@@ -585,6 +603,8 @@ pub(crate) struct ChatWidget {
     pending_rate_limit_reset_hint: Option<PlainHistoryCell>,
     available_rate_limit_reset_credits: Option<i64>,
     next_rate_limit_reset_request_id: u64,
+    pub(crate) account_plan: Option<PlanType>,
+    quota_plan: Option<PlanType>,
     plan_type: Option<PlanType>,
     codex_rate_limit_reached_type: Option<RateLimitReachedType>,
     codex_spend_control_reached: Option<bool>,
@@ -633,23 +653,11 @@ pub(crate) struct ChatWidget {
     unified_exec_processes: Vec<UnifiedExecProcessSummary>,
     /// Exits observed during the pending list request take precedence over its response.
     pending_terminal_restore: Option<(uuid::Uuid, HashSet<String>)>,
-    /// Tracks per-server MCP startup state while startup is in progress.
-    ///
-    /// The map is `Some(_)` from the first startup status update until the
-    /// app-server-backed startup round settles, and the bottom pane is treated
-    /// as "running" while this is populated, even if no agent turn is currently
-    /// executing.
-    mcp_startup_status: Option<HashMap<String, McpStartupStatus>>,
-    /// Expected MCP servers for the current startup round, seeded from enabled local config.
-    mcp_startup_expected_servers: Option<HashSet<String>>,
-    /// After startup settles, ignore stale updates until enough notifications confirm a new round.
-    mcp_startup_ignore_updates_until_next_start: bool,
-    /// A lag signal for the next round means terminal-only updates are enough to settle it.
-    mcp_startup_allow_terminal_only_next_round: bool,
-    /// Buffers post-settle MCP startup updates until they cover a full fresh round.
-    mcp_startup_pending_next_round: HashMap<String, McpStartupStatus>,
-    /// Tracks whether the buffered next round has seen any `Starting` update yet.
-    mcp_startup_pending_next_round_saw_starting: bool,
+    /// Latest status per (server name, environment ID) in the active startup round. Its presence keeps
+    /// the composer busy, and its terminal outcomes determine the round's summary.
+    mcp_startup_status: Option<HashMap<(String, Option<String>), McpStartupStatus>>,
+    /// Last diagnostic per server, so replayed terminal updates are only reported once.
+    mcp_startup_last_diagnostics: HashMap<(String, Option<String>), McpStartupStatus>,
     connectors: ConnectorsState,
     ide_context: IdeContextState,
     plugins_cache: PluginsCacheState,
@@ -690,7 +698,9 @@ pub(crate) struct ChatWidget {
     thread_rename_block_message: Option<String>,
     active_side_conversation: bool,
     blocks_direct_input: bool,
-    external_writer_view: bool,
+    read_only_thread: Option<ReadOnlyThread>,
+    read_only_history: bool,
+    thread_settings_confirmed: bool,
     provider_error: Option<codex_app_server_protocol::ModelProviderError>,
     /// Covers both queued and executing forks so repeated shortcuts cannot queue another one.
     pub(crate) fork_in_progress: bool,
@@ -712,11 +722,14 @@ pub(crate) struct ChatWidget {
     // order.
     suppress_initial_user_message_submit: bool,
     input_queue: InputQueueState,
+    /// Hold this conversation's queued input until its reply stream is usable.
+    pub(crate) thread_stream_disconnected: bool,
     safety_buffering_prompt: Option<UserMessage>,
     safety_buffering_source: UserMessageSource,
     /// Main chat-surface bindings resolved from `tui.keymap.chat`.
     chat_keymap: ChatKeymap,
     new_backend_label: Option<String>,
+    cloud_environment_name: Option<String>,
     /// Whether the preset submenu owns the next key.
     quick_dial_menu: bool,
     /// Ignore a held key after it dismisses the preset submenu.
@@ -741,6 +754,7 @@ pub(crate) struct ChatWidget {
     current_rollout_path: Option<PathBuf>,
     // Current working directory (if known)
     current_cwd: Option<PathBuf>,
+    primary_environment_cwd: Option<crate::session_state::EnvironmentCwd>,
     // App-server-backed command runner for status-line workspace metadata lookups.
     workspace_command_runner: Option<WorkspaceCommandRunner>,
     // Instruction source files loaded for the current session, supplied by app-server.
@@ -790,9 +804,7 @@ pub(crate) struct ChatWidget {
     // Cached workspace notification headline for the status line.
     status_line_workspace_headline: Option<String>,
     // Request ID for the async workspace headline fetch currently in flight.
-    status_line_workspace_headline_pending_request_id: Option<u64>,
-    // Request ID to assign to the next workspace headline fetch.
-    next_status_line_workspace_headline_request_id: u64,
+    status_line_workspace_headline_pending_request_id: Option<uuid::Uuid>,
     // Last time a workspace headline fetch was requested.
     status_line_workspace_headline_last_requested_at: Option<Instant>,
     // Set after the backend reports the workspace-message feature gate is disabled.
@@ -949,20 +961,8 @@ fn request_permissions_from_params(
 
 fn token_usage_info_from_app_server(token_usage: ThreadTokenUsage) -> TokenUsageInfo {
     TokenUsageInfo {
-        total_token_usage: TokenUsage {
-            total_tokens: token_usage.total.total_tokens,
-            input_tokens: token_usage.total.input_tokens,
-            cached_input_tokens: token_usage.total.cached_input_tokens,
-            output_tokens: token_usage.total.output_tokens,
-            reasoning_output_tokens: token_usage.total.reasoning_output_tokens,
-        },
-        last_token_usage: TokenUsage {
-            total_tokens: token_usage.last.total_tokens,
-            input_tokens: token_usage.last.input_tokens,
-            cached_input_tokens: token_usage.last.cached_input_tokens,
-            output_tokens: token_usage.last.output_tokens,
-            reasoning_output_tokens: token_usage.last.reasoning_output_tokens,
-        },
+        total_token_usage: token_usage.total.into(),
+        last_token_usage: token_usage.last.into(),
         model_context_window: token_usage.model_context_window,
     }
 }
@@ -1003,18 +1003,36 @@ impl ChatWidget {
         }
     }
 
+    pub(crate) fn open_feedback(&mut self, mode: crate::ThreadParamsMode) {
+        use crate::ThreadParamsMode;
+        let unavailable = match mode {
+            ThreadParamsMode::Cloud => "Feedback is unavailable in Cloud threads.",
+            ThreadParamsMode::Remote if !self.config.feedback_enabled => {
+                "Feedback uploads are disabled, and saving a ZIP requires a local app server."
+            }
+            _ => {
+                return self.show_selection_view(crate::bottom_pane::feedback_selection_params(
+                    self.app_event_tx.clone(),
+                ));
+            }
+        };
+        self.add_info_message(unavailable.to_string(), /*hint*/ None);
+    }
+
     pub(crate) fn open_feedback_note(
         &mut self,
         category: crate::app_event::FeedbackCategory,
         include_logs: bool,
         feedback_audience: crate::bottom_pane::FeedbackAudience,
+        can_save: bool,
     ) {
         let view = crate::bottom_pane::FeedbackNoteView::new(
             category,
             self.turn_lifecycle.last_turn_id.clone(),
             self.app_event_tx.clone(),
             include_logs,
-            feedback_audience,
+            self.config.feedback_enabled.then_some(feedback_audience),
+            can_save,
         );
         self.bottom_pane.show_view(Box::new(view));
         self.request_redraw();
@@ -1056,7 +1074,11 @@ impl ChatWidget {
         }
     }
 
-    pub(crate) fn open_feedback_consent(&mut self, category: crate::app_event::FeedbackCategory) {
+    pub(crate) fn open_feedback_consent(
+        &mut self,
+        category: crate::app_event::FeedbackCategory,
+        can_save: bool,
+    ) {
         let snapshot = self.feedback.snapshot(self.thread_id);
         #[cfg(target_os = "windows")]
         let include_windows_sandbox_log =
@@ -1066,13 +1088,14 @@ impl ChatWidget {
             .is_file();
         #[cfg(not(target_os = "windows"))]
         let include_windows_sandbox_log = false;
-        let params = crate::bottom_pane::feedback_upload_consent_params(
+        let params = crate::bottom_pane::feedback_consent_params(
             self.app_event_tx.clone(),
             category,
             self.current_rollout_path.clone(),
             self.thread_id
                 .map(|thread_id| format!("auto-review-rollout-{thread_id}.jsonl")),
             include_windows_sandbox_log,
+            can_save,
             snapshot.feedback_diagnostics(),
         );
         self.bottom_pane.show_selection_view(params);
@@ -1139,13 +1162,17 @@ impl ChatWidget {
         self.config.memories.generate_memories = generate_memories;
     }
 
+    fn sync_context_window_visibility(&mut self) {
+        self.bottom_pane
+            .set_context_window_hidden(self.read_only_history || self.token_usage_pending);
+    }
+
     pub(crate) fn set_token_info(&mut self, info: Option<TokenUsageInfo>) {
         match info {
             Some(info) => self.apply_token_info(info),
             None => {
                 self.token_usage_pending = true;
-                self.bottom_pane
-                    .set_context_window_pending(/*pending*/ true);
+                self.sync_context_window_visibility();
                 self.bottom_pane
                     .set_context_window(/*percent*/ None, /*used_tokens*/ None);
                 self.token_info = None;
@@ -1155,8 +1182,7 @@ impl ChatWidget {
 
     fn apply_token_info(&mut self, info: TokenUsageInfo) {
         self.token_usage_pending = false;
-        self.bottom_pane
-            .set_context_window_pending(/*pending*/ false);
+        self.sync_context_window_visibility();
         let percent = self.context_remaining_percent(&info);
         let used_tokens = self.context_used_tokens(&info, percent.is_some());
         self.bottom_pane.set_context_window(percent, used_tokens);
@@ -1198,6 +1224,7 @@ impl ChatWidget {
     pub(crate) fn pre_draw_tick(&mut self) {
         self.update_due_hook_visibility();
         self.schedule_hook_timer_if_needed();
+        self.tick_rate_limit_recovery_prompt(Instant::now());
         self.bottom_pane.pre_draw_tick();
         self.flush_realtime_transcript_history();
         self.refresh_realtime_microphone_level();
@@ -1370,44 +1397,46 @@ impl ChatWidget {
         }
 
         // Servers may omit media from receipts, so prefer the submission identity.
-        if client_id.is_some() && self.last_rendered_user_message_client_id.as_deref() == client_id
-        {
-            return;
-        }
-
-        if self
-            .input_queue
-            .pending_steers
-            .front()
-            .is_some_and(|pending| match client_id {
-                Some(client_id) => pending.client_id == client_id,
-                // Older app servers do not echo submission IDs.
-                None => pending.compare_key == Self::pending_steer_compare_key_from_items(items),
-            })
-        {
-            if let Some(pending) = self.input_queue.pending_steers.pop_front() {
-                self.refresh_pending_input_preview();
-                let pending_display =
-                    user_message_display_for_history(pending.user_message, &pending.history_record);
-                self.on_user_message_display(pending_display);
+        let already_rendered = client_id.is_some()
+            && self.last_rendered_user_message_client_id.as_deref() == client_id;
+        let steers = &mut self.input_queue.pending_steers;
+        let matching = match client_id {
+            Some(id) => steers.iter().enumerate().position(|(index, pending)| {
+                pending.client_id == id
+                    && (pending.admitted_turn_id.is_some() || (index == 0 && !already_rendered))
+            }),
+            // Older app servers do not echo submission IDs.
+            None => steers.front().and_then(|pending| {
+                (pending.compare_key == Self::pending_steer_compare_key_from_items(items))
+                    .then_some(0)
+            }),
+        };
+        if let Some(pending) = matching.and_then(|index| steers.remove(index)) {
+            self.refresh_pending_input_preview();
+            if !already_rendered {
+                if !pending.optimistically_rendered {
+                    let pending_display = user_message_display_for_history(
+                        pending.user_message,
+                        &pending.history_record,
+                    );
+                    self.on_user_message_display(pending_display);
+                }
                 // Later receipts carry the wire media, which may differ from the local attachment.
                 self.last_rendered_user_message_display = Some(display);
                 self.last_rendered_user_message_client_id = Some(pending.client_id);
-            } else if self.last_rendered_user_message_display.as_ref() != Some(&display) {
-                tracing::warn!(
-                    "pending steer matched receipt but queue was empty when rendering committed user message"
-                );
-                self.on_user_message_display(display);
             }
-        } else if !self.review.is_review_mode
+        } else if !already_rendered
+            && !self.review.is_review_mode
             && self.last_rendered_user_message_display.as_ref() != Some(&display)
         {
             self.on_user_message_display(display);
         }
         if let Some(client_id) = client_id
-            && self.input_queue.queued_user_messages.iter().any(|message| {
-                matches!(&message.delivery, MessageDelivery::Unconfirmed(Some(id)) if id == client_id)
-            })
+            && self
+                .input_queue
+                .queued_user_messages
+                .iter()
+                .any(|message| message.unconfirmed_user_message_id() == Some(client_id))
         {
             self.reconcile_recovered_messages(&[client_id.to_string()]);
             self.maybe_send_next_queued_input();
@@ -1849,26 +1878,6 @@ impl ChatWidget {
         self.bottom_pane.clear_esc_backtrack_hint();
     }
 
-    pub(crate) fn show_external_writer_thread(&mut self) {
-        self.cancel_image_submission();
-        self.blocks_direct_input = true;
-        self.external_writer_view = true;
-        self.pause_unavailable_thread();
-        if let Some(cell) = self.transcript.active_cell.as_mut() {
-            if let Some(exec) = cell.as_any_mut().downcast_mut::<ExecCell>() {
-                exec.freeze_snapshot();
-            } else if let Some(tool) = cell.as_any_mut().downcast_mut::<McpToolCallCell>() {
-                tool.freeze_snapshot();
-            }
-        }
-        self.bottom_pane
-            .set_composer_input_enabled(/*enabled*/ false, /*placeholder*/ None);
-    }
-
-    pub(crate) fn is_external_writer_view(&self) -> bool {
-        self.external_writer_view
-    }
-
     fn refresh_skills_for_current_cwd(&mut self, force_reload: bool) {
         self.submit_op(AppCommand::list_skills(
             vec![self.config.cwd.to_path_buf()],
@@ -1891,9 +1900,8 @@ impl ChatWidget {
                 AppCommand::UserTurn { .. } | AppCommand::Review { .. } | AppCommand::Compact
             )
         {
-            self.add_error_message(if self.external_writer_view {
-                "This thread is open elsewhere. Close it there and retry resume to continue."
-                    .to_string()
+            self.add_error_message(if let Some(reason) = self.read_only_thread {
+                reason.message().to_string()
             } else {
                 PARENT_OWNED_INPUT_MESSAGE.to_string()
             });
@@ -2095,15 +2103,18 @@ impl ChatWidget {
         self.bottom_pane.new_status_indicator()
     }
 
+    #[cfg(test)]
     pub(crate) fn status_line_text(&self) -> Option<String> {
-        self.status_line_content()
-            .cloned()
-            .map(|content| content.into_hyperlink_line().line.to_string())
+        self.status_line_content().map(|status| {
+            status
+                .as_native()
+                .expect("native status line")
+                .line
+                .to_string()
+        })
     }
 
-    pub(crate) fn status_line_content(
-        &self,
-    ) -> Option<&crate::bottom_pane::footer_content::FooterContent> {
+    pub(crate) fn status_line_content(&self) -> Option<&crate::bottom_pane::StatusLine> {
         self.bottom_pane.status_line_content()
     }
 
@@ -2123,13 +2134,13 @@ fn has_websocket_timing_metrics(summary: RuntimeMetricsSummary) -> bool {
 
 impl Drop for ChatWidget {
     fn drop(&mut self) {
-        if self.realtime_conversation.handle.is_some()
-            && let Some(thread_id) = self.thread_id
+        let had_live_peer = self.realtime_conversation.handle.is_some();
+        if let Some(thread_id) = self.reset_realtime_conversation()
+            && had_live_peer
         {
             self.app_event_tx
                 .send(AppEvent::StopRealtimeConversation { thread_id });
         }
-        self.reset_realtime_conversation();
         self.stop_rate_limit_poller();
     }
 }

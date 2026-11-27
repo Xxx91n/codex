@@ -137,6 +137,8 @@ use tokio::time::Instant;
 use tokio::time::sleep;
 use wiremock::MockServer;
 
+#[path = "mcp_network_policy_compat_tests.rs"]
+mod network_policy_compat_tests;
 #[path = "mcp_oauth_refresh_tests.rs"]
 mod oauth_refresh_tests;
 #[path = "mcp_sandbox_tests.rs"]
@@ -976,6 +978,7 @@ async fn environment_mcp_policy_filters_runtime_config_and_model_tools(
         .codex
         .call_mcp_tool(
             "allowed",
+            /*environment_id*/ None,
             "echo",
             Some(json!({ "message": "ready" })),
             /*meta*/ None,
@@ -1652,10 +1655,25 @@ async fn mcp_pagination_preserves_valid_tools_and_rejects_oversized_cursors(
         .build_with_auto_env(&server)
         .await?;
 
+    let mut started = std::collections::BTreeSet::new();
     let startup = loop {
         let event = fixture.codex.next_event().await?;
-        if let EventMsg::McpStartupComplete(startup) = event.msg {
-            break startup;
+        match event.msg {
+            EventMsg::McpStartupUpdate(update)
+                if matches!(update.server.as_str(), "paginated" | "rejected") =>
+            {
+                if matches!(update.status, McpStartupStatus::Starting) {
+                    started.insert(update.server);
+                } else {
+                    assert_eq!(
+                        started.len(),
+                        2,
+                        "both eager starts precede the first terminal status"
+                    );
+                }
+            }
+            EventMsg::McpStartupComplete(startup) => break startup,
+            _ => {}
         }
     };
     assert!(startup.ready.iter().any(|name| name == "paginated"));
@@ -3352,6 +3370,7 @@ async fn stdio_image_responses_round_trip() -> anyhow::Result<()> {
             call_id: call_id.to_string(),
             invocation: McpInvocation {
                 server: server_name.to_string(),
+                environment_id: None,
                 tool: "image".to_string(),
                 arguments: Some(json!({})),
             },
@@ -3379,6 +3398,7 @@ async fn stdio_image_responses_round_trip() -> anyhow::Result<()> {
         end.invocation,
         McpInvocation {
             server: server_name.to_string(),
+            environment_id: None,
             tool: "image".to_string(),
             arguments: Some(json!({})),
         }
@@ -3685,6 +3705,7 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
                 tool_mode: None,
                 multi_agent_version: None,
                 multi_agent_reasoning_effort: None,
+                multi_agent_tools_in_code_mode: None,
             }],
         },
     )

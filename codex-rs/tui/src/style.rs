@@ -84,6 +84,20 @@ pub fn user_message_style() -> Style {
     user_message_style_for(default_bg())
 }
 
+/// Blend the floating HUD slightly away from the terminal background in either theme.
+const SHORTCUT_HUD_TINT: f32 = 0.052;
+
+pub(crate) fn shortcut_hud_style() -> Style {
+    default_bg().map_or_else(Style::default, |bg| {
+        let shade = if is_light(bg) { 0 } else { 255 };
+        Style::default().bg(best_color(blend(
+            (shade, shade, shade),
+            bg,
+            SHORTCUT_HUD_TINT,
+        )))
+    })
+}
+
 /// Submitted prompts use a lighter fill than the editable composer in either theme.
 pub(crate) fn history_prompt_style() -> Style {
     let Some(background) = default_bg() else {
@@ -206,6 +220,21 @@ pub(crate) fn selection_style() -> Style {
     contrast::selection_style(default_bg(), effective_stdout_color_level())
 }
 
+/// Strengthen a control's fill using the terminal's surface tint and readable foreground.
+pub(crate) fn hover_style(style: Style) -> Style {
+    let (Some(terminal_bg), Some(surface)) = (default_bg(), background_rgb(style.bg)) else {
+        return style.underlined();
+    };
+    let fill = best_color(shade_rgb(shade_rgb(surface, terminal_bg), terminal_bg));
+    if fill == Color::Reset || Some(fill) == style.bg {
+        return style.underlined();
+    }
+    style.bg(fill).fg(readable_color_on(
+        style.fg.unwrap_or(Color::Reset),
+        Some(fill),
+    ))
+}
+
 /// Resolve emphasis on the shaded prompt surface, including its quantized background.
 #[allow(dead_code, reason = "Used by later layers of the TUI refresh stack.")]
 pub(crate) fn user_message_accent_color() -> Color {
@@ -306,12 +335,16 @@ pub fn user_message_bg(terminal_bg: (u8, u8, u8)) -> Color {
 }
 
 pub(crate) fn user_message_bg_rgb(terminal_bg: (u8, u8, u8)) -> (u8, u8, u8) {
+    shade_rgb(terminal_bg, terminal_bg)
+}
+
+fn shade_rgb(surface: (u8, u8, u8), terminal_bg: (u8, u8, u8)) -> (u8, u8, u8) {
     let (top, alpha) = if is_light(terminal_bg) {
         ((0, 0, 0), 0.04)
     } else {
         ((255, 255, 255), 0.12)
     };
-    blend(top, terminal_bg, alpha)
+    blend(top, surface, alpha)
 }
 
 #[allow(clippy::disallowed_methods)]

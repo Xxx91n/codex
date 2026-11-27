@@ -1,3 +1,4 @@
+use codex_protocol::models::AudioReference;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
@@ -18,6 +19,11 @@ pub trait ToolOutput: Send {
 
     fn success_for_logging(&self) -> bool;
 
+    /// Whether the call was refused before its underlying operation started.
+    fn was_aborted(&self) -> bool {
+        false
+    }
+
     /// Finalizes output using the same completed handler duration reported in tool-call logs.
     /// Called before recording model-visible history; implementations must not measure time here.
     fn set_handler_duration_ms(&mut self, _handler_duration_ms: u64) {}
@@ -25,6 +31,11 @@ pub trait ToolOutput: Send {
     /// Whether this output contains external context that should disable memory generation when
     /// `memories.disable_on_external_context` is enabled.
     fn contains_external_context(&self) -> bool {
+        false
+    }
+
+    /// Whether the complete model-visible result was already limited by its producer.
+    fn output_budget_applied(&self) -> bool {
         false
     }
 
@@ -86,12 +97,20 @@ where
         (**self).success_for_logging()
     }
 
+    fn was_aborted(&self) -> bool {
+        (**self).was_aborted()
+    }
+
     fn set_handler_duration_ms(&mut self, handler_duration_ms: u64) {
         (**self).set_handler_duration_ms(handler_duration_ms);
     }
 
     fn contains_external_context(&self) -> bool {
         (**self).contains_external_context()
+    }
+
+    fn output_budget_applied(&self) -> bool {
+        (**self).output_budget_applied()
     }
 
     fn fallback_token_limit_override(&self) -> Option<usize> {
@@ -268,11 +287,12 @@ fn content_items_to_code_mode_result(items: &[FunctionCallOutputContentItem]) ->
                     image: ImageReference::File { file_id },
                     ..
                 } if !file_id.trim().is_empty() => Some(file_id.clone()),
-                FunctionCallOutputContentItem::InputAudio { audio_url }
-                    if !audio_url.trim().is_empty() =>
-                {
-                    Some(audio_url.clone())
-                }
+                FunctionCallOutputContentItem::InputAudio {
+                    audio: AudioReference::Inline { audio_url },
+                } if !audio_url.trim().is_empty() => Some(audio_url.clone()),
+                FunctionCallOutputContentItem::InputAudio {
+                    audio: AudioReference::File { file_id },
+                } if !file_id.trim().is_empty() => Some(file_id.clone()),
                 FunctionCallOutputContentItem::InputText { .. }
                 | FunctionCallOutputContentItem::InputImage { .. }
                 | FunctionCallOutputContentItem::InputAudio { .. }

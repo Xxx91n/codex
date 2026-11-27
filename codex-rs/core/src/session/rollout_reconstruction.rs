@@ -200,7 +200,9 @@ impl Session {
                 turn_context.root_capabilities_restricted,
                 &turn_context.config.features,
                 turn_context.config.guardian_context_budgeting(),
-                std::sync::Arc::clone(&self.item_id_generator),
+                // Reconstructing retained evidence may mint temporary revisions before restoring
+                // the durable originals. Replay must not consume the live thread's item sequence.
+                Self::new_item_id_generator(),
             ),
             turn_context.model_info().truncation_policy.into(),
         )
@@ -559,13 +561,8 @@ impl ContextManager {
                         // prompt shape.
                         // TODO(ccunningham): if we drop support for None replacement_history compaction items,
                         // we can get rid of this second loop entirely and just build `history` directly in the first loop.
-                        let user_messages =
-                            compact::collect_annotated_user_messages(history.annotated_items());
-                        let rebuilt = compact::build_compacted_history(
-                            Vec::new(),
-                            &user_messages,
-                            &compacted.message,
-                        );
+                        let rebuilt =
+                            compact::build_compacted_history(&history, &compacted.message);
                         let retained_context = history.retained_context().clone();
                         history.replace_annotated(rebuilt);
                         history.restore_retained_context(Some(&retained_context));
@@ -659,23 +656,23 @@ fn reconstructed_window_from_compaction(compacted: &CompactedItem) -> Option<Rec
         number: compacted.window_number?,
         first_id: compacted
             .first_window_id
-            .as_deref()
-            .and_then(ContextWindowId::parse),
+            .as_ref()
+            .and_then(ContextWindowId::validated),
         previous_id: compacted
             .previous_window_id
-            .as_deref()
-            .and_then(ContextWindowId::parse),
+            .as_ref()
+            .and_then(ContextWindowId::validated),
         id: compacted
             .window_id
-            .as_deref()
-            .and_then(ContextWindowId::parse),
+            .as_ref()
+            .and_then(ContextWindowId::validated),
     })
 }
 
 fn reconstructed_window_from_session_context_window(
     context_window: &SessionContextWindow,
 ) -> Option<ReconstructedWindow> {
-    let id = ContextWindowId::parse(&context_window.window_id)?;
+    let id = context_window.window_id.validated()?;
     Some(ReconstructedWindow {
         number: 0,
         first_id: Some(id.clone()),

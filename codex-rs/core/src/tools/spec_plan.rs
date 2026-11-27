@@ -242,13 +242,13 @@ fn apply_mcp_tool_exposure_policy(
         if !registered_mcp_tools.contains(&tool_name) {
             continue;
         }
-        let Some(server) = mcp.config().mcp_server_catalog.server(&tool.server_name) else {
+        let Some(server) = mcp.config().mcp_server_catalog.server(tool.server_key()) else {
             continue;
         };
         omitted_exposures_by_tool
             .entry(tool_name)
             .or_insert_with(|| {
-                let connector_omissions = (tool.server_name == CODEX_APPS_MCP_SERVER_NAME)
+                let connector_omissions = (tool.server_name() == CODEX_APPS_MCP_SERVER_NAME)
                     .then_some(tool.connector_id.as_deref())
                     .flatten()
                     .and_then(|id| apps_config.as_ref()?.apps.get(id))
@@ -499,7 +499,7 @@ pub(crate) fn finalize_tool_router(
         registry.mcp_namespaces(),
     )
     .map_err(|error| CodexErrorDetails::InvalidRequest(error.to_string()))?;
-    let code_mode_tool_names =
+    let (code_mode_tool_names, exec_definitions) =
         register_code_mode_executors(turn_context, model_info, &mut registry, &indirect_prefixes);
     let include_tool_namespaces_info = turn_context
         .config
@@ -582,6 +582,7 @@ pub(crate) fn finalize_tool_router(
         model_visible_specs,
         tool_mode,
         code_mode_tool_names,
+        exec_definitions,
         tool_namespaces_info,
         &child_management_tools,
     ))
@@ -1061,10 +1062,13 @@ fn register_code_mode_executors(
     model_info: &ModelInfo,
     registry: &mut ToolRegistry,
     indirect_prefixes: &IndirectNamespacePrefixes<'_>,
-) -> BTreeMap<String, ToolName> {
+) -> (
+    BTreeMap<String, ToolName>,
+    Option<Arc<Vec<codex_code_mode::ExecDefinition>>>,
+) {
     let tool_mode = effective_tool_mode(turn_context, model_info);
     if !matches!(tool_mode, ToolMode::CodeMode | ToolMode::CodeModeOnly) {
-        return BTreeMap::new();
+        return (BTreeMap::new(), None);
     }
 
     let mut code_mode_tool_names = BTreeMap::new();
@@ -1118,20 +1122,30 @@ fn register_code_mode_executors(
     }
     enabled_tools
         .sort_by(|left, right| compare_code_mode_tools(left, right, &namespace_descriptions));
-    let exec_description = codex_code_mode::build_exec_tool_description(
-        &enabled_tools,
-        &deferred_tools,
-        &namespace_descriptions,
-        turn_context.config.code_mode.default_exec_yield_time_ms,
-        tool_mode == ToolMode::CodeModeOnly,
+    let image_detail_visibility =
         if unified_image_budget_enabled(&turn_context.config.features, model_info) {
             codex_code_mode::ImageDetailVisibility::Hidden
         } else {
             codex_code_mode::ImageDetailVisibility::Visible
-        },
-        deferred_tool_discovery,
-        model_messages.code_mode(),
-    );
+        };
+    let features = &turn_context.config.features;
+    let incremental_exec_enabled = model_info.use_responses_lite
+        && features.enabled(Feature::IncrementalTools)
+        && features.enabled(Feature::IncrementalExecTools)
+        && tool_mode == ToolMode::CodeModeOnly;
+    let (exec_description, exec_definitions) =
+        codex_code_mode::build_exec_tool_description_and_definitions(
+            &enabled_tools,
+            &deferred_tools,
+            &namespace_descriptions,
+            turn_context.config.code_mode.default_exec_yield_time_ms,
+            tool_mode == ToolMode::CodeModeOnly,
+            image_detail_visibility,
+            deferred_tool_discovery,
+            incremental_exec_enabled,
+            model_messages.code_mode(),
+        );
+    let exec_definitions = incremental_exec_enabled.then(|| Arc::new(exec_definitions));
     let execute_handler = CodeModeExecuteHandler::new(
         create_code_mode_tool(exec_description),
         code_mode_nested_tool_specs,
@@ -1143,7 +1157,7 @@ fn register_code_mode_executors(
     )));
     registry.prepend_trusted(Arc::new(execute_handler));
 
-    code_mode_tool_names
+    (code_mode_tool_names, exec_definitions)
 }
 
 #[instrument(level = "trace", skip_all, fields(tool_spec_count = specs.len()))]
@@ -1302,6 +1316,12 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
         exec_permission_approvals_enabled,
         include_environment_id,
         include_windows_shell_guidance: should_include_windows_shell_guidance(context.environments),
+        has_powershell: context.environments.turn_environments().any(|environment| {
+            environment
+                .shell
+                .as_ref()
+                .is_some_and(|shell| shell.shell_type == crate::shell::ShellType::PowerShell)
+        }),
     };
     if features.enabled(Feature::UnifiedExec) {
         registry.add(ExecCommandHandler::new(options));
@@ -1320,14 +1340,19 @@ fn add_mcp_resource_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
         || effective_tool_mode(context.turn_context, context.model_info) == ToolMode::CodeModeOnly
     {
         let messages = ResolvedModelMessages::from_model(context.model_info).mcp_resources();
+        let include_environment_id = context.mcp.config().mcp_server_catalog.exposure()
+            == codex_mcp::McpServerExposure::EnvironmentQualified;
         registry.add(ListMcpResourcesHandler::new(
             messages.and_then(|messages| messages.list_mcp_resources.as_ref()),
+            include_environment_id,
         ));
         registry.add(ListMcpResourceTemplatesHandler::new(
             messages.and_then(|messages| messages.list_mcp_resource_templates.as_ref()),
+            include_environment_id,
         ));
         registry.add(ReadMcpResourceHandler::new(
             messages.and_then(|messages| messages.read_mcp_resource.as_ref()),
+            include_environment_id,
         ));
     }
 }
@@ -1501,10 +1526,14 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
             let model_messages = ResolvedModelMessages::from_model(context.model_info);
             let spawn_agent_description =
                 model_messages.multi_agent_tool_description_override("spawn_agent");
-            let exposure = if turn_context.config.multi_agent_v2.non_code_mode_only {
-                ToolExposure::DirectModelOnly
-            } else {
+            let tools_in_code_mode = context
+                .model_info
+                .multi_agent_tools_in_code_mode
+                .unwrap_or(!turn_context.config.multi_agent_v2.non_code_mode_only);
+            let exposure = if tools_in_code_mode {
                 ToolExposure::Direct
+            } else {
+                ToolExposure::DirectModelOnly
             };
             let tool_namespace = turn_context.config.multi_agent_v2.tool_namespace.as_deref();
             let native_review = if turn_context

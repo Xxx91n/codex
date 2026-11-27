@@ -3,7 +3,7 @@ use super::*;
 use pretty_assertions::assert_eq;
 use prost::Message;
 
-const AGENT: &[u8] = b"\x1a\x06\x12\x01i\x32\x01d";
+const AGENT: &[u8] = b"\x1a\x0a\x12\x01i\x22\x02\x10\x01\x32\x01d";
 
 const COMMAND: &[u8] =
     b"\x0a\x00\x12\x01c\x1a\x07\x0a\x05\x22\x03\x0a\x01c\x22\x01w\x28\x00\x30\x00\x3a\x01i\x60\x03";
@@ -53,6 +53,7 @@ async fn item_lifecycle_keeps_identity_and_timestamps() {
         item: ItemSummary::AgentMessage {
             id: "i".into(),
             text: "d".into(),
+            phase: Some(AgentMessagePhase::FinalAnswer),
             questions: None,
         },
     };
@@ -88,7 +89,75 @@ fn user_message_preserves_client_id_and_text() {
         Some(ItemSummary::UserMessage {
             id: "user-item".into(),
             client_id: Some("client-id".into()),
-            text: vec!["hello".into()],
+            content: vec![UserMessageInput::Text {
+                text: "hello".into(),
+                text_elements: vec![]
+            }],
+        })
+    );
+}
+
+#[test]
+fn user_message_preserves_images_spans_and_client_id() {
+    let url = "data:image/png;base64,AA==";
+    let label = "[Image #1]";
+    let element = [
+        message(/*tag*/ 1, b"\x08\x0d\x10\x03"),
+        message(/*tag*/ 2, label.as_bytes()),
+    ]
+    .concat();
+    let text = [
+        message(/*tag*/ 1, "é [Image #1]".as_bytes()),
+        message(/*tag*/ 2, &message(/*tag*/ 1, &element)),
+    ]
+    .concat();
+    let image_bytes = [vec![0x08, 99], message(/*tag*/ 2, url.as_bytes())].concat();
+    let content = [
+        message(/*tag*/ 1, &message(/*tag*/ 1, &text)),
+        message(
+            /*tag*/ 1,
+            &message(/*tag*/ 2, &message(/*tag*/ 1, &image_bytes)),
+        ),
+    ]
+    .concat();
+    let user = message(
+        /*tag*/ 1,
+        &[
+            message(/*tag*/ 1, b"client-id"),
+            message(/*tag*/ 2, &content),
+            message(/*tag*/ 3, b"user-item"),
+        ]
+        .concat(),
+    );
+    let expected = ItemSummary::UserMessage {
+        id: "user-item".into(),
+        client_id: Some("client-id".into()),
+        content: vec![
+            UserMessageInput::Text {
+                text: "é [Image #1]".into(),
+                text_elements: vec![UserMessageTextElement {
+                    start: 3,
+                    end: 13,
+                    placeholder: Some(label.into()),
+                }],
+            },
+            UserMessageInput::Image {
+                image: ImageReference::Url(url.into()),
+                detail: None,
+            },
+        ],
+    };
+    assert_eq!(summary(&user), Some(expected.clone()));
+    assert_eq!(format!("{expected:?}"), "ItemSummary([redacted])");
+    let event = TranscriptEvent::decode("t", &lifecycle(/*tag*/ 31, &user))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        event.update,
+        TranscriptUpdate::ItemCompleted(ItemLifecycle {
+            turn_id: "u".into(),
+            at_ms: 5,
+            item: expected,
         })
     );
 }
@@ -229,6 +298,7 @@ fn agent_messages_keep_questions_with_empty_text() {
             Some(ItemSummary::AgentMessage {
                 id: "i".into(),
                 text: String::new(),
+                phase: None,
                 questions: Some(expected),
             })
         );
@@ -261,6 +331,46 @@ fn unsupported_and_incomplete_items_stay_opaque() {
                 .is_none()
         );
     }
+    for input in [
+        message(/*tag*/ 8, b""),                              // Future input variant.
+        message(/*tag*/ 2, &message(/*tag*/ 3, b"")),         // Future image reference.
+        message(/*tag*/ 2, &message(/*tag*/ 1, b"\x08\x01")), // Missing URL.
+        message(/*tag*/ 2, &message(/*tag*/ 2, b"")),         // Missing file ID.
+        message(
+            /*tag*/ 1,
+            &[
+                message(/*tag*/ 1, b"hello"),
+                message(/*tag*/ 2, &message(/*tag*/ 1, b"")), // Missing byte range.
+            ]
+            .concat(),
+        ),
+        message(
+            /*tag*/ 1,
+            &[
+                message(/*tag*/ 1, b"hello"),
+                message(
+                    /*tag*/ 2,
+                    &message(/*tag*/ 1, &message(/*tag*/ 1, b"\x08\x01")),
+                ), // Missing start.
+            ]
+            .concat(),
+        ),
+    ] {
+        let user = message(
+            /*tag*/ 1,
+            &[
+                message(/*tag*/ 1, b"client-id"),
+                message(/*tag*/ 2, &message(/*tag*/ 1, &input)),
+                message(/*tag*/ 3, b"user-item"),
+            ]
+            .concat(),
+        );
+        assert!(
+            TranscriptEvent::decode("t", &lifecycle(/*tag*/ 27, &user))
+                .unwrap()
+                .is_none()
+        );
+    }
     assert!(
         TranscriptEvent::decode("t", &notification(/*tag*/ 27, &absent_time))
             .unwrap()
@@ -280,6 +390,7 @@ fn item_summaries_redact_sensitive_fields() {
         questions: None,
         id: "secret".into(),
         text: "secret".into(),
+        phase: None,
     };
     let text = format!("{item:?}");
     assert_eq!(text, "ItemSummary([redacted])");

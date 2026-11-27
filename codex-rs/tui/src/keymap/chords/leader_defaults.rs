@@ -29,6 +29,7 @@ pub(in crate::keymap) fn register(
     use KeyCode::Char;
     use KeymapContext::Chat;
     use KeymapContext::Global;
+    use KeymapContext::Pager;
     for (context, name, completion, spec) in [
         (Global, "change_host", Char('b'), "b"),
         (Global, "select_transcript", Char('['), "["),
@@ -47,6 +48,16 @@ pub(in crate::keymap) fn register(
         (Global, "resize_panes", Char('r'), "r"),
         (Global, "minimize_pane_width", Char(','), ","),
         (Global, "maximize_pane_width", Char('.'), "."),
+        (Global, "close_sidebar_tab", Char('w'), "w"),
+        (Global, "focus_sidebar_tabs", Char('t'), "t"),
+        (Global, "sidebar_up", KeyCode::BackTab, "shift-tab"),
+        (Global, "sidebar_down", KeyCode::Tab, "tab"),
+        (Global, "sidebar_up", KeyCode::Up, "up"),
+        (Global, "sidebar_up", Char('k'), "k"),
+        (Global, "sidebar_down", KeyCode::Down, "down"),
+        (Global, "sidebar_down", Char('j'), "j"),
+        (Pager, "mark_markdown", Char('v'), "v"),
+        (Global, "choose_cloud_environment", Char('e'), "e"),
     ] {
         if remaining == 0 {
             break;

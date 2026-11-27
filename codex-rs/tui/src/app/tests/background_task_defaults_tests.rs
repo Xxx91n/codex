@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::app::agents_overview::AGENTS_OVERVIEW_VIEW_ID;
+use crate::app::session_lifecycle::FreshSessionStart;
 use crate::app::tests::session_lifecycle_requests::HistoryCapabilities;
 use crate::app::tests::session_lifecycle_requests::recorded_params;
 use crate::app::tests::session_lifecycle_requests::start_recording_app_server_with_history;
@@ -358,12 +359,21 @@ async fn command_center_new_reads_server_defaults_for_actual_destination() -> Re
         } else {
             expected_model.to_string()
         };
+        app.backend_preference_context.local_cwd = Some(launch.path().to_path_buf());
         app.new_agents_overview_session(
             &mut tui,
             &mut server,
             explicit_cwd.then(|| destination.path().to_path_buf().abs()),
         )
         .await?;
+        assert_eq!(
+            app.backend_preference_context.local_cwd.as_deref(),
+            Some(if !mode.starts_with("remote") && explicit_cwd {
+                destination.path()
+            } else {
+                launch.path()
+            }),
+        );
         let cwd = match expected_cwd {
             "launch" => launch.path().display().to_string(),
             "destination" => destination.path().display().to_string(),
@@ -733,6 +743,7 @@ async fn command_center_new_preserves_only_selected_server_profiles() -> Result<
             /*session_start_source*/ None,
             /*remote_cwd_override*/ None,
             Some(&selection),
+            /*host_project_cwd*/ None,
         )
         .await?;
     app.enqueue_primary_thread_session(started.session, started.turns)
@@ -814,9 +825,14 @@ async fn command_center_new_preserves_only_selected_server_profiles() -> Result<
         ServerNotification::ThreadSettingsUpdated(settings),
     )
     .await?;
+    app.backend_preference_context.local_cwd = Some(home.path().to_owned());
     for target in [other, thread_id] {
         app.select_agents_overview_thread(&mut tui, &mut server, target)
             .await?;
+        assert_eq!(
+            app.backend_preference_context.local_cwd.as_deref(),
+            Some(home.path()),
+        );
         assert_eq!(
             app.chat_widget.thread_id(),
             Some(target),
@@ -897,7 +913,7 @@ async fn command_center_new_restores_blank_drafts_and_builtin_permissions() -> R
     app.start_fresh_session(
         &mut tui,
         &mut server,
-        /*session_start_source*/ None,
+        FreshSessionStart::PreserveCurrentView(None),
         /*initial_user_message*/ None,
         /*new_thread_name*/ None,
     )
@@ -1207,7 +1223,7 @@ async fn command_center_new_checkout_and_worktree_preserve_source_and_default_br
                     return Ok::<_, color_eyre::Report>(());
                 }
             }
-            color_eyre::eyre::bail!("permissions menu event stream closed")
+            color_eyre::eyre::bail!("permissions menu event stream closed");
         })
         .await??;
         app.chat_widget.handle_key_event(KeyCode::Up.into());
@@ -1284,6 +1300,7 @@ async fn command_center_new_checkout_and_worktree_preserve_source_and_default_br
             .await?;
             let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
             app.chat_widget.show_bottom_pane_view(Box::new(view));
+            let host_project = app.backend_preference_context.local_cwd.clone();
             app.start_agents_overview_session(
                 &mut tui,
                 &mut failed_server,
@@ -1293,6 +1310,7 @@ async fn command_center_new_checkout_and_worktree_preserve_source_and_default_br
             )
             .await?;
             assert_eq!(app.chat_widget.thread_id(), Some(second));
+            assert_eq!(app.backend_preference_context.local_cwd, host_project);
             assert_eq!(manager.owner(&unused.root).unwrap(), None);
             assert!(unused.root.exists());
             let rendered = crate::chatwidget::tests::helpers::render_bottom_popup(

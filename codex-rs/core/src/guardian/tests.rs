@@ -10,6 +10,7 @@ use crate::context::ContextualUserFragment;
 use crate::environment_selection::EnvironmentAttachment;
 use crate::environment_selection::TurnEnvironmentState;
 use crate::guardian::review::guardian_review_session_config;
+use crate::guardian_review::ReviewRetrieval;
 use crate::session::session::Session;
 use crate::session::tests::update_turn_settings_for_test;
 use crate::session::turn_context::TurnContext;
@@ -480,14 +481,14 @@ async fn build_guardian_prompt_prefers_retry_reason_over_approval_reason() -> an
             justification: None,
             tty: false,
         },
-        GuardianPromptMode::Full,
+        /*is_selected_exec_output*/ None,
         /*reviewed_node_repl_evidence_sequence*/ 0,
     )
     .await?;
     let prompt = codex_guardian_reviewer::compose_guardian_prompt(
         collected.sections,
         &collected.profile,
-        collected.mode,
+        GuardianPromptMode::Full,
         collected.history_version,
         &collected.session_id,
         collected.node_repl_evidence_sequence,
@@ -571,14 +572,14 @@ async fn build_guardian_prompt_includes_parent_turn_denied_reads() -> anyhow::Re
             justification: Some("Need to inspect the secret file.".to_string()),
             tty: false,
         },
-        GuardianPromptMode::Full,
+        /*is_selected_exec_output*/ None,
         /*reviewed_node_repl_evidence_sequence*/ 0,
     )
     .await?;
     let prompt = codex_guardian_reviewer::compose_guardian_prompt(
         collected.sections,
         &collected.profile,
-        collected.mode,
+        GuardianPromptMode::Full,
         collected.history_version,
         &collected.session_id,
         collected.node_repl_evidence_sequence,
@@ -700,14 +701,14 @@ async fn approval_permissions_use_the_owning_environment() -> anyhow::Result<()>
             Some(&context),
             ApprovalRequestReasons::default(),
             request,
-            GuardianPromptMode::Full,
+            /*is_selected_exec_output*/ None,
             /*reviewed_node_repl_evidence_sequence*/ 0,
         )
         .await?;
         let prompt = codex_guardian_reviewer::compose_guardian_prompt(
             collected.sections,
             &collected.profile,
-            collected.mode,
+            GuardianPromptMode::Full,
             collected.history_version,
             &collected.session_id,
             collected.node_repl_evidence_sequence,
@@ -796,14 +797,14 @@ async fn guardian_mcp_uses_thread_permissions_for_an_unavailable_captured_enviro
         Some(&context),
         ApprovalRequestReasons::default(),
         guardian_mcp_request("server", "tool"),
-        GuardianPromptMode::Full,
+        /*is_selected_exec_output*/ None,
         /*reviewed_node_repl_evidence_sequence*/ 0,
     )
     .await?;
     let prompt = codex_guardian_reviewer::compose_guardian_prompt(
         collected.sections,
         &collected.profile,
-        collected.mode,
+        GuardianPromptMode::Full,
         collected.history_version,
         &collected.session_id,
         collected.node_repl_evidence_sequence,
@@ -924,15 +925,22 @@ fn collect_guardian_transcript_entries(
 ) -> Vec<ConversationTranscriptEntry> {
     let mut profile = codex_guardian_context::ContextProfile::synchronous();
     profile.transcript.entry_limits.node_repl_output_tokens = node_repl_result_token_limit;
-    prompt::collect_guardian_context(
+    prompt::collect_guardian_context(codex_guardian_context::SectionInput {
+        target: profile.target,
         history,
-        &profile,
-        /*root_conversation_candidates*/ None,
-        &[],
-        /*planned_action*/ None,
-        /*permissions*/ None,
-        /*node_repl*/ None,
-    )
+        transcript: &profile.transcript,
+        is_selected_exec_output: None,
+        root_conversation: &[],
+        root_conversation_candidates: None,
+        trusted_user_answers: &[],
+        planned_action: None,
+        permissions: None,
+        previous_reviews: None,
+        trusted_tool: None,
+        trusted_skill_paths: &[],
+        images: None,
+        node_repl: None,
+    })
     .expect("collect Guardian context")
     .transcript_entries()
     .to_vec()
@@ -1048,14 +1056,14 @@ async fn build_guardian_prompt_items_keeps_required_node_repl_reviews_generic() 
             retry: Some("Retry the authorized browser inspection.".to_string()),
         },
         guardian_mcp_request("node_repl", "js"),
-        GuardianPromptMode::Full,
+        /*is_selected_exec_output*/ None,
         /*reviewed_node_repl_evidence_sequence*/ 0,
     )
     .await?;
     let prompt = codex_guardian_reviewer::compose_guardian_prompt(
         collected.sections,
         &collected.profile,
-        collected.mode,
+        GuardianPromptMode::Full,
         collected.history_version,
         &collected.session_id,
         collected.node_repl_evidence_sequence,
@@ -3368,6 +3376,7 @@ async fn guardian_review_session_config_preserves_parent_network_proxy() {
         ReasoningSummary::default(),
         /*personality*/ None,
         ResolvedModelMessages::bundled(),
+        ReviewRetrieval::ConversationHistory,
     )
     .expect("guardian config");
 
@@ -3412,11 +3421,14 @@ async fn guardian_review_session_config_clears_context_overrides_for_distinct_ef
         .expect("turn should be unique")
         .config = Arc::new(config);
 
-    let guardian_config =
-        guardian_review_session_config(session.as_ref(), &GuardianReviewContext::from(&turn))
-            .await
-            .expect("guardian config")
-            .spawn_config;
+    let guardian_config = guardian_review_session_config(
+        session.as_ref(),
+        &GuardianReviewContext::from(&turn),
+        ReviewRetrieval::ConversationHistory,
+    )
+    .await
+    .expect("guardian config")
+    .spawn_config;
 
     assert_eq!(
         (
@@ -3451,11 +3463,14 @@ async fn guardian_review_session_config_preserves_context_overrides_for_same_eff
         .expect("turn should be unique")
         .config = Arc::new(config);
 
-    let guardian_config =
-        guardian_review_session_config(session.as_ref(), &GuardianReviewContext::from(&turn))
-            .await
-            .expect("guardian config")
-            .spawn_config;
+    let guardian_config = guardian_review_session_config(
+        session.as_ref(),
+        &GuardianReviewContext::from(&turn),
+        ReviewRetrieval::ConversationHistory,
+    )
+    .await
+    .expect("guardian config")
+    .spawn_config;
 
     assert_eq!(
         (
@@ -3497,6 +3512,7 @@ async fn guardian_review_session_config_uses_live_network_proxy_state() {
         ReasoningSummary::default(),
         /*personality*/ None,
         ResolvedModelMessages::bundled(),
+        ReviewRetrieval::ConversationHistory,
     )
     .expect("guardian config");
 
@@ -3554,6 +3570,7 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
         ReasoningSummary::default(),
         /*personality*/ None,
         ResolvedModelMessages::bundled(),
+        ReviewRetrieval::ConversationHistory,
     )
     .expect("guardian config");
 
@@ -3601,6 +3618,7 @@ async fn guardian_review_session_config_keeps_bedrock_provider_for_bedrock_gpt_5
         ReasoningSummary::default(),
         /*personality*/ None,
         ResolvedModelMessages::bundled(),
+        ReviewRetrieval::ConversationHistory,
     )
     .expect("guardian config");
 
@@ -3622,22 +3640,32 @@ async fn guardian_review_session_config_keeps_bedrock_provider_for_bedrock_gpt_5
     );
 }
 
+#[test_case::test_case(Some("Managed tenant rules."), None, None; "managed_tenant")]
+#[test_case::test_case(None, Some("Managed additional rules."), None; "managed_extra")]
+#[test_case::test_case(
+    Some("Managed tenant rules."), Some("Managed additional rules."),
+    Some("Host template\n{{ tenant_policy_config }}\n{{ extra_policy }}"); "host_template"
+)]
 #[tokio::test]
-async fn guardian_review_session_config_uses_requirements_guardian_policy_config() {
+async fn guardian_review_session_config_uses_requirements_guardian_policy_config(
+    tenant: Option<&str>,
+    extra: Option<&str>,
+    host_template: Option<&str>,
+) {
+    const CATALOG_POLICY: &str = "Default tenant rules.";
     let codex_home = tempfile::tempdir().expect("create temp dir");
     let workspace = tempfile::tempdir().expect("create temp dir");
     let config_layer_stack = ConfigLayerStack::new(
         Vec::new(),
         Default::default(),
         codex_config::ConfigRequirementsToml {
-            guardian_policy_config: Some(
-                "  Use the workspace-managed guardian policy.  ".to_string(),
-            ),
+            guardian_policy_config: tenant.map(|policy| format!("  {policy}  ")),
+            guardian_extra_policy: extra.map(str::to_owned),
             ..Default::default()
         },
     )
     .expect("config layer stack");
-    let parent_config = Config::load_config_with_layer_stack(
+    let mut parent_config = Config::load_config_with_layer_stack(
         LOCAL_FS.as_ref(),
         ConfigToml::default(),
         ConfigOverrides {
@@ -3649,7 +3677,17 @@ async fn guardian_review_session_config_uses_requirements_guardian_policy_config
     )
     .await
     .expect("load config");
-
+    parent_config.guardian_policy_template = host_template.map(str::to_owned);
+    let mut model = codex_models_manager::model_info::model_info_from_slug("active-model");
+    model.model_messages = Some(
+        serde_json::from_value(serde_json::json!({
+            "auto_review": {
+                "policy": CATALOG_POLICY,
+                "policy_template": "User-supplied catalog template without policy slots."
+            }
+        }))
+        .expect("catalog model messages"),
+    );
     let guardian_config = build_guardian_review_session_config_for_test(
         crate::guardian::test_host::build_reviewer_config(&parent_config).expect("reviewer config"),
         /*live_network_config*/ None,
@@ -3657,7 +3695,8 @@ async fn guardian_review_session_config_uses_requirements_guardian_policy_config
         /*reasoning_effort*/ None,
         ReasoningSummary::default(),
         /*personality*/ None,
-        ResolvedModelMessages::bundled(),
+        ResolvedModelMessages::from_model(&model),
+        ReviewRetrieval::ConversationHistory,
     )
     .expect("guardian config");
 
@@ -3667,11 +3706,13 @@ async fn guardian_review_session_config_uses_requirements_guardian_policy_config
         Some(
             GuardianPolicyInstructions::new(
                 TranscriptFormat::Line,
-                "Use the workspace-managed guardian policy.",
-                "",
-                ResolvedModelMessages::bundled()
-                    .auto_review()
-                    .policy_template,
+                tenant.unwrap_or(CATALOG_POLICY),
+                extra.unwrap_or_default(),
+                host_template.unwrap_or(
+                    ResolvedModelMessages::bundled()
+                        .auto_review()
+                        .policy_template
+                ),
                 guardian_output_contract_prompt(),
             )
             .render()

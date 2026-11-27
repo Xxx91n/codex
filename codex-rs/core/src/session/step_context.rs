@@ -11,8 +11,12 @@ use crate::session::turn_context::TurnContext;
 use crate::session::turn_context::TurnEnvironment;
 use crate::tools::router::ToolRouter;
 use codex_extension_api::ExtensionData;
+use codex_features::Feature;
 use codex_file_system::EnvironmentAccess;
 use codex_mcp::McpBinding;
+use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
+use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID;
+use codex_model_provider_info::GCP_PROVIDER_ID;
 use codex_otel::SessionTelemetry;
 use codex_plugin::ExecutorPluginHookSource;
 use codex_protocol::items::ModelInvocationContext;
@@ -27,6 +31,8 @@ pub(crate) struct StepContext {
     /// Final serving value for this invocation; retained by its code cell across waits.
     pub(crate) serving_assessment: Option<Arc<crate::guardian::ServingAssessment>>,
     pub(crate) turn: Arc<TurnContext>,
+    /// Cancels work owned by this turn, independently of steers or session shutdown.
+    pub(crate) turn_cancellation: CancellationToken,
     /// Preempts this request and yields its code-mode observations when user input arrives.
     pub(crate) preempt: Option<CancellationToken>,
     /// Realtime call activity and instructions captured for this sampling request.
@@ -53,14 +59,25 @@ pub(crate) struct StepContext {
 }
 
 impl StepContext {
+    /// Feature that selects the tool layout of new windows on this route.
+    pub(crate) fn incremental_tools_feature(&self) -> Option<Feature> {
+        if self.settings.model_info.use_responses_lite {
+            Some(Feature::IncrementalTools)
+        } else {
+            match self.turn.config.model_provider_id.as_str() {
+                AMAZON_BEDROCK_PROVIDER_ID | AMAZON_BEDROCK_RUNTIME_PROVIDER_ID => {
+                    Some(Feature::IncrementalToolsLegacy)
+                }
+                GCP_PROVIDER_ID => Some(Feature::IncrementalToolsLegacyGcp),
+                _ => None,
+            }
+        }
+    }
+
     /// Whether new context windows should record tool declarations in history.
     pub(crate) fn incremental_tools_enabled(&self) -> bool {
-        self.settings.model_info.use_responses_lite
-            && self
-                .turn
-                .config
-                .features
-                .enabled(codex_features::Feature::IncrementalTools)
+        self.incremental_tools_feature()
+            .is_some_and(|feature| self.turn.config.features.enabled(feature))
     }
 
     /// Pairs the step's environments with access using current session and originating-turn grants.

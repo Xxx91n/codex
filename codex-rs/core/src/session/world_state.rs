@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::session::Session;
@@ -19,6 +20,7 @@ use crate::context::world_state::ModelCatalogState;
 use crate::context::world_state::ModelInstructionsState;
 use crate::context::world_state::MultiAgentModeState;
 use crate::context::world_state::MultiAgentUsageHintState;
+use crate::context::world_state::PermissionDescription;
 use crate::context::world_state::PermissionsState;
 use crate::context::world_state::PersistentModeState;
 use crate::context::world_state::PluginsInstructionsState;
@@ -32,6 +34,7 @@ use codex_connectors::AppToolPolicyEvaluator;
 use codex_extension_api::WorldStateContributionInput;
 use codex_features::Feature;
 use codex_file_system::FileSystemSandboxContext;
+use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_prompts::ApprovalPromptContext;
 use codex_prompts::ResolvedModelMessages;
 use codex_prompts::render_model_instructions;
@@ -40,6 +43,7 @@ use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::models::ContentItemNamespace;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::ToolName;
+use codex_tools::ToolSpec;
 
 impl Session {
     pub(super) fn host_roster_reader(
@@ -60,7 +64,7 @@ impl Session {
         &self,
         step_context: &StepContext,
     ) -> bool {
-        if !step_context.settings.model_info.use_responses_lite {
+        if step_context.incremental_tools_feature().is_none() {
             return false;
         }
         let state = self.state.lock().await;
@@ -201,12 +205,21 @@ impl Session {
             !new_window && self.preserve_parent_tool_declarations();
         if incremental_tools && !preserve_parent_tool_declarations {
             let specs = step_context.tool_router.model_visible_specs();
+            let specs = specs
+                .iter()
+                .filter(|tool| !matches!(tool, ToolSpec::WebSearch { .. }))
+                .cloned()
+                .collect::<Vec<_>>();
             let definitions = codex_tools::create_tools_json_for_responses_lite(&specs)?;
-            world_state.add_section(TopLevelToolsState::new(
+            let mut top_level = TopLevelToolsState::new(
                 model_messages.incremental_tools(),
                 definitions,
                 Some(Arc::clone(&extension_metrics)),
-            )?);
+            )?;
+            if let Some(entries) = step_context.tool_router.exec_definitions() {
+                top_level = top_level.with_incremental_exec_tools(Some(entries));
+            }
+            world_state.add_section(top_level);
         }
         world_state.add_section(model_state);
         let token_budget_enabled = turn_context.config.features.enabled(Feature::TokenBudget)
@@ -222,9 +235,8 @@ impl Session {
                     .session_source
                     .get_agent_path()
                     .unwrap_or_else(codex_protocol::AgentPath::root),
-                window_ids.first_window_id,
-                window_ids.previous_window_id,
-                window_ids.window_id,
+                window_ids,
+                step_context.token_budget.as_ref(),
             ));
         }
         let guidance = step_context
@@ -257,36 +269,71 @@ impl Session {
         let approval_context =
             ApprovalPromptContext::new(settings.approvals_reviewer(), model_messages);
         if turn_context.config.include_permissions_instructions {
-            let environment = step_context.environments.primary();
-            let sandbox = environment
-                .filter(|environment| environment.environment().is_remote())
-                .map(|environment| {
-                    environment.sandbox_context(/*additional_permissions*/ None)
-                });
-            let paths = sandbox
-                .as_ref()
-                .map(FileSystemSandboxContext::policy_context);
-            let permission_profile =
-                turn_context.permission_profile_for_environments(&step_context.environments);
-            #[allow(deprecated)]
-            let cwd = environment
-                .and_then(|environment| environment.cwd().to_abs_path().ok())
-                .unwrap_or_else(|| turn_context.cwd.clone());
+            let per_environment = turn_context
+                .config
+                .features
+                .enabled(Feature::PerEnvironmentContext);
+            let mut environments = step_context
+                .environments
+                .turn_environments()
+                .map(Some)
+                .collect::<Vec<_>>();
+            if !per_environment {
+                environments.truncate(1);
+            }
+            // Until a computer is ready, describe the thread defaults without assigning
+            // those permissions to a computer whose configuration is still unknown.
+            if environments.is_empty() {
+                environments.push(None);
+            }
+            let mut descriptions = BTreeMap::new();
+            for environment in environments {
+                let sandbox = environment
+                    .filter(|environment| per_environment || environment.environment().is_remote())
+                    .map(|environment| {
+                        environment.sandbox_context(/*additional_permissions*/ None)
+                    });
+                let paths = sandbox
+                    .as_ref()
+                    .map(FileSystemSandboxContext::policy_context);
+                let permission_profile = environment.map_or_else(
+                    || turn_context.permission_profile_for_environments(&step_context.environments),
+                    super::turn_context::TurnEnvironment::permission_profile_with_workspace_roots,
+                );
+                #[allow(deprecated)]
+                let cwd = environment
+                    .and_then(|environment| environment.cwd().to_abs_path().ok())
+                    .unwrap_or_else(|| turn_context.cwd.clone());
+                let id = if per_environment {
+                    environment.map(|environment| environment.selection.environment_id.clone())
+                } else {
+                    None
+                };
+                descriptions.insert(
+                    id,
+                    PermissionDescription::new(
+                        &permission_profile,
+                        settings.approval_policy(),
+                        approval_context,
+                        exec_policy.as_ref(),
+                        &cwd,
+                        paths.as_ref(),
+                        turn_context
+                            .config
+                            .features
+                            .enabled(Feature::ExecPermissionApprovals),
+                        turn_context
+                            .config
+                            .features
+                            .enabled(Feature::RequestPermissionsTool),
+                    ),
+                );
+            }
             world_state.add_section(PermissionsState::new(
-                &permission_profile,
-                settings.approval_policy(),
-                approval_context,
+                descriptions,
                 exec_policy.as_ref(),
-                &cwd,
-                paths.as_ref(),
-                turn_context
-                    .config
-                    .features
-                    .enabled(Feature::ExecPermissionApprovals),
-                turn_context
-                    .config
-                    .features
-                    .enabled(Feature::RequestPermissionsTool),
+                approval_context,
+                per_environment,
             ));
         } else {
             world_state.add_section(CompactPermissionsState::new(
@@ -324,10 +371,18 @@ impl Session {
                 self.read_clock_for_context(turn_context, "environment_date")
                     .await?
                     .map(|current_time| {
-                        current_time
-                            .with_timezone(&chrono::Local)
-                            .format("%Y-%m-%d")
-                            .to_string()
+                        if turn_context
+                            .config
+                            .features
+                            .enabled(Feature::UtcEnvironmentDate)
+                        {
+                            current_time.format("%Y-%m-%d").to_string()
+                        } else {
+                            current_time
+                                .with_timezone(&chrono::Local)
+                                .format("%Y-%m-%d")
+                                .to_string()
+                        }
                     })
             } else {
                 None
@@ -362,8 +417,18 @@ impl Session {
             };
         let apps_usage_instructions_available =
             apps_available && model_info.include_apps_usage_instructions;
+        let apps_messages = if turn_context
+            .config
+            .features
+            .enabled(Feature::CatalogAppsInstructions)
+        {
+            model_messages
+        } else {
+            ResolvedModelMessages::bundled()
+        };
         world_state.add_section(AppsInstructionsState::new(
             apps_usage_instructions_available,
+            apps_messages.apps_usage_instructions(CODEX_APPS_MCP_SERVER_NAME),
         ));
         let plugins_usage_instructions_available =
             step_context.mcp.plugins_available() && model_info.include_plugin_usage_instructions;

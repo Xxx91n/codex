@@ -106,11 +106,12 @@ async fn cancelled_turn_skips_launch_but_preserves_existing_work(trigger: Compac
         ]));
     sess.update_token_usage_info(
         &turn,
-        Some(&TokenUsage {
+        TokenUsage {
             input_tokens: 60_000,
             total_tokens: 60_000,
             ..Default::default()
-        }),
+        }
+        .into(),
         /*includes_reasoning*/ false,
     )
     .await
@@ -120,7 +121,7 @@ async fn cancelled_turn_skips_launch_but_preserves_existing_work(trigger: Compac
     let world_state = Arc::new(WorldState::default());
     let cancelled = CancellationToken::new();
     cancelled.cancel();
-    let auth = sess.services.model_client.auth_owner_generation();
+    let auth = sess.services.model_client.auth_owner();
     maybe_start(
         &sess,
         &step,
@@ -128,7 +129,7 @@ async fn cancelled_turn_skips_launch_but_preserves_existing_work(trigger: Compac
         phase,
         &cancelled,
         &status,
-        (Some("routing".to_string()), auth),
+        (Some("routing".to_string()), auth.clone()),
     )
     .await;
     assert!(
@@ -149,7 +150,7 @@ async fn cancelled_turn_skips_launch_but_preserves_existing_work(trigger: Compac
         phase,
         &turn_cancellation,
         &status,
-        (Some("routing".to_string()), auth),
+        (Some("routing".to_string()), auth.clone()),
     )
     .await;
     turn_cancellation.cancel();

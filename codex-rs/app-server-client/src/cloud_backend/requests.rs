@@ -1,9 +1,13 @@
 //! Maps conversation requests onto native Cloud operations.
 
+use super::PreflightRejection;
 use super::events;
 use super::send_notification;
+use crate::CloudUserMessageReceipt;
 use codex_app_server_protocol as protocol;
 use codex_cloud_client as cloud;
+use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
+use codex_protocol::models::ImageDetail;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::bail;
 use color_eyre::eyre::eyre;
@@ -16,7 +20,7 @@ use tokio::sync::mpsc;
 pub(super) struct UnsupportedOperation(pub(super) String);
 
 pub(super) struct Requests {
-    pub(super) client: cloud::Client,
+    pub(super) client: std::sync::Arc<cloud::Client>,
     pub(super) account: protocol::GetAccountResponse,
     pub(super) loaded: Option<Box<protocol::ThreadResumeResponse>>,
     pub(super) warned_partial_history: Option<String>,
@@ -25,9 +29,31 @@ pub(super) struct Requests {
 pub(super) enum Response {
     Value(Value),
     Attach(Box<protocol::ThreadResumeResponse>),
+    Archived(String),
 }
 
 impl Requests {
+    pub(super) fn thread_name_saved(
+        &mut self,
+        params: protocol::ThreadSetNameParams,
+        output: &mpsc::UnboundedSender<crate::AppServerEvent>,
+    ) {
+        if let Some(loaded) = &mut self.loaded
+            && loaded.thread.id == params.thread_id
+        {
+            loaded.thread.name = Some(params.name.clone());
+        }
+        send_notification(
+            output,
+            protocol::ServerNotification::ThreadNameUpdated(
+                protocol::ThreadNameUpdatedNotification {
+                    thread_id: params.thread_id,
+                    thread_name: Some(params.name),
+                },
+            ),
+        );
+    }
+
     pub(super) fn read_thread(
         &self,
         params: &protocol::ThreadReadParams,
@@ -51,6 +77,8 @@ impl Requests {
     pub(super) async fn handle(
         &mut self,
         request: protocol::ClientRequest,
+        mode: cloud::SubmissionMode,
+        environment: Option<cloud::EnvironmentSelection>,
         output: &mpsc::UnboundedSender<crate::AppServerEvent>,
     ) -> Result<Response> {
         use protocol::ClientRequest as Request;
@@ -65,6 +93,32 @@ impl Requests {
                 }
                 serde_json::to_value(page)?
             }
+            Request::ThreadSetName { mut params, .. } => {
+                params.name = params.name.trim().to_owned();
+                self.client
+                    .set_thread_name(&params.thread_id, &params.name)
+                    .await?;
+                self.thread_name_saved(params, output);
+                serde_json::to_value(protocol::ThreadSetNameResponse {})?
+            }
+            Request::ThreadArchive { params, .. } => {
+                self.client.archive_thread(&params.thread_id).await?;
+                return Ok(Response::Archived(params.thread_id));
+            }
+            Request::ThreadUnarchive { params, .. } => {
+                let mut thread = self.client.unarchive_thread(&params.thread_id).await?;
+                use_paginated_history(&mut thread);
+                let value = json!({ "thread": thread });
+                send_notification(
+                    output,
+                    protocol::ServerNotification::ThreadUnarchived(
+                        protocol::ThreadUnarchivedNotification {
+                            thread_id: params.thread_id,
+                        },
+                    ),
+                );
+                value
+            }
             Request::ThreadStart { mut params, .. } => {
                 let model = params.model.take();
                 let provider = params.model_provider.take();
@@ -76,7 +130,10 @@ impl Requests {
                         "Cloud conversations start with server defaults. Custom settings are not supported yet."
                     );
                 }
-                let settings = self.client.prewarm_default_thread(model, provider).await?;
+                let settings = self
+                    .client
+                    .prewarm_thread(model, provider, environment)
+                    .await?;
                 return attach_response(settings);
             }
             Request::ThreadResume { params, .. } => {
@@ -92,14 +149,6 @@ impl Requests {
                 }
                 let settings = self.client.activate(&params.thread_id).await?;
                 return attach_response(settings);
-            }
-            Request::ThreadLoadedList { .. } => {
-                let ids = self
-                    .loaded
-                    .iter()
-                    .map(|loaded| &loaded.thread.id)
-                    .collect::<Vec<_>>();
-                json!({"data": ids, "nextCursor": null})
             }
             Request::ThreadTurnsList { params, .. } => {
                 if params.items_view != Some(protocol::TurnItemsView::NotLoaded) {
@@ -136,7 +185,7 @@ impl Requests {
                     Some(protocol::ThreadItemsListCursor::Opaque(cursor)) => Some(cursor),
                     None => None,
                     Some(protocol::ThreadItemsListCursor::Anchor(_)) => {
-                        bail!("Cloud item anchors are not supported yet.")
+                        bail!("Cloud item anchors are not supported yet.");
                     }
                 };
                 let page = self
@@ -188,12 +237,23 @@ impl Requests {
                 })?
             }
             Request::TurnStart { params, .. } => {
-                let admission = self
-                    .client
-                    .add_user_message(&cloud_message(params)?)
-                    .await?;
-                let turn = admitted_turn(admission.outcome)?;
-                serde_json::to_value(protocol::TurnStartResponse { turn })?
+                let mut message = cloud_message(params)?;
+                message.mode = mode;
+                let admission = match self.client.add_user_message(&message).await {
+                    Err(cloud::MutationError::InvalidRequest) => {
+                        return Err(PreflightRejection(
+                            "The Cloud message is empty, invalid, or too large.",
+                        )
+                        .into());
+                    }
+                    result => result?,
+                };
+                if matches!(mode, cloud::SubmissionMode::Steer) {
+                    serde_json::to_value(admitted_message(admission.outcome)?)?
+                } else {
+                    let turn = admitted_turn(admission.outcome)?;
+                    serde_json::to_value(protocol::TurnStartResponse { turn })?
+                }
             }
             Request::TurnInterrupt { params, .. } => {
                 self.client
@@ -230,7 +290,6 @@ fn thread_list_query(params: protocol::ThreadListParams) -> Result<cloud::Thread
     // Its explicit CLI/VS Code defaults are conventional source names.
     let sources = params.source_kinds.as_deref().unwrap_or_default();
     if !matches!(sources, [] | [Cli, VsCode] | [VsCode, Cli])
-        || params.archived == Some(true)
         || params.cwd.is_some()
         || params.search_term.is_some()
         || params.section_id.is_some()
@@ -252,13 +311,14 @@ fn thread_list_query(params: protocol::ThreadListParams) -> Result<cloud::Thread
     Ok(cloud::ThreadListQuery {
         cursor: params.cursor,
         limit: params.limit,
+        archived: params.archived.unwrap_or_default(),
         originators: params.originators.unwrap_or_default(),
         sort_key: match params.sort_key {
             Some(protocol::ThreadSortKey::CreatedAt) | None => cloud::ThreadSortKey::CreatedAt,
             Some(protocol::ThreadSortKey::UpdatedAt) => cloud::ThreadSortKey::UpdatedAt,
             Some(protocol::ThreadSortKey::RecencyAt) => cloud::ThreadSortKey::RecencyAt,
             Some(protocol::ThreadSortKey::SectionPosition) => {
-                bail!("Cloud section ordering is not supported yet.")
+                bail!("Cloud section ordering is not supported yet.");
             }
         },
         sort_direction: match params.sort_direction {
@@ -275,47 +335,139 @@ fn history_order(direction: protocol::SortDirection) -> cloud::HistoryOrder {
     }
 }
 
-fn cloud_message(mut params: protocol::TurnStartParams) -> Result<cloud::AddUserMessageRequest> {
+fn cloud_message(
+    mut params: protocol::TurnStartParams,
+) -> Result<cloud::AddUserMessageRequest, PreflightRejection> {
     let thread_id = std::mem::take(&mut params.thread_id);
     let client_user_message_id = params
         .client_user_message_id
         .take()
-        .ok_or_else(|| eyre!("A cloud message needs a stable submission ID."))?;
+        .ok_or(PreflightRejection(
+            "A cloud message needs a stable submission ID.",
+        ))?;
     let input = std::mem::take(&mut params.input);
     let turn_trigger = params.turn_trigger.take();
+    let (model, effort, service_tier) = if turn_trigger.as_deref() == Some("user") {
+        let tier = match params.service_tier.take() {
+            Some(Some(tier)) if tier == SERVICE_TIER_DEFAULT_REQUEST_VALUE => Some(None),
+            Some(Some(tier))
+                if !matches!(tier.as_str(), "fast" | "priority" | "flex" | "ultrafast") =>
+            {
+                return Err(PreflightRejection(
+                    "This service tier is unavailable in Cloud.",
+                ));
+            }
+            tier => tier,
+        };
+        (params.model.take(), params.effort.take(), tier)
+    } else {
+        (None, None, None)
+    };
     if params != protocol::TurnStartParams::default() {
-        bail!("Changing cloud settings or sending structured input is not supported yet.");
+        return Err(PreflightRejection(
+            "Changing cloud settings or sending structured input is not supported yet.",
+        ));
     }
-    let text = input
-        .into_iter()
-        .map(|item| match item {
+    let mut content = Vec::with_capacity(input.len());
+    for item in input {
+        let item = match item {
             protocol::UserInput::Text {
                 text,
                 text_elements,
-            } if text_elements.is_empty() => Ok(text),
-            _ => bail!("Cloud conversations currently accept plain text only."),
-        })
-        .collect::<Result<Vec<_>>>()?
-        .join("\n");
+            } => {
+                // Keep the existing line separation for consecutive plain text parts.
+                if text_elements.is_empty()
+                    && let Some(cloud::UserMessageInput::Text {
+                        text: previous,
+                        text_elements: previous_elements,
+                    }) = content.last_mut()
+                    && previous_elements.is_empty()
+                {
+                    previous.push('\n');
+                    previous.push_str(&text);
+                    continue;
+                }
+                cloud::UserMessageInput::Text {
+                    text,
+                    text_elements: text_elements
+                        .into_iter()
+                        .map(|element| cloud::UserMessageTextElement {
+                            placeholder: element.placeholder().map(str::to_owned),
+                            start: element.byte_range.start,
+                            end: element.byte_range.end,
+                        })
+                        .collect(),
+                }
+            }
+            protocol::UserInput::Image { image, detail } => cloud::UserMessageInput::Image {
+                image: match image {
+                    protocol::ImageReference::Inline { url } => cloud::ImageReference::Url(url),
+                    protocol::ImageReference::File { file_id } => {
+                        cloud::ImageReference::FileId(file_id)
+                    }
+                },
+                detail: detail.map(|detail| match detail {
+                    ImageDetail::Auto => cloud::ImageDetail::Auto,
+                    ImageDetail::Low => cloud::ImageDetail::Low,
+                    ImageDetail::High => cloud::ImageDetail::High,
+                    ImageDetail::Original => cloud::ImageDetail::Original,
+                }),
+            },
+            protocol::UserInput::LocalImage { .. } => {
+                return Err(PreflightRejection(
+                    "Prepare local images before sending them to Cloud.",
+                ));
+            }
+            protocol::UserInput::Audio { .. }
+            | protocol::UserInput::LocalAudio { .. }
+            | protocol::UserInput::Skill { .. }
+            | protocol::UserInput::Mention { .. } => {
+                return Err(PreflightRejection(
+                    "Cloud conversations currently accept text and images.",
+                ));
+            }
+        };
+        content.push(item);
+    }
     Ok(cloud::AddUserMessageRequest {
         thread_id,
         client_user_message_id,
-        text,
+        input: content,
         turn_trigger,
+        model,
+        effort: effort.map(|effort| effort.to_string()),
+        service_tier,
         mode: cloud::SubmissionMode::StartIfIdle,
         shared_access: false,
     })
 }
 
-fn admitted_turn(outcome: cloud::AdmissionOutcome) -> Result<protocol::Turn> {
-    match outcome {
-        cloud::AdmissionOutcome::Started(turn) | cloud::AdmissionOutcome::Steered(turn) => {
-            events::turn(turn)
+fn admitted_message(outcome: cloud::AdmissionOutcome) -> Result<CloudUserMessageReceipt> {
+    Ok(match outcome {
+        cloud::AdmissionOutcome::Started(turn) => {
+            CloudUserMessageReceipt::Started(events::turn(turn)?)
         }
-        cloud::AdmissionOutcome::Duplicate { .. } | cloud::AdmissionOutcome::Queued { .. } => {
+        cloud::AdmissionOutcome::Steered(turn) => {
+            CloudUserMessageReceipt::Steered(events::turn(turn)?)
+        }
+        cloud::AdmissionOutcome::Duplicate { turn_id } => {
+            CloudUserMessageReceipt::Duplicate { turn_id }
+        }
+        cloud::AdmissionOutcome::Queued { .. } => {
             bail!(
                 "Cloud already accepted this message without returning a turn. Reopen the conversation to see its status before sending again."
-            )
+            );
+        }
+    })
+}
+
+fn admitted_turn(outcome: cloud::AdmissionOutcome) -> Result<protocol::Turn> {
+    match admitted_message(outcome)? {
+        CloudUserMessageReceipt::Started(turn) | CloudUserMessageReceipt::Steered(turn) => Ok(turn),
+        CloudUserMessageReceipt::Duplicate { .. } => {
+            bail!(
+                "Cloud already accepted this message without returning a turn. Reopen the conversation to see its status before sending again."
+            );
         }
     }
 }

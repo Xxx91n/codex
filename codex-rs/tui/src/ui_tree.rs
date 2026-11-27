@@ -2,6 +2,12 @@
 
 mod decode;
 mod render;
+mod theme;
+
+pub(crate) use render::PreparedUiTree;
+pub(crate) use render::sanitize_leaf;
+use theme::Color;
+use theme::TextWeight;
 
 #[cfg(test)]
 #[path = "ui_tree_tests.rs"]
@@ -13,15 +19,23 @@ use serde::Serialize;
 const MAX_GAP: u64 = (1 << 53) - 1;
 const MAX_TEXT_BYTES: usize = 16 * 1024;
 
-/// A nullable root with bounded depth, node count, and total UTF-8 leaf bytes.
+/// A nullable root. JSON is limited to 64 KiB, 256 non-null nodes, depth 16 (root at 0),
+/// and 16 KiB of UTF-8 text across all string leaves.
 #[derive(Clone, Debug, PartialEq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export_to = "statusline.d.ts"))]
 pub(crate) struct UiTree(pub(crate) Option<UiNode>);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+#[cfg_attr(
+    test,
+    derive(ts_rs::TS),
+    ts(export_to = "statusline.d.ts", rename = "Element")
+)]
 pub(crate) enum UiNode {
     Text {
-        #[serde(default, skip_serializing)]
+        #[serde(default, skip_serializing_if = "is_default")]
+        #[cfg_attr(test, ts(as = "Option<TextProps>", optional))]
         props: TextProps,
         children: Vec<Option<UiNode>>,
     },
@@ -33,16 +47,42 @@ pub(crate) enum UiNode {
         props: RowProps,
         children: Vec<Option<UiNode>>,
     },
+    Bold {
+        children: Vec<Option<UiNode>>,
+    },
+    Italic {
+        children: Vec<Option<UiNode>>,
+    },
+    Underline {
+        children: Vec<Option<UiNode>>,
+    },
     #[serde(untagged)]
     String(String),
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct TextProps {}
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export_to = "statusline.d.ts", optional_fields = nullable))]
+pub(crate) struct TextProps {
+    #[serde(
+        deserialize_with = "decode::optional_token",
+        skip_serializing_if = "Option::is_none"
+    )]
+    color: Option<Color>,
+    #[serde(
+        deserialize_with = "decode::optional_token",
+        skip_serializing_if = "Option::is_none"
+    )]
+    weight: Option<TextWeight>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    italic: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    underline: Option<bool>,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export_to = "statusline.d.ts", optional_fields = nullable))]
 pub(crate) struct LinkProps {
     pub(crate) href: LinkHref,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -52,6 +92,11 @@ pub(crate) struct LinkProps {
 /// An absolute HTTP(S) URL without control characters, at most 8 KiB in UTF-8.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "String")]
+#[cfg_attr(
+    test,
+    derive(ts_rs::TS),
+    ts(export_to = "statusline.d.ts", type = "string")
+)]
 pub(crate) struct LinkHref(String);
 
 impl TryFrom<String> for LinkHref {
@@ -75,8 +120,36 @@ impl TryFrom<&str> for LinkHref {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export_to = "statusline.d.ts", optional_fields = nullable))]
 pub(crate) struct RowProps {
     /// Horizontal spacing in terminal columns, expressed as a non-negative JavaScript-safe integer.
     #[serde(deserialize_with = "decode::gap")]
+    #[cfg_attr(test, ts(type = "number"))]
     pub(crate) gap: u64,
+    #[serde(
+        default,
+        deserialize_with = "decode::optional_token",
+        skip_serializing_if = "Option::is_none"
+    )]
+    background: Option<Color>,
+    #[serde(
+        default,
+        deserialize_with = "decode::token",
+        skip_serializing_if = "is_default"
+    )]
+    #[cfg_attr(test, ts(as = "Option<RowWrap>", optional))]
+    wrap: RowWrap,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export_to = "statusline.d.ts"))]
+enum RowWrap {
+    #[default]
+    Nowrap,
+    Wrap,
+}
+
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
 }

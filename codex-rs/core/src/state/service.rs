@@ -89,6 +89,7 @@ pub(crate) struct SessionServices {
     pub(crate) mcp_thread_init: ExtensionDataInit,
     pub(crate) agent_control: Arc<dyn AgentControl>,
     pub(crate) local_agent_runtime: LocalAgentRuntime,
+    pub(crate) budget_policy: crate::rollout_budget::ThreadBudgetPolicy,
     pub(crate) network_proxy: ArcSwapOption<StartedNetworkProxy>,
     pub(crate) network_proxy_audit_metadata: NetworkProxyAuditMetadata,
     pub(crate) managed_network_requirements_configured: bool,
@@ -108,6 +109,21 @@ pub(crate) struct SessionServices {
 }
 
 impl SessionServices {
+    #[expect(
+        clippy::expect_used,
+        reason = "poisoned grants must not authorize discovery"
+    )]
+    pub(crate) fn granted_permissions(
+        &self,
+        environment_id: &str,
+    ) -> Option<AdditionalPermissionProfile> {
+        self.granted_permissions_by_environment_id
+            .lock()
+            .expect("session permission grants lock poisoned")
+            .get(environment_id)
+            .cloned()
+    }
+
     #[expect(
         clippy::expect_used,
         reason = "poisoned grant state must not authorize further operations"

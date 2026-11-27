@@ -88,6 +88,8 @@ pub struct ThreadItem {
     pub source: Option<SessionSource>,
     /// Persisted thread history contract selected when this thread was created.
     pub history_mode: ThreadHistoryMode,
+    /// Parent of a persisted attached thread.
+    pub attached_to_thread_id: Option<ThreadId>,
     /// Immediate control/spawn parent thread id from session metadata.
     pub parent_thread_id: Option<ThreadId>,
     /// Random unique nickname from session metadata for AgentControl-spawned sub-agents.
@@ -122,7 +124,8 @@ pub type ConversationsPage = ThreadsPage;
 struct HeadTailSummary {
     originator: Option<String>,
     saw_session_meta: bool,
-    attached_to_parent: bool,
+    has_fork_history: bool,
+    attached_to_thread_id: Option<ThreadId>,
     thread_id: Option<ThreadId>,
     first_user_message: Option<String>,
     preview: Option<String>,
@@ -165,12 +168,14 @@ pub enum ThreadListLayout {
     Flat,
 }
 
+#[derive(Clone, Copy)]
 pub struct ThreadListConfig<'a> {
     pub allowed_sources: &'a [SessionSource],
     pub model_providers: Option<&'a [String]>,
     pub cwd_filters: Option<&'a [PathBuf]>,
     pub default_provider: &'a str,
     pub layout: ThreadListLayout,
+    pub include_attached_threads: bool,
 }
 
 /// Pagination cursor identifying the last item in a page.
@@ -255,9 +260,8 @@ struct FilesByCreatedAtVisitor<'a> {
     page_size: usize,
     anchor_state: AnchorState,
     more_matches_available: bool,
-    allowed_sources: &'a [SessionSource],
+    config: ThreadListConfig<'a>,
     provider_matcher: Option<&'a ProviderMatcher<'a>>,
-    cwd_filters: Option<&'a [PathBuf]>,
 }
 
 impl<'a> RolloutFileVisitor for FilesByCreatedAtVisitor<'a> {
@@ -285,12 +289,12 @@ impl<'a> RolloutFileVisitor for FilesByCreatedAtVisitor<'a> {
             .and_then(format_rfc3339);
         if let Some(item) = build_thread_item(
             path,
-            self.allowed_sources,
+            self.config.allowed_sources,
             self.provider_matcher,
-            self.cwd_filters,
+            self.config.cwd_filters,
             updated_at,
             PreviewFilter::RequirePreview,
-            /*include_attached_threads*/ false,
+            self.config.include_attached_threads,
         )
         .await
         {
@@ -363,6 +367,7 @@ pub async fn get_threads(
             cwd_filters,
             default_provider,
             layout: ThreadListLayout::NestedByDate,
+            include_attached_threads: false,
         },
     )
     .await
@@ -397,9 +402,8 @@ pub async fn get_threads_in_root(
                 page_size,
                 anchor,
                 sort_key,
-                config.allowed_sources,
+                config,
                 provider_matcher.as_ref(),
-                config.cwd_filters,
             )
             .await?
         }
@@ -409,9 +413,8 @@ pub async fn get_threads_in_root(
                 page_size,
                 anchor,
                 sort_key,
-                config.allowed_sources,
+                config,
                 provider_matcher.as_ref(),
-                config.cwd_filters,
             )
             .await?
         }
@@ -428,9 +431,8 @@ async fn traverse_directories_for_paths(
     page_size: usize,
     anchor: Option<Cursor>,
     sort_key: ThreadSortKey,
-    allowed_sources: &[SessionSource],
+    config: ThreadListConfig<'_>,
     provider_matcher: Option<&ProviderMatcher<'_>>,
-    cwd_filters: Option<&[PathBuf]>,
 ) -> io::Result<ThreadsPage> {
     match sort_key {
         ThreadSortKey::CreatedAt => {
@@ -438,9 +440,8 @@ async fn traverse_directories_for_paths(
                 root,
                 page_size,
                 anchor,
-                allowed_sources,
+                config,
                 provider_matcher,
-                cwd_filters,
             )
             .await
         }
@@ -449,9 +450,8 @@ async fn traverse_directories_for_paths(
                 root,
                 page_size,
                 anchor,
-                allowed_sources,
+                config,
                 provider_matcher,
-                cwd_filters,
             )
             .await
         }
@@ -463,32 +463,15 @@ async fn traverse_flat_paths(
     page_size: usize,
     anchor: Option<Cursor>,
     sort_key: ThreadSortKey,
-    allowed_sources: &[SessionSource],
+    config: ThreadListConfig<'_>,
     provider_matcher: Option<&ProviderMatcher<'_>>,
-    cwd_filters: Option<&[PathBuf]>,
 ) -> io::Result<ThreadsPage> {
     match sort_key {
         ThreadSortKey::CreatedAt => {
-            traverse_flat_paths_created(
-                root,
-                page_size,
-                anchor,
-                allowed_sources,
-                provider_matcher,
-                cwd_filters,
-            )
-            .await
+            traverse_flat_paths_created(root, page_size, anchor, config, provider_matcher).await
         }
         ThreadSortKey::UpdatedAt | ThreadSortKey::RecencyAt => {
-            traverse_flat_paths_updated(
-                root,
-                page_size,
-                anchor,
-                allowed_sources,
-                provider_matcher,
-                cwd_filters,
-            )
-            .await
+            traverse_flat_paths_updated(root, page_size, anchor, config, provider_matcher).await
         }
     }
 }
@@ -503,9 +486,8 @@ async fn traverse_directories_for_paths_created(
     root: PathBuf,
     page_size: usize,
     anchor: Option<Cursor>,
-    allowed_sources: &[SessionSource],
+    config: ThreadListConfig<'_>,
     provider_matcher: Option<&ProviderMatcher<'_>>,
-    cwd_filters: Option<&[PathBuf]>,
 ) -> io::Result<ThreadsPage> {
     let mut items: Vec<ThreadItem> = Vec::with_capacity(page_size);
     let mut scanned_files = 0usize;
@@ -515,9 +497,8 @@ async fn traverse_directories_for_paths_created(
         page_size,
         anchor_state: AnchorState::new(anchor),
         more_matches_available,
-        allowed_sources,
+        config,
         provider_matcher,
-        cwd_filters,
     };
     walk_rollout_files(&root, &mut scanned_files, &mut visitor).await?;
     more_matches_available = visitor.more_matches_available;
@@ -554,9 +535,8 @@ async fn traverse_directories_for_paths_updated(
     root: PathBuf,
     page_size: usize,
     anchor: Option<Cursor>,
-    allowed_sources: &[SessionSource],
+    config: ThreadListConfig<'_>,
     provider_matcher: Option<&ProviderMatcher<'_>>,
-    cwd_filters: Option<&[PathBuf]>,
 ) -> io::Result<ThreadsPage> {
     let mut items: Vec<ThreadItem> = Vec::with_capacity(page_size);
     let mut scanned_files = 0usize;
@@ -582,12 +562,12 @@ async fn traverse_directories_for_paths_updated(
         let updated_at_fallback = format_rfc3339(ts);
         if let Some(item) = build_thread_item(
             candidate.path,
-            allowed_sources,
+            config.allowed_sources,
             provider_matcher,
-            cwd_filters,
+            config.cwd_filters,
             updated_at_fallback,
             PreviewFilter::RequirePreview,
-            /*include_attached_threads*/ false,
+            config.include_attached_threads,
         )
         .await
         {
@@ -619,9 +599,8 @@ async fn traverse_flat_paths_created(
     root: PathBuf,
     page_size: usize,
     anchor: Option<Cursor>,
-    allowed_sources: &[SessionSource],
+    config: ThreadListConfig<'_>,
     provider_matcher: Option<&ProviderMatcher<'_>>,
-    cwd_filters: Option<&[PathBuf]>,
 ) -> io::Result<ThreadsPage> {
     let mut items: Vec<ThreadItem> = Vec::with_capacity(page_size);
     let mut scanned_files = 0usize;
@@ -643,12 +622,12 @@ async fn traverse_flat_paths_created(
             .and_then(format_rfc3339);
         if let Some(item) = build_thread_item(
             path,
-            allowed_sources,
+            config.allowed_sources,
             provider_matcher,
-            cwd_filters,
+            config.cwd_filters,
             updated_at,
             PreviewFilter::IncludeEmpty,
-            /*include_attached_threads*/ false,
+            config.include_attached_threads,
         )
         .await
         {
@@ -680,9 +659,8 @@ async fn traverse_flat_paths_updated(
     root: PathBuf,
     page_size: usize,
     anchor: Option<Cursor>,
-    allowed_sources: &[SessionSource],
+    config: ThreadListConfig<'_>,
     provider_matcher: Option<&ProviderMatcher<'_>>,
-    cwd_filters: Option<&[PathBuf]>,
 ) -> io::Result<ThreadsPage> {
     let mut items: Vec<ThreadItem> = Vec::with_capacity(page_size);
     let mut scanned_files = 0usize;
@@ -708,12 +686,12 @@ async fn traverse_flat_paths_updated(
         let updated_at_fallback = format_rfc3339(ts);
         if let Some(item) = build_thread_item(
             candidate.path,
-            allowed_sources,
+            config.allowed_sources,
             provider_matcher,
-            cwd_filters,
+            config.cwd_filters,
             updated_at_fallback,
             PreviewFilter::IncludeEmpty,
-            /*include_attached_threads*/ false,
+            config.include_attached_threads,
         )
         .await
         {
@@ -812,36 +790,20 @@ async fn build_thread_item(
 ) -> Option<ThreadItem> {
     // Read head and detect preview-bearing events; goal previews can appear before
     // the first normal user message.
-    let summary = read_head_summary(&path, HEAD_RECORD_LIMIT)
+    let filters = SummaryFilters {
+        allowed_sources,
+        provider_matcher,
+        cwd_filters,
+        include_attached_threads,
+    };
+    let summary = read_head_summary(&path, HEAD_RECORD_LIMIT, filters)
         .await
-        .unwrap_or_default();
-    if summary.attached_to_parent && !include_attached_threads {
-        return None;
-    }
-    if !allowed_sources.is_empty()
-        && !summary
-            .source
-            .as_ref()
-            .is_some_and(|source| allowed_sources.contains(source))
-    {
-        return None;
-    }
-    if let Some(matcher) = provider_matcher
-        && !matcher.matches(summary.model_provider.as_deref())
-    {
-        return None;
-    }
-    if let Some(cwd_filters) = cwd_filters
-        && !summary.cwd.as_ref().is_some_and(|cwd| {
-            cwd_filters
-                .iter()
-                .any(|filter| path_utils::paths_match_after_normalization(cwd, filter))
-        })
-    {
-        return None;
-    }
+        .ok()??;
     if summary.saw_session_meta
-        && (matches!(preview_filter, PreviewFilter::IncludeEmpty) || summary.preview.is_some())
+        && (matches!(preview_filter, PreviewFilter::IncludeEmpty)
+            || summary.preview.is_some()
+            || summary.has_fork_history
+            || summary.attached_to_thread_id.is_some())
     {
         let HeadTailSummary {
             originator,
@@ -870,6 +832,7 @@ async fn build_thread_item(
             originator,
             path,
             thread_id,
+            attached_to_thread_id: summary.attached_to_thread_id,
             first_user_message,
             preview,
             section: None,
@@ -992,7 +955,40 @@ impl<'a> ProviderMatcher<'a> {
     }
 }
 
-async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTailSummary> {
+struct SummaryFilters<'a> {
+    allowed_sources: &'a [SessionSource],
+    provider_matcher: Option<&'a ProviderMatcher<'a>>,
+    cwd_filters: Option<&'a [PathBuf]>,
+    include_attached_threads: bool,
+}
+
+impl SummaryFilters<'_> {
+    /// Filters only the rollout's first session metadata; copied fork metadata cannot override it.
+    fn matches(&self, summary: &HeadTailSummary) -> bool {
+        (self.include_attached_threads || summary.attached_to_thread_id.is_none())
+            && (self.allowed_sources.is_empty()
+                || summary
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| self.allowed_sources.contains(source)))
+            && self
+                .provider_matcher
+                .is_none_or(|matcher| matcher.matches(summary.model_provider.as_deref()))
+            && self.cwd_filters.is_none_or(|filters| {
+                summary.cwd.as_ref().is_some_and(|cwd| {
+                    filters
+                        .iter()
+                        .any(|filter| path_utils::paths_match_after_normalization(cwd, filter))
+                })
+            })
+    }
+}
+
+async fn read_head_summary(
+    path: &Path,
+    head_limit: usize,
+    filters: SummaryFilters<'_>,
+) -> io::Result<Option<HeadTailSummary>> {
     let mut lines = compression::open_rollout_line_reader(path).await?;
     let mut summary = HeadTailSummary::default();
     let mut lines_scanned = 0usize;
@@ -1032,7 +1028,17 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
                     summary.originator = (!session_meta_line.meta.originator.is_empty())
                         .then(|| session_meta_line.meta.originator.clone());
                     summary.source = Some(session_meta_line.meta.source.clone());
-                    summary.attached_to_parent = session_meta_line.meta.attached_thread;
+                    summary.attached_to_thread_id = session_meta_line
+                        .meta
+                        .forked_from_id
+                        .filter(|_| session_meta_line.meta.attached_thread);
+                    // A reference-backed fork can have a stored preview before its first local message.
+                    summary.has_fork_history = session_meta_line.meta.forked_from_id.is_some()
+                        && session_meta_line
+                            .meta
+                            .history_base
+                            .is_some_and(|base| base.end_ordinal_exclusive > 0)
+                        && !session_meta_line.meta.source.is_non_root_agent();
                     summary.history_mode = session_meta_line.meta.history_mode;
                     summary.parent_thread_id = session_meta_line.meta.parent_thread_id;
                     summary.agent_nickname = session_meta_line.meta.agent_nickname.clone();
@@ -1055,6 +1061,9 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
                     summary.cli_version = Some(session_meta_line.meta.cli_version);
                     summary.created_at = Some(session_meta_line.meta.timestamp.clone());
                     summary.saw_session_meta = true;
+                    if !filters.matches(&summary) {
+                        return Ok(None);
+                    }
 
                     if codex_state::is_guardian_review_source(&session_meta_line.meta.source) {
                         // The synthetic prompt is not needed for the thread summary.
@@ -1116,7 +1125,7 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
         }
     }
 
-    Ok(summary)
+    Ok(Some(summary))
 }
 
 /// Read up to `HEAD_RECORD_LIMIT` records from the start of the rollout file at `path`.

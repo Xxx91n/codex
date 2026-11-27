@@ -90,9 +90,15 @@ impl ChatWidget {
         self.set_skills(/*skills*/ None);
         self.session_network_proxy = session.network_proxy.clone();
         let previous_thread_id = self.thread_id;
+        if previous_thread_id != Some(session.thread_id) || self.cloud_picker_selection.is_some() {
+            self.dismiss_stale_model_picker();
+        }
         let connector_scope_changed = previous_thread_id != Some(session.thread_id)
             || self.config.cwd.as_path() != session.cwd.as_path();
         self.thread_id = Some(session.thread_id);
+        self.read_only_history = session.read_only_history;
+        self.thread_settings_confirmed = session.thread_settings_confirmed;
+        self.sync_context_window_visibility();
         self.daybreak_enabled = self.config.features.enabled(Feature::CliDaybreak)
             && session.daybreak_enabled
             && !matches!(display, SessionConfiguredDisplay::SideConversation);
@@ -124,7 +130,10 @@ impl ChatWidget {
             self.review.recent_auto_review_denials = RecentAutoReviewDenials::default();
             self.clear_thread_usage_state();
         }
+        let has_turn_history =
+            previous_thread_id == self.thread_id && self.turn_lifecycle.has_turn_history;
         self.turn_lifecycle.reset_thread();
+        self.turn_lifecycle.has_turn_history = has_turn_history;
         self.safety_recourse = None;
         self.clear_safety_buffering();
         self.thread_name = session.thread_name.clone();
@@ -133,6 +142,8 @@ impl ChatWidget {
         self.update_collaboration_mode_indicator();
         self.forked_from = session.forked_from_id;
         self.current_rollout_path = session.rollout_path.clone();
+        self.primary_environment_cwd
+            .clone_from(&session.primary_environment_cwd);
         self.current_cwd = Some(session.cwd.to_path_buf());
         self.config.cwd = session.cwd.clone();
         self.config.model_provider_id = session.model_provider_id.clone();
@@ -406,8 +417,8 @@ impl ChatWidget {
         )));
     }
 
-    /// Update status surfaces before a confirmed manual rename's server notification arrives.
-    pub(crate) fn expect_manual_thread_name(&mut self, thread_id: ThreadId, name: String) {
+    /// Show a provisional or manually chosen name before its server notification arrives.
+    pub(crate) fn display_thread_name(&mut self, thread_id: ThreadId, name: String) {
         if self.thread_id == Some(thread_id) {
             self.thread_name = Some(name);
             self.refresh_status_surfaces();

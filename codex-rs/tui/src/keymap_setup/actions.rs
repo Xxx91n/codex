@@ -119,8 +119,12 @@ define_keymap_actions! {
     global "Global" {
         change_host [MultiBackend] => "Change where a new conversation runs.",
         focus_main_composer [Workspace] => "Focus the main conversation composer.",
+        focus_sidebar_tabs [Workspace] => "Open the sidebar tab chooser.",
         focus_sidebar_content [Workspace] => "Focus the side conversation, or hide it when already focused.",
         hide_pane [Workspace] => "Hide the focused sidebar pane.",
+        close_sidebar_tab [Workspace] => "Close the active sidebar tab.",
+        sidebar_up [Workspace] => "Switch to the previous sidebar tab.",
+        sidebar_down [Workspace] => "Switch to the next sidebar tab.",
         focus_pane_left [Workspace] => "Focus the parent conversation.",
         focus_pane_right [Workspace] => "Focus the open side conversation.",
         minimize_pane_width [Workspace] => "Minimize the focused pane width.",
@@ -164,6 +168,8 @@ define_keymap_actions! {
         toggle_shortcuts => "Show or hide the composer shortcut overlay.",
         history_search_previous => "Open history search or move to the previous match.",
         history_search_next => "Move to the next history search match.",
+        undo => "Undo the last composer edit.",
+        redo => "Redo the last composer edit.",
     }
     editor "Editor" {
         insert_newline => "Insert a newline in the editor.",
@@ -273,6 +279,7 @@ define_keymap_actions! {
         close => "Close the pager overlay.",
         close_transcript => "Close the transcript overlay.",
         find => "Find text in a transcript pager.",
+        mark_markdown => "Mark table cells in transcript selection mode.",
     }
     list "List" {
         move_up => "Move list selection up.",
@@ -316,7 +323,7 @@ define_keymap_actions! {
 /// This is intentionally presentation-only: the returned string must never be
 /// parsed back into an action name, because underscores and casing are part of
 /// the stable config contract.
-pub(super) fn action_label(action: &str) -> String {
+pub(crate) fn action_label(action: &str) -> String {
     if action == "change_host" {
         return "Change Where to Run".to_string();
     }

@@ -7,11 +7,11 @@ use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemPolicyProjection;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::compatibility_writable_roots_for_permission_profile;
 use codex_protocol::protocol::WritableRoot;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
 use crate::SandboxType;
-use crate::compatibility_sandbox_policy_for_permission_profile;
 
 /// Resolved filesystem overrides for the Windows sandbox backends.
 ///
@@ -31,6 +31,35 @@ pub struct WindowsSandboxFilesystemOverrides {
     pub additional_deny_write_paths: Vec<AbsolutePathBuf>,
 }
 
+impl WindowsSandboxFilesystemOverrides {
+    /// Resolve filesystem overrides for the selected Windows sandbox using the child's environment.
+    pub fn resolve(
+        sandbox: SandboxType,
+        permission_profile: &PermissionProfile,
+        sandbox_policy_cwd: &AbsolutePathBuf,
+        windows_sandbox_level: WindowsSandboxLevel,
+        workload_env: &HashMap<String, String>,
+    ) -> Result<Option<Self>, String> {
+        let use_elevated = windows_sandbox_uses_elevated_backend(windows_sandbox_level);
+        if use_elevated {
+            resolve_windows_elevated_filesystem_overrides(
+                sandbox,
+                permission_profile,
+                sandbox_policy_cwd,
+                use_elevated,
+                workload_env,
+            )
+        } else {
+            resolve_windows_restricted_token_filesystem_overrides(
+                sandbox,
+                permission_profile,
+                sandbox_policy_cwd,
+                windows_sandbox_level,
+            )
+        }
+    }
+}
+
 pub fn windows_sandbox_uses_elevated_backend(sandbox_level: WindowsSandboxLevel) -> bool {
     matches!(sandbox_level, WindowsSandboxLevel::Elevated)
 }
@@ -43,32 +72,6 @@ pub fn permission_profile_supports_windows_restricted_token_sandbox(
             !file_system.to_sandbox_policy().has_full_disk_write_access()
         }
         PermissionProfile::Disabled | PermissionProfile::External { .. } => false,
-    }
-}
-
-pub fn unsupported_windows_restricted_token_sandbox_reason(
-    sandbox: SandboxType,
-    permission_profile: &PermissionProfile,
-    sandbox_policy_cwd: &AbsolutePathBuf,
-    windows_sandbox_level: WindowsSandboxLevel,
-) -> Option<String> {
-    if windows_sandbox_level == WindowsSandboxLevel::Elevated {
-        resolve_windows_elevated_filesystem_overrides(
-            sandbox,
-            permission_profile,
-            sandbox_policy_cwd,
-            windows_sandbox_level == WindowsSandboxLevel::Elevated,
-            &HashMap::new(),
-        )
-        .err()
-    } else {
-        resolve_windows_restricted_token_filesystem_overrides(
-            sandbox,
-            permission_profile,
-            sandbox_policy_cwd,
-            windows_sandbox_level,
-        )
-        .err()
     }
 }
 
@@ -132,11 +135,8 @@ pub fn resolve_windows_restricted_token_filesystem_overrides(
         );
     }
 
-    let legacy_projection = compatibility_sandbox_policy_for_permission_profile(
-        permission_profile,
-        sandbox_policy_cwd.as_path(),
-    );
-    let legacy_writable_roots = legacy_projection.get_writable_roots_with_cwd(sandbox_policy_cwd);
+    let legacy_writable_roots =
+        compatibility_writable_roots_for_permission_profile(permission_profile, sandbox_policy_cwd);
     let split_writable_roots = resolved.writable_roots;
     let legacy_root_paths: BTreeSet<PathBuf> = legacy_writable_roots
         .iter()
@@ -263,11 +263,8 @@ pub fn resolve_windows_elevated_filesystem_overrides(
         })
     });
     let normalize_path = |path: PathBuf| dunce::canonicalize(&path).unwrap_or(path);
-    let legacy_projection = compatibility_sandbox_policy_for_permission_profile(
-        permission_profile,
-        sandbox_policy_cwd.as_path(),
-    );
-    let legacy_writable_roots = legacy_projection.get_writable_roots_with_cwd(sandbox_policy_cwd);
+    let legacy_writable_roots =
+        compatibility_writable_roots_for_permission_profile(permission_profile, sandbox_policy_cwd);
     let legacy_root_paths: BTreeSet<PathBuf> = legacy_writable_roots
         .iter()
         .map(|root| normalize_path(root.root.to_path_buf()))

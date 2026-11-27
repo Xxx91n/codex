@@ -86,10 +86,14 @@ impl ChatWidget {
     }
 
     pub(super) fn flush_answer_stream_with_separator(&mut self) {
-        self.flush_answer_stream(/*completed_message*/ None);
+        self.flush_answer_stream(/*completed_message*/ None, /*phase*/ None);
     }
 
-    fn flush_answer_stream(&mut self, completed_message: Option<&str>) {
+    fn flush_answer_stream(
+        &mut self,
+        completed_message: Option<&str>,
+        phase: Option<MessagePhase>,
+    ) {
         let had_stream_controller = self.stream_controller.is_some();
         if let Some(mut controller) = self.stream_controller.take() {
             let needs_scrollback_reflow = controller.needs_scrollback_reflow();
@@ -147,6 +151,7 @@ impl ChatWidget {
                 });
                 self.note_stream_consolidation_queued();
                 self.app_event_tx.send(AppEvent::ConsolidateAgentMessage {
+                    phase,
                     interrupted_item,
                     source,
                     copy_source,
@@ -253,6 +258,7 @@ impl ChatWidget {
             });
         let display = CapturedSideDisplay {
             rendered_completion_turn_ids: self.turn_lifecycle.rendered_completion_turn_ids.clone(),
+            generated_images: std::mem::take(&mut self.turn_lifecycle.generated_images),
             active,
             last_completed_agent_message: self.transcript.last_completed_agent_message.clone(),
             auxiliary: self
@@ -264,7 +270,7 @@ impl ChatWidget {
                 draft.set_text_with_elements(&snapshot.text, &snapshot.text_elements);
                 draft
             },
-            status: self.status_line_text(),
+            status_line: self.status_line_content().cloned(),
             work: self
                 .last_turn_id()
                 .filter(|_| self.is_agent_turn_running())
@@ -281,18 +287,19 @@ impl ChatWidget {
         (stream, display)
     }
 
-    pub(super) fn finalize_completed_assistant_message(&mut self, message: Option<&str>) {
-        if self.stream_controller.is_none()
-            && let Some(message) = message
-            && !message.is_empty()
-        {
+    pub(super) fn finalize_completed_assistant_message(
+        &mut self,
+        message: &str,
+        phase: Option<MessagePhase>,
+    ) {
+        if self.stream_controller.is_none() && !message.is_empty() {
             let displayed =
                 parse_assistant_markdown(message, self.config.cwd.as_path()).visible_markdown;
             self.handle_streaming_delta(displayed);
         }
         // Item completion is authoritative. Use it for consolidation so any
         // deltas dropped by a saturated transport cannot truncate the transcript.
-        self.flush_answer_stream(message);
+        self.flush_answer_stream(Some(message), phase);
         self.handle_stream_finished();
         self.request_redraw();
     }
@@ -534,6 +541,9 @@ impl ChatWidget {
         if !from_replay && let Some(questions) = &item.questions {
             self.add_async_questions(&item.id, questions);
         }
+        if self.transcript.has_replayed_cloud_text(turn_id, &item.id) {
+            return;
+        }
         self.transcript.last_completed_agent_message = Some((turn_id.to_string(), item.id.clone()));
         let mut message = String::new();
         for content in &item.content {
@@ -572,17 +582,25 @@ impl ChatWidget {
                 self.config.cwd.as_path(),
                 context,
                 questions,
-            );
+            )
+            .with_phase(item.phase.clone());
             if let Some(item) = interrupted {
                 self.app_event_tx
                     .send(AppEvent::CorrectFlushedAgentMessage { item, cell });
             } else {
                 self.add_to_history(cell);
             }
+            if self.transcript.recording_finished_cloud_text
+                && let Some(seen) = &mut self.transcript.replayed_cloud_text
+            {
+                seen.entry(turn_id.to_owned())
+                    .or_default()
+                    .insert(item.id.clone());
+            }
             self.handle_stream_finished();
             self.request_redraw();
         } else {
-            self.finalize_completed_assistant_message(Some(&message));
+            self.finalize_completed_assistant_message(&message, item.phase.clone());
         }
         self.transcript.last_flushed_agent_message = None;
         if !parsed.visible_markdown.is_empty() {

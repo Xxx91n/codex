@@ -8,12 +8,47 @@ use std::marker::PhantomData;
 use tonic::codec::Codec;
 
 #[derive(Clone, prost::Message)]
-pub(crate) struct ResumeResponse {}
+pub(crate) struct EmptyResponse {}
 
 #[derive(Clone, prost::Message)]
-pub(crate) struct AttachRequest {
+pub(crate) struct ThreadIdRequest {
     #[prost(string, tag = "1")]
     pub thread_id: String,
+}
+
+#[derive(Clone, prost::Message)]
+pub(crate) struct SetThreadNameRequest {
+    #[prost(string, tag = "1")]
+    pub thread_id: String,
+    #[prost(string, tag = "2")]
+    pub name: String,
+}
+
+#[derive(Clone, prost::Message)]
+pub(crate) struct ReadThreadResponse {
+    #[prost(message, optional, tag = "1")]
+    pub thread: Option<ThreadName>,
+}
+
+#[derive(Clone, prost::Message)]
+#[prost(skip_debug)]
+pub(crate) struct ThreadName {
+    #[prost(string, optional, tag = "14")]
+    pub id: Option<String>,
+    #[prost(string, optional, tag = "17")]
+    pub name: Option<String>,
+}
+
+impl std::fmt::Debug for ThreadName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ThreadName([redacted])")
+    }
+}
+
+#[derive(Clone, prost::Message)]
+pub(crate) struct UnarchiveResponse {
+    #[prost(bytes = "bytes", optional, tag = "1")]
+    pub thread: Option<Bytes>,
 }
 
 #[derive(Clone, prost::Message)]
@@ -38,7 +73,7 @@ impl<T: Message + Send + 'static> Codec for RawResponseCodec<T> {
     type Encoder = tonic_prost::ProstEncoder<T>;
     type Decoder = RawDecoder;
     fn encoder(&mut self) -> Self::Encoder {
-        tonic_prost::ProstCodec::<T, ResumeResponse>::default().encoder()
+        tonic_prost::ProstCodec::<T, EmptyResponse>::default().encoder()
     }
     fn decoder(&mut self) -> Self::Decoder {
         RawDecoder

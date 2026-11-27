@@ -218,6 +218,9 @@ pub struct Thread {
     pub session_id: String,
     /// Source thread id when this thread was created by forking another thread.
     pub forked_from_id: Option<String>,
+    /// Parent that owns this persisted attached thread, independent of fork or spawn lineage.
+    #[experimental("thread.attachedToThreadId")]
+    pub attached_to_thread_id: Option<String>,
     /// The ID of the parent thread. This will only be set if this thread is a subagent.
     pub parent_thread_id: Option<String>,
     /// Usually the first user message in the thread, if available.
@@ -305,6 +308,7 @@ struct ThreadCompatibility {
     extra: Option<ThreadExtra>,
     session_id: String,
     forked_from_id: Option<String>,
+    attached_to_thread_id: Option<String>,
     parent_thread_id: Option<String>,
     preview: String,
     ephemeral: bool,
@@ -350,6 +354,7 @@ impl<'de> Deserialize<'de> for Thread {
             extra: thread.extra,
             session_id: thread.session_id,
             forked_from_id: thread.forked_from_id,
+            attached_to_thread_id: thread.attached_to_thread_id,
             parent_thread_id: thread.parent_thread_id,
             preview: thread.preview,
             ephemeral: thread.ephemeral,
@@ -444,6 +449,18 @@ pub struct TurnError {
     /// Optional public explanation and continuation instruction for a misalignment block.
     #[serde(default)]
     pub misalignment: Option<MisalignmentErrorDetails>,
+}
+
+impl From<codex_protocol::protocol::ErrorEvent> for TurnError {
+    fn from(error: codex_protocol::protocol::ErrorEvent) -> Self {
+        let additional_details = None;
+        Self {
+            message: error.message,
+            codex_error_info: error.codex_error_info.map(Into::into),
+            additional_details,
+            misalignment: error.misalignment.map(Into::into),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema, TS)]

@@ -14,6 +14,7 @@ use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadItemPayload;
 use codex_app_server_protocol::TurnStatus;
 use codex_protocol::items::AsyncUserInputQuestion;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -49,6 +50,36 @@ impl SideAnswer {
 }
 
 impl SideCompanion {
+    pub(super) fn can_scroll_without_refresh(&self) -> bool {
+        self.answer
+            .as_ref()
+            .is_none_or(|answer| answer.pending.is_empty())
+            && self
+                .view
+                .can_scroll_without_refresh(&self.cells, /*live_key*/ None)
+    }
+
+    pub(super) fn empty(cwd: AbsolutePathBuf) -> Self {
+        Self {
+            display: CapturedSideDisplay {
+                rendered_completion_turn_ids: Default::default(),
+                generated_images: Default::default(),
+                active: None,
+                auxiliary: Vec::new(),
+                draft: Box::default(),
+                status_line: None,
+                work: None,
+                last_completed_agent_message: None,
+                cwd,
+                visualizations: None,
+            },
+            cells: Vec::new(),
+            view: TranscriptView::default(),
+            answer: None,
+            parked_tail: 0,
+        }
+    }
+
     pub(super) fn apply_notification(
         &mut self,
         notification: &ServerNotification,
@@ -129,6 +160,13 @@ impl SideCompanion {
                     self.flush_answer();
                     self.answer = None;
                 }
+                self.cells.extend(
+                    self.display
+                        .generated_images
+                        .take(&turn.id)
+                        .into_iter()
+                        .map(|image| Arc::new(image) as Arc<dyn HistoryCell>),
+                );
                 let work = self.display.work.take_if(|work| work.turn_id == turn.id);
                 if turn.status == TurnStatus::Completed
                     && (work.is_some() || store.active_turn_id() == Some(turn.id.as_str()))
@@ -193,6 +231,17 @@ impl SideCompanion {
                     );
                 }
                 self.display.last_completed_agent_message = Some((turn.to_owned(), id.clone()));
+            }
+            ThreadItemPayload::ImageGeneration(item)
+                if item.status == "completed" && item.saved_path.is_some() =>
+            {
+                let image = crate::history_cell::new_image_generation_call(
+                    item.id.clone(),
+                    &item.status,
+                    item.revised_prompt.clone(),
+                    item.saved_path.clone(),
+                );
+                self.display.generated_images.record(turn.to_owned(), image);
             }
             ThreadItemPayload::CommandExecution {
                 id,
@@ -281,3 +330,7 @@ impl SideCompanion {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "side_companion_tests.rs"]
+mod tests;

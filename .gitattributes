@@ -74,6 +74,7 @@ codex-rs/apply-patch/tests/fixtures/scenarios/023_preserves_crlf_line_endings/**
 # --- 5. Pre-existing linguist-generated markers (kept verbatim) ---
 codex-rs/app-server-protocol/schema/** linguist-generated
 codex-rs/hooks/schema/generated/** linguist-generated
+codex-rs/skills/src/assets/samples/create-statusline/references/statusline.d.ts linguist-generated
 
 # --- 6. sqlx migration sources: official platform family (ticket 35, D-004) ---
 # sqlx::migrate! embeds these .sql bytes and their SHA-384 checksums into the

@@ -406,6 +406,23 @@ impl AnalyticsEventsClient {
         }
     }
 
+    /// Give a resumed actor its own queue while preserving the caller's analytics setting.
+    pub fn for_auth_context(
+        &self,
+        auth_manager: Arc<AuthManager>,
+        base_url: String,
+        runtime_auth: Option<(RuntimeAuthSlot, RuntimeAuthMode)>,
+        api_key_headers: HeaderMap,
+    ) -> Self {
+        Self::new_with_runtime(
+            auth_manager,
+            base_url,
+            Some(self.queue.is_some()),
+            runtime_auth,
+            api_key_headers,
+        )
+    }
+
     pub fn disabled() -> Self {
         Self { queue: None }
     }
@@ -726,6 +743,16 @@ impl AnalyticsEventsClient {
         self.record_fact(AnalyticsFact::Custom(CustomAnalyticsFact::TurnCodexError(
             Box::new(fact),
         )));
+    }
+
+    /// Record the provenance of one user input after it is added to turn history.
+    pub fn track_accepted_user_input(&self, turn_id: &str, used_dictation: Option<bool>) {
+        self.record_fact(AnalyticsFact::Custom(
+            CustomAnalyticsFact::AcceptedUserInput {
+                turn_id: turn_id.to_owned(),
+                used_dictation,
+            },
+        ));
     }
 
     pub fn track_plugin_installed(&self, plugin: PluginTelemetryMetadata) {

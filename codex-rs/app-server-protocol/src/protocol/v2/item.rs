@@ -28,6 +28,8 @@ use codex_protocol::approvals::GuardianAssessmentDecisionSource as CoreGuardianA
 use codex_protocol::approvals::GuardianCommandSource as CoreGuardianCommandSource;
 use codex_protocol::items::AgentMessageContent as CoreAgentMessageContent;
 pub use codex_protocol::items::AgentMessageDelivery;
+pub use codex_protocol::items::AgentMessageDisplay;
+use codex_protocol::items::AgentMessageModeration as CoreAgentMessageModeration;
 pub use codex_protocol::items::AsyncUserInputQuestion;
 use codex_protocol::items::CollabAgentTool as CoreCollabAgentTool;
 use codex_protocol::items::CollabAgentToolCallStatus as CoreCollabAgentToolCallStatus;
@@ -147,6 +149,24 @@ pub enum CommandAction {
     Unknown {
         command: String,
     },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+#[serde(from = "CoreAgentMessageModeration")]
+pub struct AgentMessageModeration {
+    pub moderated: bool,
+    pub display: Option<AgentMessageDisplay>,
+}
+
+impl From<CoreAgentMessageModeration> for AgentMessageModeration {
+    fn from(value: CoreAgentMessageModeration) -> Self {
+        Self {
+            moderated: value.moderated,
+            display: value.display,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -313,6 +333,8 @@ pub enum ThreadItemPayload {
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
     AgentMessage {
+        #[serde(default)]
+        moderation: Option<AgentMessageModeration>,
         id: String,
         text: String,
         #[serde(default)]
@@ -400,6 +422,8 @@ pub enum ThreadItemPayload {
     McpToolCall {
         id: String,
         server: String,
+        /// Registration scope, not necessarily the server's execution environment.
+        environment_id: Option<String>,
         tool: String,
         status: McpToolCallStatus,
         arguments: JsonValue,
@@ -958,6 +982,7 @@ impl From<CoreTurnItem> for ThreadItemPayload {
                     })
                     .collect::<String>();
                 Self::AgentMessage {
+                    moderation: agent.moderation.map(Into::into),
                     id: agent.id,
                     text,
                     phase: agent.phase,
@@ -1106,6 +1131,7 @@ impl From<CoreTurnItem> for ThreadItemPayload {
                 Self::McpToolCall {
                     id: mcp.id,
                     server: mcp.server,
+                    environment_id: mcp.environment_id,
                     tool: mcp.tool,
                     status: McpToolCallStatus::from(mcp.status),
                     arguments: mcp.arguments,

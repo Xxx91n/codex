@@ -41,7 +41,6 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ENVIRONMENTS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::PLUGINS_INSTRUCTIONS_OPEN_TAG;
-use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol_test_support::ContentItemTestExt;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -204,6 +203,7 @@ fn delivered_assistant_context_invalidates_reviews_without_changing_authorizatio
     let before_delivery = history.conversation_history_snapshot();
     let authorization = before_delivery.user_message_revision();
     let event = RetainedContextEvent::DeliveredAssistantMessage {
+        retained_source: None,
         message: codex_history::RetainedUserMessage {
             origin: codex_history::UserInputOrigin::User,
             turn_id: "turn".to_owned(),
@@ -867,10 +867,8 @@ fn reference_context_item() -> TurnContextItem {
         .expect("absolute reference cwd"),
         approval_policy: AskForApproval::OnRequest,
         approvals_reviewer: None,
-        sandbox_policy: SandboxPolicy::new_read_only_policy(),
-        permission_profile: None,
+        permission_profile: codex_protocol::models::PermissionProfile::read_only(),
         active_permission_profile: None,
-        file_system_sandbox_policy: None,
         model: "gpt-test".to_string(),
         comp_hash: None,
         collaboration_mode: None,
@@ -1566,9 +1564,9 @@ async fn for_prompt_strips_media_when_model_does_not_support_it() {
                     },
                     detail: Some(DEFAULT_IMAGE_DETAIL),
                 },
-                FunctionCallOutputContentItem::InputAudio {
-                    audio_url: "data:audio/mpeg;base64,YXVkaW8=".to_string(),
-                },
+                FunctionCallOutputContentItem::inline_audio(
+                    "data:audio/mpeg;base64,YXVkaW8=".to_string(),
+                ),
             ]),
             internal_chat_message_metadata_passthrough: None,
         },
@@ -1596,9 +1594,9 @@ async fn for_prompt_strips_media_when_model_does_not_support_it() {
                     },
                     detail: Some(DEFAULT_IMAGE_DETAIL),
                 },
-                FunctionCallOutputContentItem::InputAudio {
-                    audio_url: "data:audio/ogg;base64,YXVkaW8=".to_string(),
-                },
+                FunctionCallOutputContentItem::inline_audio(
+                    "data:audio/ogg;base64,YXVkaW8=".to_string(),
+                ),
             ]),
             internal_chat_message_metadata_passthrough: None,
         },
@@ -2279,6 +2277,9 @@ async fn drop_last_n_user_turns_trims_context_updates_above_rolled_back_turn() {
         developer_msg(&format!(
             "{APPS_INSTRUCTIONS_OPEN_TAG}\nROLLED_BACK_APPS_INSTRUCTIONS"
         )),
+        developer_msg(
+            "<catalog_apps_instructions>Retired Apps guidance</catalog_apps_instructions>",
+        ),
         developer_msg(&format!(
             "{PLUGINS_INSTRUCTIONS_OPEN_TAG}\nROLLED_BACK_PLUGIN_INSTRUCTIONS"
         )),
@@ -3539,7 +3540,7 @@ fn audio_data_url_payload_does_not_dominate_function_call_output_estimate() {
         name: None,
         namespace: None,
         output: FunctionCallOutputPayload::from_content_items(vec![
-            FunctionCallOutputContentItem::InputAudio { audio_url },
+            FunctionCallOutputContentItem::inline_audio(audio_url),
         ]),
         internal_chat_message_metadata_passthrough: None,
     };
@@ -3560,7 +3561,7 @@ fn audio_data_url_payload_does_not_dominate_custom_tool_call_output_estimate() {
         call_id: "call-custom-audio".to_string(),
         name: None,
         output: FunctionCallOutputPayload::from_content_items(vec![
-            FunctionCallOutputContentItem::InputAudio { audio_url },
+            FunctionCallOutputContentItem::inline_audio(audio_url),
         ]),
         internal_chat_message_metadata_passthrough: None,
     };
@@ -3606,7 +3607,7 @@ fn record_items_omits_audio_that_exceeds_the_output_budget() {
         namespace: None,
         output: FunctionCallOutputPayload {
             body: FunctionCallOutputBody::ContentItems(vec![
-                FunctionCallOutputContentItem::InputAudio { audio_url },
+                FunctionCallOutputContentItem::inline_audio(audio_url),
             ]),
             success: Some(true),
         },

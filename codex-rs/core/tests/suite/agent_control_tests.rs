@@ -60,7 +60,9 @@ use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::user_input::UserInput;
 use codex_rollout_trace::ThreadTraceContext;
+use codex_thread_store::ForkBoundary;
 use codex_thread_store::LoadThreadHistoryParams;
+use codex_thread_store::PrepareForkParams;
 use core_test_support::ThreadIdle;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
@@ -258,7 +260,11 @@ impl AgentControl for TestAgentControl {
         None
     }
 
-    fn record_usage(&self, _usage: TokenUsage) -> BoxFuture<'_, CodexResult<()>> {
+    fn record_usage(
+        &self,
+        _usage: Option<TokenUsage>,
+        _hook_charge: codex_core::HookCharge,
+    ) -> BoxFuture<'_, CodexResult<()>> {
         Box::pin(async { Ok(()) })
     }
 
@@ -520,6 +526,7 @@ async fn host_factory_follows_thread_lifecycle() -> anyhow::Result<()> {
         .build_with_auto_env(&server)
         .await?;
     let root_id = test.session_configured.thread_id;
+    let root_tree_id = test.codex.agent_tree_id();
     let manager = &test.thread_manager;
     let options = || StartThreadOptions {
         environments: Some(vec![test.executor_environment().request()]),
@@ -538,6 +545,7 @@ async fn host_factory_follows_thread_lifecycle() -> anyhow::Result<()> {
         internal.session_configured.session_id,
         test.session_configured.session_id
     );
+    assert_eq!(internal.thread.agent_tree_id(), root_tree_id);
     test.codex.ensure_rollout_materialized().await;
     test.codex.flush_rollout().await?;
     let saved = test.codex.load_history(/*include_archived*/ false).await?;
@@ -554,6 +562,7 @@ async fn host_factory_follows_thread_lifecycle() -> anyhow::Result<()> {
         fork.session_configured.session_id,
         SessionId::from(fork.thread_id)
     );
+    assert_ne!(fork.thread.agent_tree_id(), root_tree_id);
     let warm = manager
         .start_thread(StartThreadOptions {
             initial_history: history.clone(),
@@ -561,6 +570,7 @@ async fn host_factory_follows_thread_lifecycle() -> anyhow::Result<()> {
         })
         .await?;
     assert!(Arc::ptr_eq(&warm.thread, &test.codex));
+    assert_eq!(warm.thread.agent_tree_id(), root_tree_id);
     assert_eq!(
         *calls.lock().expect("factory calls lock"),
         vec![root_id, fork.thread_id]
@@ -574,6 +584,7 @@ async fn host_factory_follows_thread_lifecycle() -> anyhow::Result<()> {
         })
         .await?;
     assert!(!Arc::ptr_eq(&cold.thread, &test.codex));
+    assert_ne!(cold.thread.agent_tree_id(), root_tree_id);
     assert_eq!(cold.thread_id, root_id);
     assert_eq!(
         *calls.lock().expect("factory calls lock"),
@@ -584,15 +595,25 @@ async fn host_factory_follows_thread_lifecycle() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[test_case(ThreadHistoryMode::Legacy; "legacy")]
-#[test_case(ThreadHistoryMode::Paginated; "paginated")]
+enum HostedChildHistory {
+    Fresh,
+    PreparedFork,
+}
+
+#[test_case(ThreadHistoryMode::Legacy, HostedChildHistory::Fresh; "fresh_legacy")]
+#[test_case(ThreadHistoryMode::Paginated, HostedChildHistory::Fresh; "fresh_paginated")]
+#[test_case(ThreadHistoryMode::Paginated, HostedChildHistory::PreparedFork; "prepared_fork")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fresh_hosted_child_persists_inherited_session_id(
+async fn hosted_child_persists_inherited_session_id(
     history_mode: ThreadHistoryMode,
+    child_history: HostedChildHistory,
 ) -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
     let server = responses::start_mock_server().await;
-    let root = test_codex().build_with_auto_env(&server).await?;
+    let root = test_codex()
+        .with_history_mode(history_mode)
+        .build_with_auto_env(&server)
+        .await?;
     let root_session_id = root.session_configured.session_id;
     let manager = &root.thread_manager;
     let options = || StartThreadOptions {
@@ -601,11 +622,39 @@ async fn fresh_hosted_child_persists_inherited_session_id(
         environments: Some(vec![root.executor_environment().request()]),
         ..StartThreadOptions::new(root.config.clone())
     };
+    let mut native_options = options();
+    native_options.session_source = Some(SessionSource::SubAgent(SubAgentSource::Review));
+    native_options
+        .thread_extension_init
+        .insert(InheritedSessionId(root_session_id));
+    let Err(error) = manager.start_thread(native_options).await else {
+        anyhow::bail!("native children must use their controller's session ID");
+    };
+    assert!(matches!(
+        error.details(),
+        CodexErrorDetails::InvalidRequest(_)
+    ));
     let mut child_options = options();
     child_options
         .thread_extension_init
         .insert(InheritedSessionId(root_session_id));
-    let child = manager.start_thread(child_options).await?;
+    let child = match child_history {
+        HostedChildHistory::Fresh => manager.start_thread(child_options).await?,
+        HostedChildHistory::PreparedFork => {
+            root.codex.ensure_rollout_materialized().await;
+            root.codex.flush_rollout().await?;
+            let prepared = root
+                .thread_store
+                .prepare_fork(PrepareForkParams {
+                    thread_id: root.session_configured.thread_id,
+                    boundary: ForkBoundary::Latest,
+                })
+                .await?;
+            manager
+                .fork_prepared_thread(child_options, prepared)
+                .await?
+        }
+    };
     assert_ne!(SessionId::from(child.thread_id), root_session_id);
     assert_eq!(
         (
@@ -631,14 +680,29 @@ async fn fresh_hosted_child_persists_inherited_session_id(
         (child.thread_id, root_session_id, history_mode)
     );
     child.thread.shutdown_and_wait().await?;
+    let resumed_history = InitialHistory::Resumed(ResumedHistory {
+        history_revision: history.revision,
+        conversation_id: child.thread_id,
+        history: Arc::new(history.items),
+        rollout_path: child.thread.rollout_path(),
+    });
+    let mut invalid_resume = StartThreadOptions {
+        initial_history: resumed_history.clone(),
+        ..options()
+    };
+    invalid_resume
+        .thread_extension_init
+        .insert(InheritedSessionId(root_session_id));
+    let Err(error) = manager.start_thread(invalid_resume).await else {
+        anyhow::bail!("resuming must use the persisted session ID");
+    };
+    assert!(matches!(
+        error.details(),
+        CodexErrorDetails::InvalidRequest(_)
+    ));
     let resumed = manager
         .start_thread(StartThreadOptions {
-            initial_history: InitialHistory::Resumed(ResumedHistory {
-                history_revision: history.revision,
-                conversation_id: child.thread_id,
-                history: Arc::new(history.items),
-                rollout_path: child.thread.rollout_path(),
-            }),
+            initial_history: resumed_history,
             ..options()
         })
         .await?;

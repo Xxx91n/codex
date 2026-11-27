@@ -10,7 +10,7 @@ pub(crate) struct TurnAborted {
 
 impl TurnAborted {
     pub(crate) const INTERRUPTED_GUIDANCE: &'static str = "The user interrupted the previous turn on purpose. Any running unified exec processes may still be running in the background. If any tools/commands were aborted, they may have partially executed.";
-    pub(crate) const INTERRUPTED_DEVELOPER_GUIDANCE: &'static str = "The previous turn was interrupted on purpose. Any running unified exec processes may still be running in the background. If any tools/commands were aborted, they may have partially executed.";
+    pub(crate) const INTERRUPTED_NEUTRAL_GUIDANCE: &'static str = "The previous turn was interrupted on purpose. Any running unified exec processes may still be running in the background. If any tools/commands were aborted, they may have partially executed.";
     /// Preemption of a Chat/Messages stream by a new user message (spec S-07).
     /// Role-neutral on purpose: nothing here may suggest the user cancelled the
     /// turn, and no tool may be described as partially executed.

@@ -66,6 +66,7 @@ pub enum RequestError {
         status: StatusCode,
         content_type: String,
         body: String,
+        identity_error_code: Option<String>,
     },
     Other(anyhow::Error),
 }
@@ -79,7 +80,13 @@ impl RequestError {
     }
 
     pub fn is_unauthorized(&self) -> bool {
-        self.status() == Some(StatusCode::UNAUTHORIZED)
+        matches!(self, Self::UnexpectedStatus { status, body, identity_error_code, .. }
+        if *status == StatusCode::UNAUTHORIZED
+            && !codex_protocol::error::is_runtime_auth_denial(
+            *status,
+            body,
+            identity_error_code.as_deref(),
+        ))
     }
 }
 
@@ -93,6 +100,7 @@ impl fmt::Display for RequestError {
                 status,
                 content_type,
                 body,
+                ..
             } => write!(
                 f,
                 "{method} {url} failed: {status}; content-type={content_type}; body={body}"
@@ -436,6 +444,11 @@ impl Client {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_string();
+        let identity_error_code =
+            codex_response_debug_context::extract_response_debug_context_from_headers(
+                res.headers(),
+            )
+            .auth_error_code;
         let body = res.text().await?;
         if !status.is_success() {
             return Err(RequestError::UnexpectedStatus {
@@ -444,6 +457,7 @@ impl Client {
                 status,
                 content_type,
                 body,
+                identity_error_code,
             });
         }
         Ok((body, content_type))
@@ -493,6 +507,42 @@ impl Client {
                 anyhow::bail!("Decode error for {url}: {e}; content-type={ct}; body={body}");
             }
         }
+    }
+
+    /// Submits a single clip as the dictation endpoint's multipart file field.
+    pub async fn transcribe_audio(&self, mime: &str, bytes: &[u8]) -> Result<String> {
+        let extension = match mime {
+            "audio/wav" => "wav",
+            "audio/mpeg" => "mp3",
+            "audio/mp4" => "m4a",
+            "audio/webm" => "webm",
+            "audio/ogg" => "ogg",
+            _ => anyhow::bail!("unsupported audio format"),
+        };
+        let url = format!("{}/transcribe", self.base_url);
+        self.auth.validate_destination(&self.base_url, &url)?;
+        let boundary = uuid::Uuid::new_v4();
+        let mut body = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.{extension}\"\r\nContent-Type: {mime}\r\n\r\n").into_bytes();
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let response = self
+            .request(Method::POST, &url)
+            .headers(self.headers().await?)
+            .header(
+                CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(body)
+            .send()
+            .await?;
+        anyhow::ensure!(response.status().is_success(), "transcription failed");
+        #[derive(serde::Deserialize)]
+        struct Transcript {
+            text: String,
+        }
+        const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+        let body = codex_http_client::bounded_response_bytes(response, MAX_RESPONSE_BYTES).await?;
+        Ok(serde_json::from_slice::<Transcript>(&body)?.text)
     }
 
     pub async fn get_rate_limits(&self) -> Result<RateLimitSnapshot> {

@@ -109,7 +109,11 @@ impl KeymapActionId {
                 self.action,
                 "focus_main_composer"
                     | "focus_sidebar_content"
+                    | "focus_sidebar_tabs"
                     | "hide_pane"
+                    | "close_sidebar_tab"
+                    | "sidebar_up"
+                    | "sidebar_down"
                     | "focus_pane_left"
                     | "focus_pane_right"
                     | "minimize_pane_width"
@@ -132,6 +136,14 @@ impl KeymapActionId {
             || other.is_side_pane() && matches!(self.context, List | KeymapContext::Pager)
         {
             return true;
+        }
+        let edit = |id: Self| {
+            id.context == KeymapContext::Composer && matches!(id.action, "undo" | "redo")
+        };
+        if edit(self) && other.context.allows_plain_chord_prefix()
+            || edit(other) && self.context.allows_plain_chord_prefix()
+        {
+            return false;
         }
         match (self.context, other.context) {
             // Presets cannot open while a list owns input.
@@ -309,6 +321,7 @@ macro_rules! define_runtime_action_bindings {
 define_runtime_action_bindings! {
     "global" => Global, app, global [
         change_host,
+        choose_cloud_environment,
         open_agents,
         open_transcript,
         find_transcript,
@@ -316,7 +329,11 @@ define_runtime_action_bindings! {
         focus_activity,
         focus_main_composer,
         focus_sidebar_content,
+        focus_sidebar_tabs,
         hide_pane,
+        close_sidebar_tab,
+        sidebar_up,
+        sidebar_down,
         focus_pane_left,
         focus_pane_right,
         minimize_pane_width,
@@ -354,6 +371,8 @@ define_runtime_action_bindings! {
         toggle_shortcuts,
         history_search_previous,
         history_search_next,
+        undo,
+        redo,
     ],
     "editor" => Editor, editor, editor [
         insert_newline,
@@ -458,6 +477,7 @@ define_runtime_action_bindings! {
         close,
         close_transcript,
         find,
+        mark_markdown,
     ],
     "list" => List, list, list [
         move_up,

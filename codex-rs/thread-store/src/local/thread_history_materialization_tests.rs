@@ -138,7 +138,7 @@ async fn split_homes_support_backfill_listing_and_paginated_history() {
             Vec::new(),
         )
         .with_history_mode(ThreadHistoryMode::Paginated)
-        .with_initial_window_id("window-1".to_string()),
+        .with_initial_window_id(codex_protocol::ContextWindowId::new_uuid_v7()),
     )
     .await
     .expect("create paginated rollout");
@@ -173,6 +173,7 @@ async fn split_homes_support_backfill_listing_and_paginated_history() {
 
     let threads = store
         .list_threads(ListThreadsParams {
+            included_thread_ids: None,
             page_size: 10,
             cursor: None,
             sort_key: ThreadSortKey::CreatedAt,
@@ -236,6 +237,7 @@ async fn split_homes_support_backfill_listing_and_paginated_history() {
                     thread_id,
                     "turn-1",
                     TurnItem::AgentMessage(AgentMessageItem {
+                        moderation: None,
                         id: "agent-1".to_string(),
                         content: vec![AgentMessageContent::Text {
                             text: "done".to_string(),
@@ -330,6 +332,7 @@ async fn paginated_live_append_materializes_turn_items_and_state() {
                     thread_id,
                     "turn-1",
                     TurnItem::AgentMessage(AgentMessageItem {
+                        moderation: None,
                         id: "agent-1".to_string(),
                         content: vec![AgentMessageContent::Text {
                             text: "done".to_string(),
@@ -524,6 +527,7 @@ async fn paginated_mcp_history_caps_large_results() {
     let tool_call = McpToolCallItem {
         id: "mcp-1".to_string(),
         server: "test".to_string(),
+        environment_id: None,
         tool: "large_result".to_string(),
         arguments: arguments.clone(),
         connector_id: None,
@@ -622,11 +626,13 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
                 RolloutItem::RealtimeItem(RealtimeItem {
                     id: "voice:started".to_string(),
                     realtime_session_id: "voice".to_string(),
+                    observed_at_ms: None,
                     content: RealtimeItemContent::RealtimeSessionStarted,
                 }),
                 RolloutItem::RealtimeItem(RealtimeItem {
                     id: "voice:transcript:0".to_string(),
                     realtime_session_id: "voice".to_string(),
+                    observed_at_ms: None,
                     content: RealtimeItemContent::TranscriptSegment {
                         role: RealtimeTranscriptRole::Assistant,
                         text: "Here is the result.".to_string(),
@@ -636,6 +642,7 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
                 RolloutItem::RealtimeItem(RealtimeItem {
                     id: "voice:promoted:agent-1".to_string(),
                     realtime_session_id: "voice".to_string(),
+                    observed_at_ms: None,
                     content: RealtimeItemContent::BemItemPromoted {
                         turn_id: "turn-1".to_string(),
                         item_id: "agent-1".to_string(),
@@ -646,6 +653,7 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
                     thread_id,
                     "turn-1",
                     TurnItem::AgentMessage(AgentMessageItem {
+                        moderation: None,
                         id: "agent-1".to_string(),
                         content: vec![AgentMessageContent::Text {
                             text: "Result".to_string(),
@@ -659,6 +667,7 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
                 RolloutItem::RealtimeItem(RealtimeItem {
                     id: "voice:closed".to_string(),
                     realtime_session_id: "voice".to_string(),
+                    observed_at_ms: None,
                     content: RealtimeItemContent::RealtimeSessionClosed {
                         outcome: RealtimeSessionOutcome::Ended,
                     },
@@ -772,7 +781,7 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
             history_mode: ThreadHistoryMode::Legacy,
             history_base: None,
             subagent_history_start_ordinal: None,
-            initial_window_id: "window-1".to_string(),
+            initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(home.path().to_path_buf()),
@@ -792,6 +801,7 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
             items: vec![RolloutItem::RealtimeItem(RealtimeItem {
                 id: "legacy:started".to_string(),
                 realtime_session_id: "legacy".to_string(),
+                observed_at_ms: None,
                 content: RealtimeItemContent::RealtimeSessionStarted,
             })],
         })
@@ -1482,6 +1492,7 @@ async fn subagent_prefix_advances_projection_without_materializing_history() {
                 RolloutItem::RealtimeItem(RealtimeItem {
                     id: "parent:started".to_string(),
                     realtime_session_id: "parent".to_string(),
+                    observed_at_ms: None,
                     content: RealtimeItemContent::RealtimeSessionStarted,
                 }),
                 turn_started("parent-turn"),
@@ -1499,6 +1510,7 @@ async fn subagent_prefix_advances_projection_without_materializing_history() {
                 RolloutItem::RealtimeItem(RealtimeItem {
                     id: "child:started".to_string(),
                     realtime_session_id: "child".to_string(),
+                    observed_at_ms: None,
                     content: RealtimeItemContent::RealtimeSessionStarted,
                 }),
                 completed_item(
@@ -1792,13 +1804,13 @@ async fn summary_items_use_final_answers_and_ignore_nonterminal_messages() {
     )
     .await
     .expect("state runtime");
-    let mut builder = codex_state::ThreadMetadataBuilder::new(
+    let builder = codex_state::ThreadMetadataBuilder::new(
         thread_id,
         home.path().join("missing-rollout.jsonl"),
         Utc::now(),
         SessionSource::Cli,
-    );
-    builder.history_mode = ThreadHistoryMode::Paginated;
+    )
+    .with_history_mode(ThreadHistoryMode::Paginated);
     runtime
         .upsert_thread(&builder.build(config.default_model_provider_id.as_str()))
         .await
@@ -2165,7 +2177,7 @@ SELECT
 }
 
 #[tokio::test]
-async fn synchronized_catch_up_does_not_replay_old_rows() {
+async fn flush_projects_only_the_durable_suffix() {
     let home = TempDir::new().expect("temp dir");
     let store = projection_store(home.path()).await;
     let thread_id = ThreadId::default();
@@ -2193,7 +2205,8 @@ async fn synchronized_catch_up_does_not_replay_old_rows() {
         .live_rollout_path(thread_id)
         .await
         .expect("rollout path");
-    super::materialize_to_sqlite(&store, thread_id, rollout_path.as_path())
+    store
+        .flush_thread(thread_id)
         .await
         .expect("catch up synchronized rollout");
 
@@ -2205,6 +2218,32 @@ async fn synchronized_catch_up_does_not_replay_old_rows() {
             .await
             .expect("read projected turn");
     assert_eq!(status, "sentinel");
+
+    // The writer can flush without new items while the projector is behind on disk.
+    for (ordinal, item, compress) in [
+        (2, user_message("suffix"), false),
+        (3, turn_completed("turn-1"), true),
+    ] {
+        append_suffix(
+            &rollout_path,
+            &format!("{}\n", rollout_line(Some(ordinal), item)),
+        );
+        let end = fs::metadata(&rollout_path).expect("metadata").len();
+        if compress {
+            compress_rollout(&rollout_path);
+        }
+        store
+            .flush_thread(thread_id)
+            .await
+            .expect("flush durable suffix");
+        assert_eq!(
+            projection_state(&pool, thread_id).await,
+            (
+                i64::try_from(end).unwrap(),
+                i64::try_from(ordinal + 1).unwrap()
+            )
+        );
+    }
 }
 
 /// Large records keep their byte positions and remain pending until their newline is durable.
@@ -3094,7 +3133,7 @@ async fn create_paginated_subagent_thread(
             history_mode: ThreadHistoryMode::Paginated,
             history_base,
             subagent_history_start_ordinal,
-            initial_window_id: "window-1".to_string(),
+            initial_window_id: codex_protocol::ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(std::env::current_dir().expect("cwd")),
@@ -3183,6 +3222,7 @@ fn completed_item(thread_id: ThreadId, turn_id: &str, item: TurnItem) -> Rollout
 
 fn agent_message(id: &str, phase: MessagePhase) -> TurnItem {
     TurnItem::AgentMessage(AgentMessageItem {
+        moderation: None,
         id: id.to_string(),
         content: vec![AgentMessageContent::Text {
             text: id.to_string(),

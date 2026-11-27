@@ -11,15 +11,28 @@ use serde::Deserialize;
 use serde::Serialize;
 use thiserror::Error;
 
+mod bindings;
+mod environment;
+pub use bindings::ModelIdKey;
+pub use bindings::ModelIdKind;
+pub use bindings::ModelIdMap;
+pub use environment::ModelEnvironmentId;
+pub use environment::RegisteredEnvironmentId;
+
 const VERSION: u32 = 1;
 // Our tokenizers encode every decimal ID of up to three digits as a single token.
 const GROUP_SIZE: u64 = 1_000;
 
-/// Stores the salt and numeric value separately. Display pads the value to groups of three digits.
+/// Stores the generator salt, allocation ordinal and shuffled value.
+/// Display pads the value to groups of three digits.
 /// With salt `environment`, zero renders as `environment000` and 1000 as `environment001000`.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 pub struct ModelFacingId {
     salt: Cow<'static, str>,
+    /// Zero-based position in the generator sequence.
+    ordinal: u64,
     value: u64,
 }
 
@@ -30,17 +43,24 @@ impl fmt::Display for ModelFacingId {
 }
 
 impl ModelFacingId {
+    /// Identifies the generator sequence and prefixes the displayed number.
+    pub fn salt(&self) -> &str {
+        &self.salt
+    }
+
+    /// Position in the allocation sequence before shuffling.
+    pub fn ordinal(&self) -> u64 {
+        self.ordinal
+    }
+
     /// Formats the padded digits for protocols that supply their own type prefix.
     pub fn digits(&self) -> impl fmt::Display + '_ {
-        fmt::from_fn(|f| {
-            write!(
-                f,
-                "{:0width$}",
-                self.value,
-                width = decimal_width(self.value)
-            )
-        })
+        padded_digits(self.value)
     }
+}
+
+fn padded_digits(value: u64) -> impl fmt::Display {
+    fmt::from_fn(move |f| write!(f, "{value:0width$}", width = decimal_width(value)))
 }
 
 fn decimal_width(value: u64) -> usize {
@@ -62,6 +82,11 @@ impl ModelFacingIdGenerator {
     ///
     /// Panics if the salt is empty.
     pub fn new(seed: u64, salt: &'static str) -> Self {
+        Self::starting_at(seed, salt, /*next_ordinal*/ 0)
+    }
+
+    /// Continues a sequence at the given ordinal using its original seed and salt.
+    pub fn starting_at(seed: u64, salt: &'static str, next_ordinal: u64) -> Self {
         assert!(!salt.is_empty(), "a model ID salt must be nonempty");
         let mut hasher = blake3::Hasher::new();
         hasher.update(&seed.to_le_bytes());
@@ -70,12 +95,7 @@ impl ModelFacingIdGenerator {
         hasher.finalize_xof().fill(&mut seed_bytes);
         let derived_seed = u64::from_le_bytes(seed_bytes);
         Self {
-            state: ModelFacingIdGeneratorState::new(
-                VERSION,
-                derived_seed,
-                salt,
-                /*next_ordinal*/ 0,
-            ),
+            state: ModelFacingIdGeneratorState::new(VERSION, derived_seed, salt, next_ordinal),
         }
     }
 
@@ -101,8 +121,14 @@ impl ModelFacingIdGenerator {
         self.state.next_ordinal = next;
         ModelFacingId {
             salt: self.state.salt.clone(),
+            ordinal,
             value: id,
         }
+    }
+
+    /// Position that the next allocation will use.
+    pub fn next_ordinal(&self) -> u64 {
+        self.state.next_ordinal
     }
 
     /// Captures the position of the next allocation.
@@ -132,6 +158,13 @@ pub struct ModelFacingIdGeneratorState {
 }
 
 impl ModelFacingIdGeneratorState {
+    /// Recovers the ID at a stored binding's ordinal in this version of the sequence.
+    pub fn id_at(&self, ordinal: u64) -> Result<ModelFacingId, RestoreError> {
+        let mut state = self.clone();
+        state.next_ordinal = ordinal;
+        Ok(ModelFacingIdGenerator::restore(state)?.fetch_next())
+    }
+
     /// Returns the namespace this snapshot belongs to.
     pub fn salt(&self) -> &str {
         &self.salt

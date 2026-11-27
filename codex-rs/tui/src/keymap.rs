@@ -61,7 +61,8 @@ pub(crate) use bindings::configured_binding_for_action;
 pub(crate) use bindings::keymap_action_id;
 pub(crate) use bindings::keymap_action_ids;
 use bindings::runtime_action_bindings;
-pub(crate) use chords::KEY_CHORD_TIMEOUT;
+#[cfg(test)]
+pub(crate) use chords::CHORD_REVEAL_DELAY;
 pub(crate) use chords::KeyChordMatch;
 pub(crate) use chords::KeyChordMatcher;
 pub(crate) use chords::KeymapContextSet;
@@ -104,9 +105,14 @@ pub(crate) struct RuntimeKeymap {
 pub(crate) struct AppKeymap {
     /// Change where a new conversation runs.
     pub(crate) change_host: Vec<KeyBinding>,
+    pub(crate) choose_cloud_environment: Vec<KeyBinding>,
     pub(crate) focus_main_composer: Vec<KeyBinding>,
     pub(crate) focus_sidebar_content: Vec<KeyBinding>,
+    pub(crate) focus_sidebar_tabs: Vec<KeyBinding>,
     pub(crate) hide_pane: Vec<KeyBinding>,
+    pub(crate) close_sidebar_tab: Vec<KeyBinding>,
+    pub(crate) sidebar_up: Vec<KeyBinding>,
+    pub(crate) sidebar_down: Vec<KeyBinding>,
     pub(crate) focus_pane_left: Vec<KeyBinding>,
     pub(crate) focus_pane_right: Vec<KeyBinding>,
     pub(crate) minimize_pane_width: Vec<KeyBinding>,
@@ -202,6 +208,8 @@ pub(crate) struct ComposerKeymap {
     pub(crate) history_search_previous: Vec<KeyBinding>,
     /// Move to the next match in reverse history search.
     pub(crate) history_search_next: Vec<KeyBinding>,
+    pub(crate) undo: Vec<KeyBinding>,
+    pub(crate) redo: Vec<KeyBinding>,
 }
 
 /// Editor-specific keybindings used by the composer textarea.
@@ -335,6 +343,7 @@ pub(crate) struct PagerKeymap {
     pub(crate) close: Vec<KeyBinding>,
     pub(crate) close_transcript: Vec<KeyBinding>,
     pub(crate) find: Vec<KeyBinding>,
+    pub(crate) mark_markdown: Vec<KeyBinding>,
     chord_hints: Arc<RuntimeChordKeymap>,
 }
 
@@ -707,7 +716,11 @@ impl RuntimeKeymap {
             classic_keymap = keymap.clone();
             classic_keymap.global.focus_main_composer = None;
             classic_keymap.global.focus_sidebar_content = None;
+            classic_keymap.global.focus_sidebar_tabs = None;
             classic_keymap.global.hide_pane = None;
+            classic_keymap.global.close_sidebar_tab = None;
+            classic_keymap.global.sidebar_up = None;
+            classic_keymap.global.sidebar_down = None;
             classic_keymap.global.focus_pane_left = None;
             classic_keymap.global.focus_pane_right = None;
             &classic_keymap
@@ -763,6 +776,11 @@ impl RuntimeKeymap {
                 &defaults.app.change_host,
                 "tui.keymap.global.change_host",
             )?,
+            choose_cloud_environment: resolve_bindings(
+                keymap.global.choose_cloud_environment.as_ref(),
+                &defaults.app.choose_cloud_environment,
+                "tui.keymap.global.choose_cloud_environment",
+            )?,
             focus_main_composer: resolve_bindings(
                 keymap.global.focus_main_composer.as_ref(),
                 &[],
@@ -773,10 +791,30 @@ impl RuntimeKeymap {
                 &[],
                 "tui.keymap.global.focus_sidebar_content",
             )?,
+            focus_sidebar_tabs: resolve_bindings(
+                keymap.global.focus_sidebar_tabs.as_ref(),
+                &[],
+                "tui.keymap.global.focus_sidebar_tabs",
+            )?,
             hide_pane: resolve_bindings(
                 keymap.global.hide_pane.as_ref(),
                 &[],
                 "tui.keymap.global.hide_pane",
+            )?,
+            close_sidebar_tab: resolve_bindings(
+                keymap.global.close_sidebar_tab.as_ref(),
+                &[],
+                "tui.keymap.global.close_sidebar_tab",
+            )?,
+            sidebar_up: resolve_bindings(
+                keymap.global.sidebar_up.as_ref(),
+                &[],
+                "tui.keymap.global.sidebar_up",
+            )?,
+            sidebar_down: resolve_bindings(
+                keymap.global.sidebar_down.as_ref(),
+                &[],
+                "tui.keymap.global.sidebar_down",
             )?,
             focus_pane_left: resolve_bindings(
                 keymap.global.focus_pane_left.as_ref(),
@@ -962,6 +1000,8 @@ impl RuntimeKeymap {
                 history_search_previous
             ),
             history_search_next: resolve_local!(keymap, defaults, composer, history_search_next),
+            undo: resolve_local!(keymap, defaults, composer, undo),
+            redo: resolve_local!(keymap, defaults, composer, redo),
         };
 
         let editor = Arc::new(EditorKeymap {
@@ -1494,6 +1534,7 @@ impl RuntimeKeymap {
             close: resolve_local!(keymap, defaults, pager, close),
             close_transcript: resolve_local!(keymap, defaults, pager, close_transcript),
             find: resolve_local!(keymap, defaults, pager, find),
+            mark_markdown: resolve_local!(keymap, defaults, pager, mark_markdown),
             chord_hints: Arc::clone(&chords),
         };
 
@@ -1736,9 +1777,13 @@ impl RuntimeKeymap {
             approval,
         };
 
+        let vim_undo = KeymapActionId {
+            context: KeymapContext::VimNormal,
+            action: "undo",
+        };
         let configured: Vec<_> = runtime_action_bindings(&resolved)
             .filter(|action| {
-                action.id.context.overlaps(KeymapContext::VimNormal)
+                action.id.overlaps(vim_undo)
                     && bindings::configured_binding_for_action(keymap, action.id)
                         .is_some_and(Option::is_some)
             })
@@ -1764,8 +1809,36 @@ impl RuntimeKeymap {
                     let event = KeyEvent::new(code, modifiers);
                     !configured.is_pressed(event)
                         && !resolved.chords.bindings.iter().any(|chord| {
-                            chord.action.context.overlaps(KeymapContext::VimNormal)
-                                && chord.chord.prefix.is_press(event)
+                            chord.action.overlaps(vim_undo) && chord.chord.prefix.is_press(event)
+                        })
+                });
+            }
+        }
+        let undo_action = KeymapActionId {
+            context: KeymapContext::Composer,
+            action: "undo",
+        };
+        let configured: Vec<_> = runtime_action_bindings(&resolved)
+            .filter(|action| {
+                action.id.overlaps(undo_action)
+                    && bindings::configured_binding_for_action(keymap, action.id)
+                        .is_some_and(Option::is_some)
+            })
+            .flat_map(|action| action.bindings.iter().copied())
+            .collect();
+        for (setting, bindings) in [
+            (keymap.composer.undo.as_ref(), &mut resolved.composer.undo),
+            (keymap.composer.redo.as_ref(), &mut resolved.composer.redo),
+        ] {
+            if setting.is_none() {
+                bindings.retain(|binding| {
+                    let (code, modifiers) = binding.parts();
+                    let event = KeyEvent::new(code, modifiers);
+                    !configured.is_pressed(event)
+                        && !(keymap.global.leader.is_some()
+                            && resolved.chords.leader.is_pressed(event))
+                        && !resolved.chords.bindings.iter().any(|chord| {
+                            chord.action.overlaps(undo_action) && chord.chord.prefix.is_press(event)
                         })
                 });
             }
@@ -1795,12 +1868,34 @@ impl RuntimeKeymap {
     /// both `?` and `shift-?`) because terminals disagree on whether SHIFT is
     /// preserved for certain printable/control chords.
     fn built_in_defaults() -> Self {
+        let undo_modifier = if cfg!(windows) {
+            KeyModifiers::CONTROL
+        } else {
+            KeyModifiers::ALT
+        };
+        let mut undo = vec![KeyBinding::new(KeyCode::Char('z'), undo_modifier)];
+        if cfg!(target_os = "macos") {
+            undo.push(KeyBinding::new(KeyCode::Char('z'), KeyModifiers::SUPER));
+        }
+        undo.push(key_hint::plain(KeyCode::F(7)));
+        let redo = undo
+            .iter()
+            .map(|binding| {
+                let (code, modifiers) = binding.parts();
+                KeyBinding::new(code, modifiers | KeyModifiers::SHIFT)
+            })
+            .collect();
         Self {
             app: AppKeymap {
                 change_host: Vec::new(),
+                choose_cloud_environment: Vec::new(),
                 focus_main_composer: Vec::new(),
                 focus_sidebar_content: Vec::new(),
+                focus_sidebar_tabs: Vec::new(),
                 hide_pane: Vec::new(),
+                close_sidebar_tab: Vec::new(),
+                sidebar_up: Vec::new(),
+                sidebar_down: Vec::new(),
                 focus_pane_left: Vec::new(),
                 focus_pane_right: Vec::new(),
                 minimize_pane_width: Vec::new(),
@@ -1854,6 +1949,8 @@ impl RuntimeKeymap {
                 ],
                 history_search_previous: default_bindings![ctrl(KeyCode::Char('r'))],
                 history_search_next: default_bindings![ctrl(KeyCode::Char('s'))],
+                undo,
+                redo,
             },
             editor: Arc::new(EditorKeymap {
                 insert_newline: default_bindings![
@@ -2065,6 +2162,7 @@ impl RuntimeKeymap {
                 close: default_bindings![plain(KeyCode::Char('q')), ctrl(KeyCode::Char('c'))],
                 close_transcript: default_bindings![ctrl(KeyCode::Char('t'))],
                 find: default_bindings![plain(KeyCode::F(3)), plain(KeyCode::Char('/'))],
+                mark_markdown: Vec::new(),
                 chord_hints: Arc::default(),
             },
             list: ListKeymap {
@@ -2137,8 +2235,14 @@ impl RuntimeKeymap {
     fn validate_conflicts(&self) -> Result<(), String> {
         for (action, bindings) in [
             ("global.change_host", &self.app.change_host),
+            (
+                "global.choose_cloud_environment",
+                &self.app.choose_cloud_environment,
+            ),
             ("chat.open_presets", &self.chat.open_presets),
             ("chat.toggle_voice", &self.chat.toggle_voice),
+            ("composer.undo", &self.composer.undo),
+            ("composer.redo", &self.composer.redo),
             (
                 "chat.previous_permission_mode",
                 &self.chat.previous_permission_mode,
@@ -2164,12 +2268,17 @@ impl RuntimeKeymap {
         #[cfg(unix)]
         for (action, bindings) in [
             ("global.change_host", &self.app.change_host),
+            (
+                "global.choose_cloud_environment",
+                &self.app.choose_cloud_environment,
+            ),
             ("global.open_agents", &self.app.open_agents),
             ("global.focus_main_composer", &self.app.focus_main_composer),
             (
                 "global.focus_sidebar_content",
                 &self.app.focus_sidebar_content,
             ),
+            ("global.focus_sidebar_tabs", &self.app.focus_sidebar_tabs),
             ("global.focus_pane_left", &self.app.focus_pane_left),
             ("global.focus_pane_right", &self.app.focus_pane_right),
             ("global.minimize_pane_width", minimize),
@@ -2180,8 +2289,13 @@ impl RuntimeKeymap {
             ("global.move_divider_right", &self.app.move_divider_right),
             ("global.toggle_pane_zoom", &self.app.toggle_pane_zoom),
             ("global.hide_pane", &self.app.hide_pane),
+            ("global.close_sidebar_tab", &self.app.close_sidebar_tab),
+            ("global.sidebar_up", &self.app.sidebar_up),
+            ("global.sidebar_down", &self.app.sidebar_down),
             ("chat.open_presets", &self.chat.open_presets),
             ("chat.toggle_voice", &self.chat.toggle_voice),
+            ("composer.undo", &self.composer.undo),
+            ("composer.redo", &self.composer.redo),
         ] {
             if bindings.contains(&key_hint::ctrl(KeyCode::Char('z'))) {
                 return Err(format!(
@@ -2212,6 +2326,10 @@ impl RuntimeKeymap {
         let main_bindings = [
             ("change_host", self.app.change_host.as_slice()),
             (
+                "choose_cloud_environment",
+                self.app.choose_cloud_environment.as_slice(),
+            ),
+            (
                 "focus_main_composer",
                 self.app.focus_main_composer.as_slice(),
             ),
@@ -2219,6 +2337,7 @@ impl RuntimeKeymap {
                 "focus_sidebar_content",
                 self.app.focus_sidebar_content.as_slice(),
             ),
+            ("focus_sidebar_tabs", self.app.focus_sidebar_tabs.as_slice()),
             ("focus_pane_left", self.app.focus_pane_left.as_slice()),
             ("focus_pane_right", self.app.focus_pane_right.as_slice()),
             ("minimize_pane_width", minimize),
@@ -2229,6 +2348,9 @@ impl RuntimeKeymap {
             ("move_divider_right", divider_right),
             ("toggle_pane_zoom", self.app.toggle_pane_zoom.as_slice()),
             ("hide_pane", self.app.hide_pane.as_slice()),
+            ("close_sidebar_tab", self.app.close_sidebar_tab.as_slice()),
+            ("sidebar_up", self.app.sidebar_up.as_slice()),
+            ("sidebar_down", self.app.sidebar_down.as_slice()),
             ("open_agents", self.app.open_agents.as_slice()),
             ("open_transcript", self.app.open_transcript.as_slice()),
             ("find_transcript", self.app.find_transcript.as_slice()),
@@ -2291,6 +2413,8 @@ impl RuntimeKeymap {
                 "composer.history_search_next",
                 self.composer.history_search_next.as_slice(),
             ),
+            ("composer.undo", self.composer.undo.as_slice()),
+            ("composer.redo", self.composer.redo.as_slice()),
         ];
         validate_unique("app", main_bindings)?;
 
@@ -2405,6 +2529,7 @@ impl RuntimeKeymap {
                     "focus_sidebar_content",
                     self.app.focus_sidebar_content.as_slice(),
                 ),
+                ("focus_sidebar_tabs", self.app.focus_sidebar_tabs.as_slice()),
                 ("focus_pane_left", self.app.focus_pane_left.as_slice()),
                 ("focus_pane_right", self.app.focus_pane_right.as_slice()),
                 ("minimize_pane_width", minimize),
@@ -2415,6 +2540,9 @@ impl RuntimeKeymap {
                 ("move_divider_right", divider_right),
                 ("toggle_pane_zoom", self.app.toggle_pane_zoom.as_slice()),
                 ("hide_pane", self.app.hide_pane.as_slice()),
+                ("close_sidebar_tab", self.app.close_sidebar_tab.as_slice()),
+                ("sidebar_up", self.app.sidebar_up.as_slice()),
+                ("sidebar_down", self.app.sidebar_down.as_slice()),
                 ("open_agents", self.app.open_agents.as_slice()),
                 ("open_transcript", self.app.open_transcript.as_slice()),
                 ("find_transcript", self.app.find_transcript.as_slice()),
@@ -2456,6 +2584,8 @@ impl RuntimeKeymap {
                 ),
                 ("chat.skip_question", self.chat.skip_question.as_slice()),
                 ("composer.submit", self.composer.submit.as_slice()),
+                ("composer.undo", self.composer.undo.as_slice()),
+                ("composer.redo", self.composer.redo.as_slice()),
                 ("toggle_vim_mode", self.app.toggle_vim_mode.as_slice()),
                 ("toggle_fast_mode", self.app.toggle_fast_mode.as_slice()),
                 ("toggle_raw_output", self.app.toggle_raw_output.as_slice()),
@@ -2549,6 +2679,10 @@ impl RuntimeKeymap {
                     self.app.focus_sidebar_content.as_slice(),
                 ),
                 (
+                    "global.focus_sidebar_tabs",
+                    self.app.focus_sidebar_tabs.as_slice(),
+                ),
+                (
                     "global.focus_pane_left",
                     self.app.focus_pane_left.as_slice(),
                 ),
@@ -2568,6 +2702,12 @@ impl RuntimeKeymap {
                 ),
                 ("global.hide_pane", self.app.hide_pane.as_slice()),
                 (
+                    "global.close_sidebar_tab",
+                    self.app.close_sidebar_tab.as_slice(),
+                ),
+                ("global.sidebar_up", self.app.sidebar_up.as_slice()),
+                ("global.sidebar_down", self.app.sidebar_down.as_slice()),
+                (
                     "global.select_transcript",
                     self.app.select_transcript.as_slice(),
                 ),
@@ -2585,6 +2725,7 @@ impl RuntimeKeymap {
                     self.pager.close_transcript.as_slice(),
                 ),
                 ("pager.find", self.pager.find.as_slice()),
+                ("pager.mark_markdown", self.pager.mark_markdown.as_slice()),
             ],
         )?;
 
@@ -2608,6 +2749,10 @@ impl RuntimeKeymap {
                     self.app.focus_sidebar_content.as_slice(),
                 ),
                 (
+                    "global.focus_sidebar_tabs",
+                    self.app.focus_sidebar_tabs.as_slice(),
+                ),
+                (
                     "global.focus_pane_left",
                     self.app.focus_pane_left.as_slice(),
                 ),
@@ -2626,6 +2771,12 @@ impl RuntimeKeymap {
                     self.app.toggle_pane_zoom.as_slice(),
                 ),
                 ("global.hide_pane", self.app.hide_pane.as_slice()),
+                (
+                    "global.close_sidebar_tab",
+                    self.app.close_sidebar_tab.as_slice(),
+                ),
+                ("global.sidebar_up", self.app.sidebar_up.as_slice()),
+                ("global.sidebar_down", self.app.sidebar_down.as_slice()),
                 ("global.focus_activity", self.app.focus_activity.as_slice()),
                 (
                     "global.find_transcript",
@@ -4183,18 +4334,16 @@ mod tests {
 
     #[test]
     fn pane_binding_only_shadows_side_toggle_in_workspace_sessions() {
-        let keymap = toml::from_str("[global]\nfocus_pane_right = 'ctrl-/'").unwrap();
-        let classic = RuntimeKeymap::for_session(&keymap, /*workspace*/ false).unwrap();
-        assert_eq!(
-            classic.app.toggle_side_conversation,
-            RuntimeKeymap::defaults().app.toggle_side_conversation
-        );
-        let workspace = RuntimeKeymap::for_session(&keymap, /*workspace*/ true).unwrap();
-        assert!(workspace.app.toggle_side_conversation.is_empty());
-        assert_eq!(
-            workspace.app.focus_pane_right,
-            vec![key_hint::ctrl(KeyCode::Char('/'))]
-        );
+        for action in ["focus_pane_right", "focus_sidebar_tabs"] {
+            let keymap = toml::from_str(&format!("[global]\n{action} = 'ctrl-/'")).unwrap();
+            let classic = RuntimeKeymap::for_session(&keymap, /*workspace*/ false).unwrap();
+            assert_eq!(
+                classic.app.toggle_side_conversation,
+                RuntimeKeymap::defaults().app.toggle_side_conversation
+            );
+            let workspace = RuntimeKeymap::for_session(&keymap, /*workspace*/ true).unwrap();
+            assert!(workspace.app.toggle_side_conversation.is_empty());
+        }
     }
 
     #[test]

@@ -138,6 +138,7 @@ mod tests {
                 sort_direction: SortDirection::Asc,
                 sort_key: ItemSortKey::CreatedAtOrdinal,
                 after_updated_at_ordinal: None,
+                before_updated_at_ordinal: None,
             })
             .await
             .expect_err("default list_items should be unsupported");
@@ -185,7 +186,7 @@ mod tests {
                     history_mode: ThreadHistoryMode::Legacy,
                     history_base: None,
                     subagent_history_start_ordinal: None,
-                    initial_window_id: ContextWindowId::new_uuid_v7().to_string(),
+                    initial_window_id: ContextWindowId::new_uuid_v7(),
                     runtime_workspace_roots: None,
                     metadata: ThreadPersistenceMetadata {
                         cwd: None,
@@ -209,6 +210,7 @@ mod tests {
         let page = ThreadStore::list_threads(
             &store,
             ListThreadsParams {
+                included_thread_ids: None,
                 page_size: 10,
                 cursor: None,
                 sort_key: ThreadSortKey::CreatedAt,
@@ -238,6 +240,7 @@ mod tests {
         let page = ThreadStore::list_threads(
             &store,
             ListThreadsParams {
+                included_thread_ids: None,
                 page_size: 10,
                 cursor: None,
                 sort_key: ThreadSortKey::CreatedAt,
@@ -267,6 +270,7 @@ mod tests {
         let page = ThreadStore::list_threads(
             &store,
             ListThreadsParams {
+                included_thread_ids: None,
                 page_size: 10,
                 cursor: None,
                 sort_key: ThreadSortKey::CreatedAt,
@@ -296,6 +300,7 @@ mod tests {
         let page = ThreadStore::list_threads(
             &store,
             ListThreadsParams {
+                included_thread_ids: None,
                 page_size: 10,
                 cursor: None,
                 sort_key: ThreadSortKey::CreatedAt,
@@ -462,7 +467,7 @@ mod tests {
             history_mode,
             history_base: None,
             subagent_history_start_ordinal: None,
-            initial_window_id: ContextWindowId::new_uuid_v7().to_string(),
+            initial_window_id: ContextWindowId::new_uuid_v7(),
             runtime_workspace_roots: None,
             metadata: thread_metadata(),
         }
@@ -524,6 +529,7 @@ pub struct InMemoryThreadStoreCalls {
 pub struct InMemoryThreadStore {
     state: Arc<tokio::sync::Mutex<InMemoryThreadStoreState>>,
     omit_metadata_update_result: Arc<AtomicBool>,
+    model_ids: Arc<codex_state::MemoryModelIdStore>,
     state_db: Option<codex_rollout::StateDbHandle>,
 }
 
@@ -557,6 +563,7 @@ impl InMemoryThreadStore {
         Self {
             state: Arc::clone(&self.state),
             omit_metadata_update_result: Arc::clone(&self.omit_metadata_update_result),
+            model_ids: Arc::clone(&self.model_ids),
             state_db,
         }
     }
@@ -664,16 +671,22 @@ impl InMemoryThreadStore {
         }
         let mut state = self.state.lock().await;
         let history_mode = history_mode_from_state(&state, params.thread_id);
-        let persisted_items = into_persisted_rollout_items(params.items, history_mode);
+        let mut persisted_items = into_persisted_rollout_items(params.items, history_mode);
         if persisted_items.is_empty() {
             return Ok(());
         }
         state.calls.append_items += 1;
-        state
-            .histories
-            .entry(params.thread_id)
-            .or_default()
-            .extend(persisted_items);
+        let history = state.histories.entry(params.thread_id).or_default();
+        if persisted_items
+            .iter()
+            .any(|item| matches!(item, RolloutItem::Compacted(_)))
+        {
+            codex_rollout::stamp_item_ordinals(
+                codex_rollout::next_model_id_ordinals(history).0,
+                &mut persisted_items,
+            );
+        }
+        history.extend(persisted_items);
         Ok(())
     }
 
@@ -899,6 +912,7 @@ impl InMemoryThreadStore {
             0
         };
         let mut state = self.state.lock().await;
+        self.model_ids.remove(params.thread_id.into());
         let existed = state.histories.remove(&params.thread_id).is_some();
         state.created_threads.remove(&params.thread_id);
         state.names.remove(&params.thread_id);
@@ -920,6 +934,10 @@ impl InMemoryThreadStore {
 }
 
 impl ThreadStore for InMemoryThreadStore {
+    fn model_ids(&self) -> Option<Arc<dyn codex_state::SessionModelIdStore>> {
+        Some(self.model_ids.clone())
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -1006,10 +1024,9 @@ impl ThreadStore for InMemoryThreadStore {
                     page.items
                         .retain(|thread| thread.parent_thread_id == Some(parent_thread_id));
                 }
-                Some(ThreadRelationFilter::AttachedThreadsOf(_)) => {
-                    return Err(ThreadStoreError::Unsupported {
-                        operation: "attached threads",
-                    });
+                Some(ThreadRelationFilter::AttachedThreadsOf(parent)) => {
+                    page.items
+                        .retain(|thread| thread.attached_to_thread_id == Some(parent));
                 }
                 Some(ThreadRelationFilter::DescendantsOf(ancestor_thread_id)) => {
                     let mut subtree = HashSet::from([ancestor_thread_id]);
@@ -1032,12 +1049,18 @@ impl ThreadStore for InMemoryThreadStore {
                             && subtree.contains(&thread.thread_id)
                     });
                 }
-                None => {}
+                Some(ThreadRelationFilter::IncludeAttached) => {}
+                None => page
+                    .items
+                    .retain(|thread| thread.attached_to_thread_id.is_none()),
             }
             if let Some(section) = params.section.as_ref() {
                 page.items.retain(|thread| {
                     thread.section.as_ref().map(|section| section.id.as_str()) == section.as_deref()
                 });
+            }
+            if let Some(ids) = &params.included_thread_ids {
+                page.items.retain(|thread| ids.contains(&thread.thread_id));
             }
             if params.sort_key == ThreadSortKey::SectionPosition {
                 page.items.sort_by_key(|thread| {
@@ -1131,6 +1154,7 @@ fn stored_thread_from_state(
             .and_then(|metadata| metadata.rollout_path.clone())
             .or(rollout_path),
         forked_from_id: created.forked_from_id,
+        attached_to_thread_id: created.forked_from_id.filter(|_| created.attached_thread),
         parent_thread_id: created.parent_thread_id,
         preview: metadata
             .and_then(|metadata| metadata.preview.clone())

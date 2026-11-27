@@ -3,7 +3,6 @@
 //! Requests outside every active action's lag allowance stop as superseded, not failed.
 //! Expiry also cancels metadata waits before transcript preparation, releasing reservations.
 
-use codex_protocol::openai_models::ModelOrigin;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -34,12 +33,12 @@ use codex_guardian_context::PreviousReviews;
 use codex_guardian_context::ReviewEvidence;
 use codex_guardian_context::render_review_evidence;
 use codex_history::RolloutItem;
-use codex_model_provider::create_model_provider;
 use codex_prompts::ResolvedModelMessages;
 use codex_protocol::models::ContentItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::security_risk::SecurityRiskScore;
 use codex_protocol::turn_input::CyberAccessProgram;
+use uuid::Uuid;
 
 use super::authorization::ScoreAuthorization;
 use super::config::GuardianV2Config;
@@ -82,9 +81,8 @@ pub(super) struct Classification {
     pub(super) call_id: String,
     pub(super) mcp_tool: Option<McpToolContext>,
     pub(super) planned_action: String,
-    pub(super) review_model_override: Option<String>,
     pub(super) sync_reviews: Vec<Arc<GuardianReviewEvidenceRecord>>,
-    pub(super) trusted_user_inputs: Vec<String>,
+    pub(super) trusted_user_inputs: Vec<codex_guardian_context::TrustedUserAnswer>,
     pub(super) authorization_version: GuardianAuthorizationVersion,
     pub(super) history: Arc<dyn ConversationHistorySnapshot>,
     pub(super) local_trusted_skill_paths: Vec<String>,
@@ -138,7 +136,6 @@ impl Classification {
             call_id,
             mcp_tool,
             planned_action,
-            review_model_override,
             sync_reviews,
             trusted_user_inputs,
             authorization_version,
@@ -149,6 +146,7 @@ impl Classification {
             score_authorization,
         } = self;
         let generation = reservation.generation.clone();
+        let active = Arc::clone(&reservation.active);
         let pending_score = PendingScore {
             progress: Arc::clone(&score_progress),
             index: tool_call_index,
@@ -204,7 +202,7 @@ impl Classification {
         let root_review_context_revision = root_snapshot
             .as_ref()
             .map(|snapshot| snapshot.review_context_revision);
-        let root_conversation = root_snapshot.map(|snapshot| snapshot.messages);
+
         let score_authorization = ScoreAuthorization {
             local: authorization_version,
             review_context_revision,
@@ -250,7 +248,13 @@ impl Classification {
                 let context_input = ContextInput {
                     target: ContextTarget::Async,
                     history: history.as_ref(),
-                    root_conversation: root_conversation.as_deref().unwrap_or_default(),
+                    root_conversation: root_snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.messages.as_slice())
+                        .unwrap_or_default(),
+                    root_conversation_candidates: root_snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.request_candidates.as_ref()),
                     trusted_user_answers: &trusted_user_inputs,
                     planned_action: Some(&action_section),
                     permissions: Some(&score_authorization.permissions),
@@ -264,7 +268,7 @@ impl Classification {
         let evidence = match transcript {
             Ok(transcript) => transcript,
             Err(error) => {
-                score_progress.fail_closed(sampled_at);
+                score_progress.fail_closed(sampled_at, tool_call_index);
                 record_classification(
                     metrics.as_deref(),
                     context_mode,
@@ -290,24 +294,12 @@ impl Classification {
         let mut failure_reason = "invalid_output";
         let mut classification_risk = None;
         let mut classification_finished_at = None;
+        let mut classifier_turn_id = None;
         let result: Result<ClassificationOutcome, String> = async {
-            let review_model = if config.guardian_policy_config.is_none() {
-                let review_model_id = review_model_override.as_deref().unwrap_or_else(|| {
-                    create_model_provider(
-                        config.model_provider.clone(),
-                        Some(manager.auth_manager()),
-                    )
-                    .approval_review_preferred_model()
-                });
-                let review_model = manager
-                    .get_models_manager()
-                    .get_model_info(review_model_id, &config.to_models_manager_config())
-                    .await;
-                if review_model.origin == ModelOrigin::Synthetic && review_model_override.is_none() {
-                    parent_model.clone()
-                } else {
-                    Some(review_model.model)
-                }
+            let review_model = if config.guardian_policy_config.is_none()
+                && let Some(parent_model) = parent_model.as_ref()
+            {
+                Some(codex_core::guardian_policy_model(&thread, &config, Arc::clone(parent_model)).await)
             } else {
                 None
             };
@@ -318,6 +310,8 @@ impl Classification {
             let policy = config.resolve_guardian_policy(model_messages);
             let extra_policy = config.guardian_extra_policy.as_deref().unwrap_or_default();
             let instructions = guardian_config.render_classifier_instructions(policy, extra_policy);
+            // Retries keep the classification's inference turn identity.
+            let request_turn_id = Uuid::now_v7();
             let sampling = LunaSamplingRequest {
                 item_id_generator: Arc::clone(thread.item_id_generator()),
                 cyber_access_program,
@@ -330,6 +324,7 @@ impl Classification {
                 parent_turn_id: turn_id.clone(),
                 root_turn_id,
                 pending_score: None,
+                turn_id: request_turn_id,
             };
             let (ready, score) = tokio::sync::oneshot::channel();
             let request = ConversationRequest {
@@ -345,6 +340,7 @@ impl Classification {
             };
             let mut sampling_started = None;
             if let Some(prepared) = reservation.prepare(request).await {
+                classifier_turn_id = Some(request_turn_id.to_string());
                 if let Some(decisions_sampler) = decisions_sampler.as_ref() {
                     decisions_task = Some(
                         decisions_sampler.start_conversation_comparison(&prepared.request.input),
@@ -404,6 +400,7 @@ impl Classification {
                 sampled_at: Some(sampled_at.into()),
             };
             if !score_authorization.is_current(&thread).await
+                || !active.load(std::sync::atomic::Ordering::Acquire)
                 || generation.strong_count() == 0
             {
                 return Ok(ClassificationOutcome::Superseded);
@@ -444,7 +441,7 @@ impl Classification {
         }
         .await;
         if result.is_err() {
-            score_progress.fail_closed(sampled_at);
+            score_progress.fail_closed(sampled_at, tool_call_index);
         }
         let duration = classification_finished_at
             .map(|finished_at: Instant| finished_at.duration_since(classification_started_at))
@@ -473,6 +470,7 @@ impl Classification {
                     outcome,
                     risk_level: classification_risk,
                     duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
+                    classifier_turn_id,
                 },
             });
         }
